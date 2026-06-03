@@ -2,7 +2,7 @@
 
 ## Phase 1: Project Foundation
 
-- [ ] Task: Initialize Go module and directory structure
+- [x] Task: Initialize Go module and directory structure [71e1084]
     - [ ] Create `go.mod` with module path `github.com/aseem/viewport-rds`
     - [ ] Create directories: `cmd/server/`, `internal/capture/`, `internal/encode/`, `internal/server/`, `internal/protocol/`, `client/`
     - [ ] Create Makefile (build, test, lint, fmt, clean targets)
