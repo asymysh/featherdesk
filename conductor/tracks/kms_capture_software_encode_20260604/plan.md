@@ -42,7 +42,7 @@
     - [ ] Get CRTC dimensions and refresh rate
     - [ ] Export DMA-BUF fd via drmPrimeHandleToFD
     - [ ] Implement proper cleanup (close fds, free resources)
-- [ ] Task: Implement EGL context and DMA-BUF import (cgo)
+- [x] Task: Implement EGL context and DMA-BUF import (cgo) [bf62022]
     - [ ] Create GBM device from card fd
     - [ ] Initialize EGL display (EGL_PLATFORM_GBM_KHR)
     - [ ] Create surfaceless EGL context
