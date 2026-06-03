@@ -14,6 +14,7 @@ import (
 
 	"github.com/aseem/viewport-rds/internal/capture"
 	"github.com/aseem/viewport-rds/internal/encode"
+	"github.com/aseem/viewport-rds/internal/input"
 	"github.com/aseem/viewport-rds/internal/logger"
 	"github.com/aseem/viewport-rds/internal/server"
 )
@@ -110,6 +111,22 @@ func main() {
 		Log:      log,
 		ClientFS: clientContent,
 	})
+
+	// Input injection (best-effort: non-fatal if uinput unavailable)
+	inputDev, inputErr := input.NewDevice(2560, 1440)
+	if inputErr != nil {
+		log.Info("main", "input: "+inputErr.Error()+" (input disabled)")
+	} else {
+		defer inputDev.Close()
+		srv.SetInputCallback(func(data []byte) {
+			msg, err := input.ParseMessage(data)
+			if err != nil {
+				return
+			}
+			inputDev.HandleMessage(msg)
+		})
+		log.Info("main", "input: uinput device created")
+	}
 
 	var converter *encode.Converter
 	var enc encode.Encoder

@@ -151,4 +151,65 @@ function updateStatus() {
     }
 }
 
+function sendInput(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+    }
+}
+
+function initInput() {
+    document.addEventListener("keydown", function(e) {
+        if (!connected) return;
+        e.preventDefault();
+        sendInput({type: "key", event: "down", code: e.code});
+    });
+
+    document.addEventListener("keyup", function(e) {
+        if (!connected) return;
+        e.preventDefault();
+        sendInput({type: "key", event: "up", code: e.code});
+    });
+
+    canvas.addEventListener("pointermove", function(e) {
+        if (!connected) return;
+        var rect = canvas.getBoundingClientRect();
+        var x = Math.round((e.clientX - rect.left) / rect.width * canvas.width);
+        var y = Math.round((e.clientY - rect.top) / rect.height * canvas.height);
+        sendInput({type: "mousemove", x: x, y: y});
+    });
+
+    canvas.addEventListener("pointerdown", function(e) {
+        if (!connected) return;
+        e.preventDefault();
+        canvas.setPointerCapture(e.pointerId);
+        sendInput({type: "mousedown", button: e.button});
+    });
+
+    canvas.addEventListener("pointerup", function(e) {
+        if (!connected) return;
+        e.preventDefault();
+        canvas.releasePointerCapture(e.pointerId);
+        sendInput({type: "mouseup", button: e.button});
+    });
+
+    canvas.addEventListener("wheel", function(e) {
+        if (!connected) return;
+        e.preventDefault();
+        sendInput({type: "wheel", deltaY: e.deltaY});
+    }, {passive: false});
+
+    canvas.addEventListener("contextmenu", function(e) {
+        e.preventDefault();
+    });
+}
+
+function init() {
+    canvas = document.getElementById("canvas");
+    ctx2d = canvas.getContext("2d");
+    lastStatsTime = performance.now();
+    connect();
+    initInput();
+    requestAnimationFrame(updateStats);
+}
+
 document.addEventListener("DOMContentLoaded", init);
