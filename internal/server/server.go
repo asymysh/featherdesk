@@ -18,20 +18,24 @@ import (
 // Config holds server parameters.
 type Config struct {
 	Port     int
+	Bind     string
 	Log      *logger.Logger
-	ClientFS fs.FS // embedded client files
+	ClientFS fs.FS
 }
+
+const maxClients = 25
 
 // Server handles HTTP/WebSocket connections and video frame broadcast.
 type Server struct {
-	cfg      Config
-	httpSrv  *http.Server
-	clients  sync.Map // map[*Client]struct{}
-	count    atomic.Int32
-	lastIDR  []byte // most recent IDR frame (header + payload) for new clients
-	idrMu    sync.RWMutex
+	cfg         Config
+	httpSrv     *http.Server
+	clients     sync.Map // map[*Client]struct{}
+	count       atomic.Int32
+	lastIDR     []byte
+	idrMu       sync.RWMutex
 	onNewClient func()
 	onInput     func([]byte)
+	controller  atomic.Pointer[Client]
 }
 
 // New creates a Server ready to listen.
@@ -57,7 +61,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/ws", s.handleWS)
 
 	s.httpSrv = &http.Server{
-		Addr:    net.JoinHostPort("", itoa(s.cfg.Port)),
+		Addr:    net.JoinHostPort(s.cfg.Bind, itoa(s.cfg.Port)),
 		Handler: mux,
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
@@ -149,6 +153,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if int(s.count.Load()) >= maxClients {
+		http.Error(w, "max clients reached", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
@@ -157,13 +166,23 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	role := r.URL.Query().Get("role")
+	isController := role == "control"
+
 	client := newClient(conn, s.cfg.Log)
-	client.onText = s.onInput
+
+	if isController && s.controller.CompareAndSwap(nil, client) {
+		client.onText = s.onInput
+		s.cfg.Log.Info("server", "controller connected")
+	} else if isController {
+		client.onText = nil
+		s.cfg.Log.Info("server", "controller rejected (slot taken), connected as viewer")
+	}
+
 	s.clients.Store(client, struct{}{})
 	s.count.Add(1)
 	s.cfg.Log.Info("server", "client connected ("+itoa(s.ClientCount())+" total)")
 
-	// Send last IDR to new client for immediate decode
 	s.idrMu.RLock()
 	idr := s.lastIDR
 	s.idrMu.RUnlock()
@@ -179,6 +198,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	s.clients.Delete(client)
 	s.count.Add(-1)
+	if s.controller.CompareAndSwap(client, nil) {
+		s.cfg.Log.Info("server", "controller disconnected")
+	}
 	s.cfg.Log.Info("server", "client disconnected ("+itoa(s.ClientCount())+" total)")
 }
 

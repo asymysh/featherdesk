@@ -32,6 +32,7 @@ type config struct {
 	hardware bool
 	software bool
 	noAudio  bool
+	bind     string
 }
 
 func parseFlags() config {
@@ -44,6 +45,7 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.hardware, "hardware", false, "Force VA-API hardware encoding")
 	flag.BoolVar(&cfg.software, "software", false, "Force OpenH264 software encoding")
 	flag.BoolVar(&cfg.noAudio, "no-audio", false, "Disable audio capture")
+	flag.StringVar(&cfg.bind, "bind", "0.0.0.0", "Bind address")
 	flag.Parse()
 	return cfg
 }
@@ -111,6 +113,7 @@ func main() {
 
 	srv := server.New(server.Config{
 		Port:     cfg.port,
+		Bind:     cfg.bind,
 		Log:      log,
 		ClientFS: clientContent,
 	})

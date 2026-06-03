@@ -16,9 +16,10 @@ const (
 
 // Client represents a connected WebSocket viewer.
 type Client struct {
-	conn *websocket.Conn
-	send chan []byte
-	log  *logger.Logger
+	conn    *websocket.Conn
+	send    chan []byte
+	log     *logger.Logger
+	onText  func([]byte)
 }
 
 func newClient(conn *websocket.Conn, log *logger.Logger) *Client {
@@ -44,9 +45,12 @@ func (c *Client) Send(msg []byte) {
 func (c *Client) ReadLoop(ctx context.Context) {
 	defer c.conn.CloseNow()
 	for {
-		_, _, err := c.conn.Read(ctx)
+		typ, data, err := c.conn.Read(ctx)
 		if err != nil {
 			return
+		}
+		if typ == websocket.MessageText && c.onText != nil {
+			c.onText(data)
 		}
 	}
 }

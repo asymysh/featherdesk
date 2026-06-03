@@ -29,7 +29,7 @@ function init() {
 
 function connect() {
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
-    var url = proto + "//" + location.host + "/ws";
+    var url = proto + "//" + location.host + "/ws?role=control";
     ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
 
