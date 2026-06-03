@@ -13,7 +13,7 @@
     - [ ] Implement leveled logger (DEBUG, INFO, WARN, ERROR) with timestamps
     - [ ] Pattern: `2026-06-04 12:30:45.123 [module] message`
     - [ ] Write unit tests for logger level filtering
-- [ ] Task: Implement signal handling and main entrypoint
+- [x] Task: Implement signal handling and main entrypoint [81e5147]
     - [ ] Listen for SIGINT/SIGTERM
     - [ ] Create context with cancel for graceful shutdown propagation
     - [ ] Wire up placeholder capture/server start+stop in `cmd/server/main.go`
