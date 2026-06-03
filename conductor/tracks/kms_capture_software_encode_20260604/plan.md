@@ -34,7 +34,7 @@
     - [ ] Benchmark marshal/unmarshal (target: <100ns per op)
 - [x] Task: Conductor - User Manual Verification 'Wire Protocol' (Protocol in workflow.md) [2ce20c22]
 
-## Phase 3: KMS Screen Capture
+## Phase 3: KMS Screen Capture [checkpoint: 5ae4826]
 
 - [x] Task: Implement DRM card discovery and plane enumeration (cgo) [1812a1a]
     - [ ] Write cgo bindings: open card, drmSetClientCap, drmModeGetPlaneResources
@@ -55,12 +55,12 @@
     - [ ] Handle access-lost (display reconfiguration) with retry+backoff
     - [ ] Expose `capture.Capturer` interface: `NextFrame(ctx) (*Frame, error)`
     - [ ] Frame struct: BGRA []byte, Width, Height, Timestamp
-- [ ] Task: Write capture integration test
+- [x] Task: Write capture integration test [693b129]
     - [ ] Test with real KMS (build tag `//go:build integration`)
     - [ ] Verify frame dimensions match CRTC
     - [ ] Verify non-zero pixel data returned
     - [ ] Verify cleanup on context cancel
-- [ ] Task: Conductor - User Manual Verification 'KMS Screen Capture' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'KMS Screen Capture' (Protocol in workflow.md) [693b129]
 
 ## Phase 4: Software Video Encoding
 
