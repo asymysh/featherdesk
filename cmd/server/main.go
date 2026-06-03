@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aseem/viewport-rds/internal/audio"
 	"github.com/aseem/viewport-rds/internal/capture"
 	"github.com/aseem/viewport-rds/internal/encode"
 	"github.com/aseem/viewport-rds/internal/input"
@@ -30,6 +31,7 @@ type config struct {
 	logFile  string
 	hardware bool
 	software bool
+	noAudio  bool
 }
 
 func parseFlags() config {
@@ -41,6 +43,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.logFile, "log-file", "", "Log to file instead of stderr")
 	flag.BoolVar(&cfg.hardware, "hardware", false, "Force VA-API hardware encoding")
 	flag.BoolVar(&cfg.software, "software", false, "Force OpenH264 software encoding")
+	flag.BoolVar(&cfg.noAudio, "no-audio", false, "Disable audio capture")
 	flag.Parse()
 	return cfg
 }
@@ -215,6 +218,25 @@ func main() {
 			}
 		}
 	}()
+
+	if !cfg.noAudio {
+		audioCap, audioErr := audio.NewCapturer(ctx, log)
+		if audioErr != nil {
+			log.Info("main", "audio: "+audioErr.Error()+" (audio disabled)")
+		} else {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer audioCap.Close()
+				for chunk := range audioCap.Chunks() {
+					srv.BroadcastAudio(chunk, uint64(time.Now().UnixMilli()))
+				}
+			}()
+			log.Info("main", "audio: PipeWire capture started")
+		}
+	} else {
+		log.Info("main", "audio: disabled")
+	}
 
 	wg.Add(1)
 	go func() {

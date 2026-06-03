@@ -30,7 +30,8 @@ type Server struct {
 	count    atomic.Int32
 	lastIDR  []byte // most recent IDR frame (header + payload) for new clients
 	idrMu    sync.RWMutex
-	onNewClient func() // called when a client connects (to request IDR)
+	onNewClient func()
+	onInput     func([]byte)
 }
 
 // New creates a Server ready to listen.
@@ -39,9 +40,13 @@ func New(cfg Config) *Server {
 }
 
 // SetNewClientCallback registers a function called on each new client connection.
-// Typically used to trigger an IDR keyframe from the encoder.
 func (s *Server) SetNewClientCallback(fn func()) {
 	s.onNewClient = fn
+}
+
+// SetInputCallback registers a handler for text messages from clients.
+func (s *Server) SetInputCallback(fn func([]byte)) {
+	s.onInput = fn
 }
 
 // Start begins listening. Blocks until context cancels or listener fails.
@@ -110,7 +115,28 @@ func (s *Server) Broadcast(nals [][]byte, width, height uint16, timestamp uint64
 	}
 }
 
-// ClientCount returns the number of connected clients.
+// BroadcastAudio sends a PCM audio chunk to all connected clients.
+func (s *Server) BroadcastAudio(pcm []byte, timestamp uint64) {
+	hdr := protocol.FrameHeader{
+		Type:        protocol.FrameTypeAudioPCM,
+		Timestamp:   timestamp,
+		Width:       48000, // sample rate in width field
+		Height:      2,     // channels in height field
+		PayloadSize: uint32(len(pcm)),
+	}
+	var hdrBytes [protocol.HeaderSize]byte
+	protocol.MarshalHeader(hdr, hdrBytes[:])
+	msg := make([]byte, protocol.HeaderSize+len(pcm))
+	copy(msg, hdrBytes[:])
+	copy(msg[protocol.HeaderSize:], pcm)
+
+	s.clients.Range(func(key, _ any) bool {
+		c := key.(*Client)
+		c.Send(msg)
+		return true
+	})
+}
+
 func (s *Server) ClientCount() int {
 	return int(s.count.Load())
 }
@@ -132,6 +158,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := newClient(conn, s.cfg.Log)
+	client.onText = s.onInput
 	s.clients.Store(client, struct{}{})
 	s.count.Add(1)
 	s.cfg.Log.Info("server", "client connected ("+itoa(s.ClientCount())+" total)")

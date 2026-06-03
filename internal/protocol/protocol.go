@@ -11,6 +11,7 @@ const (
 	FrameTypeVideoH264 uint8 = 1
 	FrameTypePing      uint8 = 2
 	FrameTypePong      uint8 = 3
+	FrameTypeAudioPCM  uint8 = 4
 )
 
 type FrameHeader struct {

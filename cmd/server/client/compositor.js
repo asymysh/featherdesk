@@ -2,6 +2,7 @@
 
 var HEADER_SIZE = 17;
 var FRAME_TYPE_VIDEO_H264 = 1;
+var FRAME_TYPE_AUDIO_PCM = 4;
 var RECONNECT_DELAY = 2000;
 
 var ws = null;
@@ -14,6 +15,9 @@ var byteCount = 0;
 var lastStatsTime = 0;
 var fpsDisplay = 0;
 var bpsDisplay = 0;
+var audioCtx = null;
+var audioWorklet = null;
+var audioStarted = false;
 
 function init() {
     canvas = document.getElementById("canvas");
@@ -43,19 +47,23 @@ function connect() {
 
         var view = new DataView(ev.data);
         var type = view.getUint8(0);
-        if (type !== FRAME_TYPE_VIDEO_H264) return;
 
-        var width = view.getUint16(9, true);
-        var height = view.getUint16(11, true);
-        var payloadSize = view.getUint32(13, true);
-        var payload = new Uint8Array(ev.data, HEADER_SIZE, payloadSize);
+        if (type === FRAME_TYPE_VIDEO_H264) {
+            var width = view.getUint16(9, true);
+            var height = view.getUint16(11, true);
+            var payloadSize = view.getUint32(13, true);
+            var payload = new Uint8Array(ev.data, HEADER_SIZE, payloadSize);
 
-        if (canvas.width !== width || canvas.height !== height) {
-            canvas.width = width;
-            canvas.height = height;
+            if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
+            }
+            decodeFrame(payload);
+        } else if (type === FRAME_TYPE_AUDIO_PCM) {
+            var payloadSize = view.getUint32(13, true);
+            var payload = new Uint8Array(ev.data, HEADER_SIZE, payloadSize);
+            playAudio(payload);
         }
-
-        decodeFrame(payload);
     };
 
     ws.onclose = function() {
@@ -136,6 +144,52 @@ function updateStats() {
     requestAnimationFrame(updateStats);
 }
 
+var WORKLET_CODE = 'class PCMProcessor extends AudioWorkletProcessor {\n' +
+    '  constructor() { super(); this.queue = []; this.port.onmessage = (e) => {\n' +
+    '    if (this.queue.length < 32) this.queue.push(e.data);\n' +
+    '  }; }\n' +
+    '  process(inputs, outputs) {\n' +
+    '    var out = outputs[0];\n' +
+    '    if (this.queue.length === 0) { return true; }\n' +
+    '    var chunk = this.queue.shift();\n' +
+    '    for (var ch = 0; ch < out.length && ch < 2; ch++) {\n' +
+    '      var dst = out[ch];\n' +
+    '      for (var i = 0; i < dst.length; i++) {\n' +
+    '        var idx = i * 2 + ch;\n' +
+    '        dst[i] = idx < chunk.length ? chunk[idx] : 0;\n' +
+    '      }\n' +
+    '    }\n' +
+    '    return true;\n' +
+    '  }\n' +
+    '}\n' +
+    'registerProcessor("pcm-processor", PCMProcessor);\n';
+
+function initAudio() {
+    if (audioStarted) return;
+    audioStarted = true;
+    audioCtx = new AudioContext({sampleRate: 48000});
+    var blob = new Blob([WORKLET_CODE], {type: "application/javascript"});
+    var url = URL.createObjectURL(blob);
+    audioCtx.audioWorklet.addModule(url).then(function() {
+        audioWorklet = new AudioWorkletNode(audioCtx, "pcm-processor", {
+            outputChannelCount: [2]
+        });
+        audioWorklet.connect(audioCtx.destination);
+        URL.revokeObjectURL(url);
+    });
+}
+
+function playAudio(s16Data) {
+    if (!audioWorklet) return;
+    var samples = s16Data.length / 2;
+    var floats = new Float32Array(samples);
+    var view = new DataView(s16Data.buffer, s16Data.byteOffset, s16Data.byteLength);
+    for (var i = 0; i < samples; i++) {
+        floats[i] = view.getInt16(i * 2, true) / 32768.0;
+    }
+    audioWorklet.port.postMessage(floats, [floats.buffer]);
+}
+
 function updateStatus() {
     var dot = document.querySelector("#status .dot");
     var info = document.getElementById("info");
@@ -182,6 +236,7 @@ function initInput() {
         if (!connected) return;
         e.preventDefault();
         canvas.setPointerCapture(e.pointerId);
+        initAudio();
         sendInput({type: "mousedown", button: e.button});
     });
 
