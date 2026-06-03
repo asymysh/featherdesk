@@ -4,7 +4,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track 1: KMS capture + software H.264 encode + WebSocket viewer**
+- [~] **Track 1: KMS capture + software H.264 encode + WebSocket viewer**
   *Link: [./tracks/kms_capture_software_encode_20260604/](./tracks/kms_capture_software_encode_20260604/)*
 
 ---
