@@ -125,13 +125,13 @@ func main() {
 	ctx, cancel, _ := setupSignalHandler()
 	defer cancel()
 
-	capturer, err := capture.NewKMSCapturer(ctx, cfg.fps)
+	capturer, err := capture.NewX11Capturer(ctx, cfg.fps)
 	if err != nil {
 		log.Error("main", "capture: "+err.Error())
 		os.Exit(1)
 	}
 	defer capturer.Close()
-	log.Info("main", "capture: KMS capturer initialized")
+	log.Info("main", "capture: X11 capturer initialized")
 
 	clientContent, err := fs.Sub(clientFS, "client")
 	if err != nil {

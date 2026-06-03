@@ -142,7 +142,11 @@ func (cs *CursorState) Capture(cardFD int) *CursorFrame {
 		C.close(C.int(info.dma_fd))
 	}
 
-	cs.pixels = cs.egl.ReadPixels()
+	pixels, err := cs.egl.ReadPixels()
+	if err != nil {
+		return nil
+	}
+	cs.pixels = pixels
 
 	return &CursorFrame{
 		Pixels: cs.pixels,

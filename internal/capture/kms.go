@@ -96,22 +96,24 @@ func (c *KMSCapturer) NextFrame() (*Frame, error) {
 		return nil, fmt.Errorf("capture: plane %d has no framebuffer", c.planeID)
 	}
 
-	if currentFB != c.lastFBID {
-		c.lastFBID = currentFB
-		fbInfo, err := c.card.GetFBInfo(c.planeID)
-		if err != nil {
-			return nil, err
-		}
-		if c.lastDMAFD >= 0 {
-			C.close_fd(C.int(c.lastDMAFD))
-		}
-		c.lastDMAFD = fbInfo.DMAFD
-		if err := c.egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format, fbInfo.Modifier); err != nil {
-			return nil, err
-		}
+	fbInfo, err := c.card.GetFBInfo(c.planeID)
+	if err != nil {
+		return nil, err
+	}
+	if c.lastDMAFD >= 0 {
+		C.close_fd(C.int(c.lastDMAFD))
+	}
+	c.lastDMAFD = fbInfo.DMAFD
+	c.lastFBID = currentFB
+
+	if err := c.egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format, fbInfo.Modifier); err != nil {
+		return nil, err
 	}
 
-	pixels := c.egl.ReadPixels()
+	pixels, err := c.egl.ReadPixels()
+	if err != nil {
+		return nil, err
+	}
 
 	cursorFrame := c.cursor.Capture(c.card.FD)
 	c.egl.MakeCurrent()
