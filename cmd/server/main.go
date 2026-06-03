@@ -2,14 +2,23 @@ package main
 
 import (
 	"context"
+	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
+	"github.com/aseem/viewport-rds/internal/capture"
+	"github.com/aseem/viewport-rds/internal/encode"
 	"github.com/aseem/viewport-rds/internal/logger"
+	"github.com/aseem/viewport-rds/internal/server"
 )
+
+//go:embed all:client
+var clientFS embed.FS
 
 type config struct {
 	port    int
@@ -54,8 +63,6 @@ func newLogger(cfg config) *logger.Logger {
 	return logger.New(out, level)
 }
 
-// setupSignalHandler creates a context that cancels on SIGINT/SIGTERM.
-// Returns the context, a cancel function, and the signal channel (for testing).
 func setupSignalHandler() (context.Context, context.CancelFunc, chan os.Signal) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 2)
@@ -64,7 +71,6 @@ func setupSignalHandler() (context.Context, context.CancelFunc, chan os.Signal) 
 	go func() {
 		<-sigCh
 		cancel()
-		// Second signal forces immediate exit
 		<-sigCh
 		os.Exit(1)
 	}()
@@ -80,6 +86,90 @@ func main() {
 	ctx, cancel, _ := setupSignalHandler()
 	defer cancel()
 
+	capturer, err := capture.NewKMSCapturer(ctx, cfg.fps)
+	if err != nil {
+		log.Error("main", "capture: "+err.Error())
+		os.Exit(1)
+	}
+	defer capturer.Close()
+	log.Info("main", "capture: KMS capturer initialized")
+
+	clientContent, err := fs.Sub(clientFS, "client")
+	if err != nil {
+		log.Error("main", "embed: "+err.Error())
+		os.Exit(1)
+	}
+
+	srv := server.New(server.Config{
+		Port:     cfg.port,
+		Log:      log,
+		ClientFS: clientContent,
+	})
+
+	var converter *encode.Converter
+	var enc *encode.H264Encoder
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			frame, err := capturer.NextFrame()
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Error("capture", err.Error())
+				continue
+			}
+
+			w, h := int(frame.Width), int(frame.Height)
+
+			if converter == nil {
+				converter = encode.NewConverter(w, h)
+				enc, err = encode.NewH264Encoder(encode.EncoderConfig{
+					Width:  w,
+					Height: h,
+					FPS:    cfg.fps,
+					QP:     26,
+				})
+				if err != nil {
+					log.Error("main", "encoder init: "+err.Error())
+					cancel()
+					return
+				}
+				defer enc.Close()
+				srv.SetNewClientCallback(func() {
+					enc.ForceKeyframe()
+				})
+				log.Info("main", fmt.Sprintf("encode: %dx%d H.264 QP=26", w, h))
+			}
+
+			i420 := converter.Convert(frame.Data)
+			nals, err := enc.Encode(i420)
+			if err != nil {
+				log.Error("encode", err.Error())
+				continue
+			}
+
+			if len(nals) > 0 {
+				srv.Broadcast(nals, uint16(w), uint16(h), frame.Timestamp)
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := srv.Start(ctx); err != nil {
+			log.Error("server", err.Error())
+			cancel()
+		}
+	}()
+
 	<-ctx.Done()
 	log.Info("main", "shutting down")
+	wg.Wait()
+	log.Info("main", "stopped")
 }

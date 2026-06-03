@@ -108,22 +108,22 @@
     - [ ] Test /status endpoint returns valid JSON
 - [x] Task: Conductor - User Manual Verification 'WebSocket Server' (Protocol in workflow.md) [b6d1a5a]
 
-## Phase 6: Web Client
+## Phase 6: Web Client [checkpoint: 351d77c]
 
-- [ ] Task: Implement H.264 WebCodecs decode and canvas render
+- [x] Task: Implement H.264 WebCodecs decode and canvas render [351d77c]
     - [ ] Create index.html with canvas element and status bar
     - [ ] Create compositor.js: WebSocket connect, binary frame parsing
     - [ ] Initialize WebCodecs VideoDecoder (avc1.42E01E, optimizeForLatency)
     - [ ] Detect keyframes from NAL type byte
     - [ ] Decode and drawImage to canvas
     - [ ] Auto-resize canvas to fit window (maintain aspect ratio)
-- [ ] Task: Implement connection management and status UI
+- [x] Task: Implement connection management and status UI [351d77c]
     - [ ] Auto-reconnect on WebSocket close (2s backoff)
     - [ ] Status indicator (green dot connected, red dot disconnected)
     - [ ] FPS counter (decoded frames per second)
     - [ ] Bandwidth display (bytes received per second)
     - [ ] Implement ping/pong for RTT display
-- [ ] Task: Conductor - User Manual Verification 'Web Client' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Web Client' (Protocol in workflow.md) [351d77c]
 
 ## Phase 7: End-to-End Integration
 
