@@ -1,6 +1,6 @@
 # Implementation Plan: KMS Capture + Software H.264 Encode + WebSocket Viewer
 
-## Phase 1: Project Foundation
+## Phase 1: Project Foundation [checkpoint: e2d5bea]
 
 - [x] Task: Initialize Go module and directory structure [71e1084]
     - [ ] Create `go.mod` with module path `github.com/aseem/viewport-rds`
@@ -18,7 +18,7 @@
     - [ ] Create context with cancel for graceful shutdown propagation
     - [ ] Wire up placeholder capture/server start+stop in `cmd/server/main.go`
     - [ ] Verify clean exit on Ctrl+C
-- [ ] Task: Conductor - User Manual Verification 'Project Foundation' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Project Foundation' (Protocol in workflow.md) [e2d5bea]
 
 ## Phase 2: Wire Protocol
 
