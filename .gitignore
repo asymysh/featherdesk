@@ -1,0 +1,6 @@
+viewport-rds
+coverage.out
+*.test
+*.prof
+*.pprof
+/tmp/
