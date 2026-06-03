@@ -82,31 +82,31 @@
     - [ ] Verify no memory leaks (encode 1000 frames, check RSS)
 - [x] Task: Conductor - User Manual Verification 'Software Video Encoding' (Protocol in workflow.md) [a0cc3c6]
 
-## Phase 5: WebSocket Server
+## Phase 5: WebSocket Server [checkpoint: b6d1a5a]
 
-- [ ] Task: Implement HTTP server with embedded client
+- [x] Task: Implement HTTP server with embedded client [b6d1a5a]
     - [ ] Set up `net/http` on configured port
     - [ ] Embed `client/` directory via `go:embed`
     - [ ] Serve index.html at `/`, compositor.js at `/compositor.js`
     - [ ] Implement `/status` endpoint (JSON: capture state, fps, client count)
-- [ ] Task: Implement WebSocket upgrade and client handling
+- [x] Task: Implement WebSocket upgrade and client handling [b6d1a5a]
     - [ ] Upgrade `/ws` using `github.com/coder/websocket`
     - [ ] Accept connection, create client goroutine
     - [ ] Read text messages (for future input, and ping/pong)
     - [ ] Implement ping/pong for RTT measurement
     - [ ] Handle client disconnect cleanly (close, remove)
-- [ ] Task: Implement video frame broadcast
+- [x] Task: Implement video frame broadcast [b6d1a5a]
     - [ ] Receive encoded NALs from encoder via channel
     - [ ] Prepend protocol header (type, timestamp, dimensions, payload size)
     - [ ] Send binary WebSocket frame to connected client
     - [ ] Send IDR frame immediately on new client connect (checkpoint)
     - [ ] Drop frames if client write buffer is full (don't block capture)
-- [ ] Task: Write server unit tests
+- [x] Task: Write server unit tests [b6d1a5a]
     - [ ] Test WebSocket upgrade succeeds
     - [ ] Test binary frame is well-formed (header + payload)
     - [ ] Test client disconnect doesn't panic
     - [ ] Test /status endpoint returns valid JSON
-- [ ] Task: Conductor - User Manual Verification 'WebSocket Server' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'WebSocket Server' (Protocol in workflow.md) [b6d1a5a]
 
 ## Phase 6: Web Client
 
