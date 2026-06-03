@@ -22,11 +22,13 @@ import (
 var clientFS embed.FS
 
 type config struct {
-	port    int
-	fps     int
-	verbose bool
-	quiet   bool
-	logFile string
+	port     int
+	fps      int
+	verbose  bool
+	quiet    bool
+	logFile  string
+	hardware bool
+	software bool
 }
 
 func parseFlags() config {
@@ -36,6 +38,8 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.verbose, "verbose", false, "Enable debug logging")
 	flag.BoolVar(&cfg.quiet, "quiet", false, "Suppress all output except errors")
 	flag.StringVar(&cfg.logFile, "log-file", "", "Log to file instead of stderr")
+	flag.BoolVar(&cfg.hardware, "hardware", false, "Force VA-API hardware encoding")
+	flag.BoolVar(&cfg.software, "software", false, "Force OpenH264 software encoding")
 	flag.Parse()
 	return cfg
 }
@@ -108,7 +112,7 @@ func main() {
 	})
 
 	var converter *encode.Converter
-	var enc *encode.H264Encoder
+	var enc encode.Encoder
 
 	var wg sync.WaitGroup
 
@@ -136,22 +140,45 @@ func main() {
 
 			if converter == nil {
 				converter = encode.NewConverter(w, h)
-				enc, err = encode.NewH264Encoder(encode.EncoderConfig{
+				encCfg := encode.EncoderConfig{
 					Width:  w,
 					Height: h,
 					FPS:    cfg.fps,
 					QP:     26,
-				})
-				if err != nil {
-					log.Error("main", "encoder init: "+err.Error())
+				}
+
+				var encoder encode.Encoder
+				useHW := cfg.hardware || (!cfg.software && encode.ProbeVAAPI())
+
+				if cfg.hardware && !encode.ProbeVAAPI() {
+					log.Error("main", "VA-API hardware encoding requested but not available")
 					cancel()
 					return
 				}
+
+				if useHW {
+					encoder, err = encode.NewFFmpegEncoder(encCfg, log, true)
+					if err != nil {
+						log.Error("main", "ffmpeg hw encoder: "+err.Error())
+						cancel()
+						return
+					}
+					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 VA-API (hardware)", w, h))
+				} else {
+					encoder, err = encode.NewH264Encoder(encCfg)
+					if err != nil {
+						log.Error("main", "encoder init: "+err.Error())
+						cancel()
+						return
+					}
+					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 OpenH264 (software)", w, h))
+				}
+
+				enc = encoder
 				defer enc.Close()
 				srv.SetNewClientCallback(func() {
 					enc.ForceKeyframe()
 				})
-				log.Info("main", fmt.Sprintf("encode: %dx%d H.264 QP=26", w, h))
 			}
 
 			i420 := converter.Convert(frame.Data)
