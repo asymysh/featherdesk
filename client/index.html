@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ViewPort RDS</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
+#canvas { display: block; width: 100vw; height: 100vh; object-fit: contain; }
+#status { position: fixed; top: 8px; right: 12px; font-size: 12px; opacity: 0.7; }
+#status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.connected { background: #4f4; }
+.disconnected { background: #f44; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="status"><span class="dot disconnected"></span><span id="info">connecting...</span></div>
+<script src="compositor.js"></script>
+</body>
+</html>
