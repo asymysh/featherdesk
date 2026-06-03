@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/aseem/viewport-rds/internal/logger"
 )
@@ -51,8 +54,32 @@ func newLogger(cfg config) *logger.Logger {
 	return logger.New(out, level)
 }
 
+// setupSignalHandler creates a context that cancels on SIGINT/SIGTERM.
+// Returns the context, a cancel function, and the signal channel (for testing).
+func setupSignalHandler() (context.Context, context.CancelFunc, chan os.Signal) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		cancel()
+		// Second signal forces immediate exit
+		<-sigCh
+		os.Exit(1)
+	}()
+
+	return ctx, cancel, sigCh
+}
+
 func main() {
 	cfg := parseFlags()
 	log := newLogger(cfg)
 	log.Info("main", fmt.Sprintf("viewport-rds starting on port %d at %d fps", cfg.port, cfg.fps))
+
+	ctx, cancel, _ := setupSignalHandler()
+	defer cancel()
+
+	<-ctx.Done()
+	log.Info("main", "shutting down")
 }
