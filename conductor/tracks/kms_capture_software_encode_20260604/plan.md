@@ -48,7 +48,7 @@
     - [ ] Create surfaceless EGL context
     - [ ] Import DMA-BUF as EGLImage (EGL_LINUX_DMA_BUF_EXT with format+modifier)
     - [ ] Bind EGLImage to GL texture (glEGLImageTargetTexture2DOES)
-- [ ] Task: Implement pixel readback and capture loop
+- [x] Task: Implement pixel readback and capture loop [693b129]
     - [ ] glGetTextureSubImage → pre-allocated BGRA buffer
     - [ ] Frame change detection: poll drmModeGetPlane, check fb_id
     - [ ] Frame pacing: sleep remaining budget after capture
