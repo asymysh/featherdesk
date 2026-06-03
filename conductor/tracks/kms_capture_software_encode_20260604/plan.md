@@ -62,25 +62,25 @@
     - [ ] Verify cleanup on context cancel
 - [x] Task: Conductor - User Manual Verification 'KMS Screen Capture' (Protocol in workflow.md) [693b129]
 
-## Phase 4: Software Video Encoding
+## Phase 4: Software Video Encoding [checkpoint: a0cc3c6]
 
-- [ ] Task: Implement libyuv BGRA-to-I420 conversion (cgo)
+- [x] Task: Implement libyuv BGRA-to-I420 conversion (cgo) [a0cc3c6]
     - [ ] cgo bindings for `ARGBToI420`
     - [ ] Pre-allocate I420 buffer (Y + U + V planes) at startup
     - [ ] Implement `Convert(bgra []byte, w, h int) *I420Frame`
     - [ ] Write unit test: feed known BGRA, verify I420 plane sizes
-- [ ] Task: Implement OpenH264 encoder (cgo)
+- [x] Task: Implement OpenH264 encoder (cgo) [a0cc3c6]
     - [ ] cgo bindings: `WelsCreateSVCEncoder`, `Initialize`, `EncodeFrame`, `Uninitialize`
     - [ ] Configure: CAMERA_VIDEO_REAL_TIME, SM_SINGLE_SLICE, QP 26, no B-frames
     - [ ] Accept I420 frame, return NAL unit slices
     - [ ] Implement IDR-on-demand (force keyframe)
     - [ ] Implement `encode.Encoder` interface: `Encode(*I420Frame) ([][]byte, error)`
-- [ ] Task: Write encoder unit tests
+- [x] Task: Write encoder unit tests [a0cc3c6]
     - [ ] Test encode produces valid NAL units (check start codes)
     - [ ] Test IDR request produces SPS+PPS+IDR
     - [ ] Test multiple frames in sequence (P-frames after IDR)
     - [ ] Verify no memory leaks (encode 1000 frames, check RSS)
-- [ ] Task: Conductor - User Manual Verification 'Software Video Encoding' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Software Video Encoding' (Protocol in workflow.md) [a0cc3c6]
 
 ## Phase 5: WebSocket Server
 
