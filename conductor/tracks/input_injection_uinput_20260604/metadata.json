@@ -1,0 +1,8 @@
+{
+  "track_id": "input_injection_uinput_20260604",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-06-04T02:00:00Z",
+  "updated_at": "2026-06-04T02:00:00Z",
+  "description": "Input injection via uinput (keyboard + mouse from browser)"
+}

@@ -1,8 +1,0 @@
-{
-  "track_id": "mvp_streaming_server_20260604",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-06-04T01:30:00Z",
-  "updated_at": "2026-06-04T01:30:00Z",
-  "description": "Build MVP streaming server with KMS capture, dual-mode H.264 encoding, and WebSocket broadcast"
-}

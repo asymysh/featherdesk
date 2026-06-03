@@ -1,0 +1,8 @@
+{
+  "track_id": "pipewire_audio_capture_20260604",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-06-04T02:00:00Z",
+  "updated_at": "2026-06-04T02:00:00Z",
+  "description": "PipeWire audio capture and browser playback"
+}

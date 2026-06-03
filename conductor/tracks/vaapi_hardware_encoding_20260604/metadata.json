@@ -1,0 +1,8 @@
+{
+  "track_id": "vaapi_hardware_encoding_20260604",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-06-04T02:00:00Z",
+  "updated_at": "2026-06-04T02:00:00Z",
+  "description": "VA-API hardware H.264 encoding with auto-detection and ffmpeg pipe"
+}

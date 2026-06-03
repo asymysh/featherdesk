@@ -1,0 +1,8 @@
+{
+  "track_id": "multiclient_metrics_polish_20260604",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-06-04T02:00:00Z",
+  "updated_at": "2026-06-04T02:00:00Z",
+  "description": "Multi-client broadcast, role enforcement, metrics, and production readiness"
+}

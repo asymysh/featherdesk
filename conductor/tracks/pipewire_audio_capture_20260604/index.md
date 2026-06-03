@@ -1,4 +1,4 @@
-# Track mvp_streaming_server_20260604 Context
+# Track pipewire_audio_capture_20260604 Context
 
 - [Specification](./spec.md)
 - [Implementation Plan](./plan.md)
