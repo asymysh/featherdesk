@@ -20,19 +20,19 @@
     - [ ] Verify clean exit on Ctrl+C
 - [x] Task: Conductor - User Manual Verification 'Project Foundation' (Protocol in workflow.md) [e2d5bea]
 
-## Phase 2: Wire Protocol
+## Phase 2: Wire Protocol [checkpoint: 56791a2]
 
 - [x] Task: Design and implement binary frame header [2ce20c22]
     - [ ] Define `protocol.FrameHeader` struct: Type(uint8), Timestamp(uint64), Width(uint16), Height(uint16), PayloadSize(uint32)
     - [ ] Define constants: FrameTypeVideoH264, FrameTypePing, FrameTypePong
     - [ ] Implement `Marshal(header) []byte` and `Unmarshal([]byte) (header, error)`
     - [ ] Pre-allocate header buffer (reusable, no alloc per frame)
-- [ ] Task: Write protocol unit tests
+- [x] Task: Write protocol unit tests [2ce20c22]
     - [ ] Test round-trip marshal/unmarshal
     - [ ] Test invalid header detection (short buffer, wrong magic)
     - [ ] Test all frame types
     - [ ] Benchmark marshal/unmarshal (target: <100ns per op)
-- [ ] Task: Conductor - User Manual Verification 'Wire Protocol' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Wire Protocol' (Protocol in workflow.md) [2ce20c22]
 
 ## Phase 3: KMS Screen Capture
 
