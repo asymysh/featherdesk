@@ -75,16 +75,20 @@ static EGLContext create_egl_context(EGLDisplay dpy) {
 	return eglCreateContext(dpy, config, EGL_NO_CONTEXT, ctx_attribs);
 }
 
-static EGLImageKHR import_dmabuf(EGLDisplay dpy, int fd, int width, int height, int stride, uint32_t format) {
-	EGLint attribs[] = {
-		EGL_WIDTH, width,
-		EGL_HEIGHT, height,
-		EGL_LINUX_DRM_FOURCC_EXT, (EGLint)format,
-		EGL_DMA_BUF_PLANE0_FD_EXT, fd,
-		EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-		EGL_DMA_BUF_PLANE0_PITCH_EXT, stride,
-		EGL_NONE
-	};
+static EGLImageKHR import_dmabuf(EGLDisplay dpy, int fd, int width, int height, int stride, uint32_t format, uint64_t modifier) {
+	EGLint attribs[17];
+	int i = 0;
+	attribs[i++] = EGL_WIDTH; attribs[i++] = width;
+	attribs[i++] = EGL_HEIGHT; attribs[i++] = height;
+	attribs[i++] = EGL_LINUX_DRM_FOURCC_EXT; attribs[i++] = (EGLint)format;
+	attribs[i++] = EGL_DMA_BUF_PLANE0_FD_EXT; attribs[i++] = fd;
+	attribs[i++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT; attribs[i++] = 0;
+	attribs[i++] = EGL_DMA_BUF_PLANE0_PITCH_EXT; attribs[i++] = stride;
+	if (modifier != 0 && modifier != 0x00ffffffffffffffULL) {
+		attribs[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT; attribs[i++] = (EGLint)(modifier & 0xFFFFFFFF);
+		attribs[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT; attribs[i++] = (EGLint)(modifier >> 32);
+	}
+	attribs[i++] = EGL_NONE;
 	return fn_eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attribs);
 }
 
@@ -180,7 +184,7 @@ func NewEGLState(cardFD int) (*EGLState, error) {
 	}, nil
 }
 
-func (e *EGLState) ImportDMABuf(fd, width, height, stride int, format uint32) error {
+func (e *EGLState) ImportDMABuf(fd, width, height, stride int, format uint32, modifier uint64) error {
 	if e.image != nil {
 		C.destroy_egl_image(e.display, e.image)
 		e.image = nil
@@ -190,7 +194,7 @@ func (e *EGLState) ImportDMABuf(fd, width, height, stride int, format uint32) er
 		e.texture = 0
 	}
 
-	img := C.import_dmabuf(e.display, C.int(fd), C.int(width), C.int(height), C.int(stride), C.uint32_t(format))
+	img := C.import_dmabuf(e.display, C.int(fd), C.int(width), C.int(height), C.int(stride), C.uint32_t(format), C.uint64_t(modifier))
 	if img == C.EGLImageKHR(C.EGL_NO_IMAGE_KHR) {
 		return fmt.Errorf("capture: failed to import DMA-BUF as EGLImage")
 	}

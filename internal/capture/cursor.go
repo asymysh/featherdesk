@@ -14,6 +14,7 @@ typedef struct {
 	uint32_t width, height;
 	uint32_t stride;
 	uint32_t format;
+	uint64_t modifier;
 	int dma_fd;
 } cursor_info_t;
 
@@ -39,6 +40,7 @@ static cursor_info_t get_cursor_info(int card_fd, uint32_t cursor_plane_id) {
 	info.height = fb2->height;
 	info.stride = fb2->pitches[0];
 	info.format = fb2->pixel_format;
+	info.modifier = fb2->modifier;
 
 	int dma_fd = -1;
 	int ret = drmPrimeHandleToFD(card_fd, fb2->handles[0], DRM_CLOEXEC | DRM_RDWR, &dma_fd);
@@ -131,7 +133,7 @@ func (cs *CursorState) Capture(cardFD int) *CursorFrame {
 		cs.width = int(info.width)
 		cs.height = int(info.height)
 
-		if err := cs.egl.ImportDMABuf(cs.lastDMAFD, cs.width, cs.height, int(info.stride), uint32(info.format)); err != nil {
+		if err := cs.egl.ImportDMABuf(cs.lastDMAFD, cs.width, cs.height, int(info.stride), uint32(info.format), uint64(info.modifier)); err != nil {
 			return nil
 		}
 	} else {

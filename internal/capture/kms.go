@@ -62,7 +62,7 @@ func NewKMSCapturer(ctx context.Context, fps int) (*KMSCapturer, error) {
 		return nil, err
 	}
 
-	if err := egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format); err != nil {
+	if err := egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format, fbInfo.Modifier); err != nil {
 		C.close_fd(C.int(fbInfo.DMAFD))
 		egl.Close()
 		card.Close()
@@ -104,7 +104,7 @@ func (c *KMSCapturer) NextFrame() (*Frame, error) {
 			C.close_fd(C.int(c.lastDMAFD))
 		}
 		c.lastDMAFD = fbInfo.DMAFD
-		if err := c.egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format); err != nil {
+		if err := c.egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format, fbInfo.Modifier); err != nil {
 			return nil, err
 		}
 	}
