@@ -36,7 +36,7 @@
 
 ## Phase 3: KMS Screen Capture
 
-- [ ] Task: Implement DRM card discovery and plane enumeration (cgo)
+- [x] Task: Implement DRM card discovery and plane enumeration (cgo) [1812a1a]
     - [ ] Write cgo bindings: open card, drmSetClientCap, drmModeGetPlaneResources
     - [ ] Find primary plane with active fb_id (skip cursor planes)
     - [ ] Get CRTC dimensions and refresh rate
