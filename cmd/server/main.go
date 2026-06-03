@@ -112,7 +112,7 @@ func main() {
 	log.Info("main", "ViewPort RDS v0.1.0")
 	log.Info("main", fmt.Sprintf("listening on http://%s:%d/", cfg.bind, cfg.port))
 
-	capKMS := true
+	capKMS := os.Geteuid() == 0
 	capVAAPI := encode.ProbeVAAPI()
 	capUInput := checkUInput()
 	capPipeWire := checkPipeWire()

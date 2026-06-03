@@ -156,7 +156,7 @@ func (c *DRMCard) GetFBInfo(planeID uint32) (*FBInfo, error) {
 	var dmaFD C.int
 	ret := C.drmPrimeHandleToFD(C.int(c.FD), fb2.handles[0], C.DRM_CLOEXEC|C.DRM_RDWR, &dmaFD)
 	if ret != 0 {
-		return nil, fmt.Errorf("capture: drmPrimeHandleToFD failed: %d", ret)
+		return nil, fmt.Errorf("capture: drmPrimeHandleToFD failed (run as root or with CAP_SYS_ADMIN)")
 	}
 
 	return &FBInfo{
