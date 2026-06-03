@@ -3,10 +3,10 @@ package capture
 import "fmt"
 
 type DRMCard struct {
-	FD       int
-	Path     string
-	Width    uint32
-	Height   uint32
+	FD        int
+	Path      string
+	Width     uint32
+	Height    uint32
 	RefreshHz uint32
 }
 
@@ -14,6 +14,15 @@ type DRMPlane struct {
 	ID   uint32
 	FBID uint32
 	Type uint32
+}
+
+type FBInfo struct {
+	DMAFD    int
+	Width    uint32
+	Height   uint32
+	Stride   uint32
+	Format   uint32
+	Modifier uint64
 }
 
 type Frame struct {

@@ -4,6 +4,7 @@ package capture
 #cgo pkg-config: libdrm
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <unistd.h>
 
 static uint32_t get_plane_fb_id(int fd, uint32_t plane_id) {
 	drmModePlanePtr plane = drmModeGetPlane(fd, plane_id);
@@ -11,6 +12,10 @@ static uint32_t get_plane_fb_id(int fd, uint32_t plane_id) {
 	uint32_t fb_id = plane->fb_id;
 	drmModeFreePlane(plane);
 	return fb_id;
+}
+
+static void close_fd(int fd) {
+	close(fd);
 }
 */
 import "C"
@@ -24,9 +29,10 @@ import (
 type KMSCapturer struct {
 	card      *DRMCard
 	egl       *EGLState
+	cursor    *CursorState
 	planeID   uint32
 	lastFBID  uint32
-	targetFPS int
+	lastDMAFD int
 	ctx       context.Context
 }
 
@@ -49,25 +55,31 @@ func NewKMSCapturer(ctx context.Context, fps int) (*KMSCapturer, error) {
 		return nil, err
 	}
 
-	dmaFD, err := card.GetDMABufFD(pid)
+	fbInfo, err := card.GetFBInfo(pid)
 	if err != nil {
 		egl.Close()
 		card.Close()
 		return nil, err
 	}
 
-	stride := int(card.Width) * 4
-	if err := egl.ImportDMABuf(dmaFD, int(card.Width), int(card.Height), stride, 0x34325241); err != nil {
+	if err := egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format); err != nil {
+		C.close_fd(C.int(fbInfo.DMAFD))
 		egl.Close()
 		card.Close()
 		return nil, err
 	}
 
+	currentFB := uint32(C.get_plane_fb_id(C.int(card.FD), C.uint32_t(pid)))
+
+	cursor := NewCursorState(card)
+
 	return &KMSCapturer{
 		card:      card,
 		egl:       egl,
+		cursor:    cursor,
 		planeID:   pid,
-		targetFPS: fps,
+		lastFBID:  currentFB,
+		lastDMAFD: fbInfo.DMAFD,
 		ctx:       ctx,
 	}, nil
 }
@@ -77,8 +89,6 @@ func (c *KMSCapturer) NextFrame() (*Frame, error) {
 		return nil, err
 	}
 
-	start := time.Now()
-
 	currentFB := uint32(C.get_plane_fb_id(C.int(c.card.FD), C.uint32_t(c.planeID)))
 	if currentFB == 0 {
 		return nil, fmt.Errorf("capture: plane %d has no framebuffer", c.planeID)
@@ -86,42 +96,40 @@ func (c *KMSCapturer) NextFrame() (*Frame, error) {
 
 	if currentFB != c.lastFBID {
 		c.lastFBID = currentFB
-		dmaFD, err := c.card.GetDMABufFD(c.planeID)
+		fbInfo, err := c.card.GetFBInfo(c.planeID)
 		if err != nil {
 			return nil, err
 		}
-		stride := int(c.card.Width) * 4
-		if err := c.egl.ImportDMABuf(dmaFD, int(c.card.Width), int(c.card.Height), stride, 0x34325241); err != nil {
+		if c.lastDMAFD >= 0 {
+			C.close_fd(C.int(c.lastDMAFD))
+		}
+		c.lastDMAFD = fbInfo.DMAFD
+		if err := c.egl.ImportDMABuf(fbInfo.DMAFD, int(fbInfo.Width), int(fbInfo.Height), int(fbInfo.Stride), fbInfo.Format); err != nil {
 			return nil, err
 		}
 	}
 
 	pixels := c.egl.ReadPixels()
 
-	frame := &Frame{
+	cursorFrame := c.cursor.Capture(c.card.FD)
+	if cursorFrame != nil {
+		BlendCursor(pixels, int(c.card.Width), int(c.card.Height), cursorFrame)
+	}
+
+	return &Frame{
 		Data:      pixels,
 		Width:     c.card.Width,
 		Height:    c.card.Height,
 		Timestamp: uint64(time.Now().UnixMilli()),
-	}
-
-	elapsed := time.Since(start)
-	budget := time.Second / time.Duration(c.targetFPS)
-	if elapsed < budget {
-		remaining := budget - elapsed
-		timer := time.NewTimer(remaining)
-		select {
-		case <-timer.C:
-		case <-c.ctx.Done():
-			timer.Stop()
-			return frame, c.ctx.Err()
-		}
-	}
-
-	return frame, nil
+	}, nil
 }
 
 func (c *KMSCapturer) Close() error {
+	if c.lastDMAFD >= 0 {
+		C.close_fd(C.int(c.lastDMAFD))
+		c.lastDMAFD = -1
+	}
+	c.cursor.Close()
 	if c.egl != nil {
 		c.egl.Close()
 	}

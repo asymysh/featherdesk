@@ -8,7 +8,7 @@ package encode
 import "C"
 import "unsafe"
 
-// Converter handles BGRA-to-I420 color space conversion using libyuv.
+// Converter handles RGBA-to-I420 color space conversion using libyuv.
 // Buffers are pre-allocated at creation and reused across frames.
 type Converter struct {
 	width  int
@@ -33,18 +33,18 @@ func NewConverter(width, height int) *Converter {
 	}
 }
 
-// Convert transforms BGRA pixel data to I420. The returned frame's buffers
-// are owned by the Converter and valid until the next Convert call.
-func (c *Converter) Convert(bgra []byte) *I420Frame {
+// Convert transforms RGBA pixel data (GL_RGBA byte order) to I420.
+// The returned frame's buffers are owned by the Converter and valid until the next Convert call.
+func (c *Converter) Convert(rgba []byte) *I420Frame {
 	w := C.int(c.width)
 	h := C.int(c.height)
-	strideARGB := C.int(c.width * 4)
+	srcStride := C.int(c.width * 4)
 	strideY := C.int(c.width)
 	strideUV := C.int(c.width / 2)
 
-	C.ARGBToI420(
-		(*C.uint8_t)(unsafe.Pointer(&bgra[0])),
-		strideARGB,
+	C.ABGRToI420(
+		(*C.uint8_t)(unsafe.Pointer(&rgba[0])),
+		srcStride,
 		(*C.uint8_t)(unsafe.Pointer(&c.frame.Y[0])),
 		strideY,
 		(*C.uint8_t)(unsafe.Pointer(&c.frame.U[0])),

@@ -139,6 +139,36 @@ func (c *DRMCard) GetDMABufFD(planeID uint32) (int, error) {
 	return int(dmaFD), nil
 }
 
+func (c *DRMCard) GetFBInfo(planeID uint32) (*FBInfo, error) {
+	plane := C.drmModeGetPlane(C.int(c.FD), C.uint32_t(planeID))
+	if plane == nil {
+		return nil, fmt.Errorf("capture: failed to get plane %d", planeID)
+	}
+	fbID := plane.fb_id
+	C.drmModeFreePlane(plane)
+
+	fb2 := C.drmModeGetFB2(C.int(c.FD), fbID)
+	if fb2 == nil {
+		return nil, fmt.Errorf("capture: drmModeGetFB2 failed for fb %d", fbID)
+	}
+	defer C.drmModeFreeFB2(fb2)
+
+	var dmaFD C.int
+	ret := C.drmPrimeHandleToFD(C.int(c.FD), fb2.handles[0], C.DRM_CLOEXEC|C.DRM_RDWR, &dmaFD)
+	if ret != 0 {
+		return nil, fmt.Errorf("capture: drmPrimeHandleToFD failed: %d", ret)
+	}
+
+	return &FBInfo{
+		DMAFD:    int(dmaFD),
+		Width:    uint32(fb2.width),
+		Height:   uint32(fb2.height),
+		Stride:   uint32(fb2.pitches[0]),
+		Format:   uint32(fb2.pixel_format),
+		Modifier: uint64(fb2.modifier),
+	}, nil
+}
+
 func (c *DRMCard) FindPrimaryPlaneID() (uint32, error) {
 	res := C.drmModeGetPlaneResources(C.int(c.FD))
 	if res == nil {

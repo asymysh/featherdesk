@@ -24,16 +24,16 @@ func TestConverterBGRAToI420(t *testing.T) {
 	width, height := 4, 4
 	c := NewConverter(width, height)
 
-	// Fill with solid green in BGRA (B=0, G=255, R=0, A=255)
-	bgra := make([]byte, width*height*4)
-	for i := 0; i < len(bgra); i += 4 {
-		bgra[i+0] = 0   // B
-		bgra[i+1] = 255 // G
-		bgra[i+2] = 0   // R
-		bgra[i+3] = 255 // A
+	// Fill with solid green in RGBA (R=0, G=255, B=0, A=255) - matches GL_RGBA output
+	rgba := make([]byte, width*height*4)
+	for i := 0; i < len(rgba); i += 4 {
+		rgba[i+0] = 0   // R
+		rgba[i+1] = 255 // G
+		rgba[i+2] = 0   // B
+		rgba[i+3] = 255 // A
 	}
 
-	frame := c.Convert(bgra)
+	frame := c.Convert(rgba)
 
 	if frame.Width != width || frame.Height != height {
 		t.Fatalf("dimensions: got %dx%d, want %dx%d", frame.Width, frame.Height, width, height)

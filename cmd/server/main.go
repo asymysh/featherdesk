@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/aseem/viewport-rds/internal/capture"
 	"github.com/aseem/viewport-rds/internal/encode"
@@ -114,13 +115,20 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		frameDuration := time.Second / time.Duration(cfg.fps)
 		for {
+			if ctx.Err() != nil {
+				return
+			}
+
+			start := time.Now()
 			frame, err := capturer.NextFrame()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
 				log.Error("capture", err.Error())
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 
@@ -155,6 +163,11 @@ func main() {
 
 			if len(nals) > 0 {
 				srv.Broadcast(nals, uint16(w), uint16(h), frame.Timestamp)
+			}
+
+			elapsed := time.Since(start)
+			if elapsed < frameDuration {
+				time.Sleep(frameDuration - elapsed)
 			}
 		}
 	}()
