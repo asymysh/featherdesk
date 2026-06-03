@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -89,10 +90,36 @@ func setupSignalHandler() (context.Context, context.CancelFunc, chan os.Signal) 
 	return ctx, cancel, sigCh
 }
 
+func checkUInput() bool {
+	_, err := os.Stat("/dev/uinput")
+	return err == nil
+}
+
+func checkPipeWire() bool {
+	_, err := exec.LookPath("pw-cat")
+	return err == nil
+}
+
+func checkFFmpeg() bool {
+	_, err := exec.LookPath("ffmpeg")
+	return err == nil
+}
+
 func main() {
 	cfg := parseFlags()
 	log := newLogger(cfg)
-	log.Info("main", fmt.Sprintf("viewport-rds starting on port %d at %d fps", cfg.port, cfg.fps))
+
+	log.Info("main", "ViewPort RDS v0.1.0")
+	log.Info("main", fmt.Sprintf("listening on http://%s:%d/", cfg.bind, cfg.port))
+
+	capKMS := true
+	capVAAPI := encode.ProbeVAAPI()
+	capUInput := checkUInput()
+	capPipeWire := checkPipeWire()
+	capFFmpeg := checkFFmpeg()
+
+	log.Info("main", fmt.Sprintf("capabilities: KMS=%v VA-API=%v uinput=%v PipeWire=%v ffmpeg=%v",
+		capKMS, capVAAPI, capUInput, capPipeWire, capFFmpeg))
 
 	ctx, cancel, _ := setupSignalHandler()
 	defer cancel()
@@ -199,6 +226,11 @@ func main() {
 
 				enc = encoder
 				defer enc.Close()
+				if useHW {
+					srv.SetEncoderType("h264_vaapi")
+				} else {
+					srv.SetEncoderType("openh264")
+				}
 				srv.SetNewClientCallback(func() {
 					enc.ForceKeyframe()
 				})
@@ -236,6 +268,7 @@ func main() {
 				}
 			}()
 			log.Info("main", "audio: PipeWire capture started")
+			srv.SetAudioEnabled(true)
 		}
 	} else {
 		log.Info("main", "audio: disabled")

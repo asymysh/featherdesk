@@ -36,6 +36,11 @@ type Server struct {
 	onNewClient func()
 	onInput     func([]byte)
 	controller  atomic.Pointer[Client]
+
+	framesBroadcast atomic.Uint64
+	bytesBroadcast  atomic.Uint64
+	encoderType     string
+	audioEnabled    bool
 }
 
 // New creates a Server ready to listen.
@@ -48,7 +53,14 @@ func (s *Server) SetNewClientCallback(fn func()) {
 	s.onNewClient = fn
 }
 
-// SetInputCallback registers a handler for text messages from clients.
+func (s *Server) SetEncoderType(t string) {
+	s.encoderType = t
+}
+
+func (s *Server) SetAudioEnabled(v bool) {
+	s.audioEnabled = v
+}
+
 func (s *Server) SetInputCallback(fn func([]byte)) {
 	s.onInput = fn
 }
@@ -116,6 +128,9 @@ func (s *Server) Broadcast(nals [][]byte, width, height uint16, timestamp uint64
 			c.Send(msg)
 			return true
 		})
+
+		s.framesBroadcast.Add(1)
+		s.bytesBroadcast.Add(uint64(len(msg)))
 	}
 }
 
@@ -147,8 +162,15 @@ func (s *Server) ClientCount() int {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	hasController := s.controller.Load() != nil
 	json.NewEncoder(w).Encode(map[string]any{
-		"clients": s.ClientCount(),
+		"clients":          s.ClientCount(),
+		"max_clients":      maxClients,
+		"encoder":          s.encoderType,
+		"audio":            s.audioEnabled,
+		"has_controller":   hasController,
+		"frames_broadcast": s.framesBroadcast.Load(),
+		"bytes_broadcast":  s.bytesBroadcast.Load(),
 	})
 }
 
