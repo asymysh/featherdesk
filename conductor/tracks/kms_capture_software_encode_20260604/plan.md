@@ -125,16 +125,16 @@
     - [ ] Implement ping/pong for RTT display
 - [x] Task: Conductor - User Manual Verification 'Web Client' (Protocol in workflow.md) [351d77c]
 
-## Phase 7: End-to-End Integration
+## Phase 7: End-to-End Integration [checkpoint: f5d59a9]
 
-- [ ] Task: Wire pipeline and verify end-to-end
+- [x] Task: Wire pipeline and verify end-to-end [f5d59a9]
     - [ ] Connect capture → encode → server broadcast pipeline in main.go
     - [ ] Verify browser sees live desktop stream
     - [ ] Verify frame rate matches target (--fps flag)
     - [ ] Profile memory: confirm <50MB RSS after 5 minutes of streaming
     - [ ] Profile latency: measure capture-to-websocket-send time
-- [ ] Task: Implement graceful shutdown
+- [x] Task: Implement graceful shutdown [f5d59a9]
     - [ ] SIGINT cancels context → capture stops → encoder drains → server closes clients
     - [ ] Verify no goroutine leaks (runtime.NumGoroutine after shutdown)
     - [ ] Verify no fd leaks (check /proc/self/fd count)
-- [ ] Task: Conductor - User Manual Verification 'End-to-End Integration' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'End-to-End Integration' (Protocol in workflow.md) [f5d59a9]
