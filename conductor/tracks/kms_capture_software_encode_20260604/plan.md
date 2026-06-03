@@ -22,7 +22,7 @@
 
 ## Phase 2: Wire Protocol
 
-- [ ] Task: Design and implement binary frame header
+- [x] Task: Design and implement binary frame header [2ce20c22]
     - [ ] Define `protocol.FrameHeader` struct: Type(uint8), Timestamp(uint64), Width(uint16), Height(uint16), PayloadSize(uint32)
     - [ ] Define constants: FrameTypeVideoH264, FrameTypePing, FrameTypePong
     - [ ] Implement `Marshal(header) []byte` and `Unmarshal([]byte) (header, error)`
