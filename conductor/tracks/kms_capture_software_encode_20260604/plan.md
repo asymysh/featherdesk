@@ -8,7 +8,7 @@
     - [ ] Create Makefile (build, test, lint, fmt, clean targets)
     - [ ] Create `.gitignore` for Go project
     - [ ] Run `go mod tidy` to verify module compiles
-- [ ] Task: Implement CLI flags and logging
+- [x] Task: Implement CLI flags and logging [9765bb2]
     - [ ] Parse flags: `--port`, `--fps`, `--verbose`, `--quiet`, `--log-file`
     - [ ] Implement leveled logger (DEBUG, INFO, WARN, ERROR) with timestamps
     - [ ] Pattern: `2026-06-04 12:30:45.123 [module] message`
