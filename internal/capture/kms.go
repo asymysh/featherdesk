@@ -89,6 +89,8 @@ func (c *KMSCapturer) NextFrame() (*Frame, error) {
 		return nil, err
 	}
 
+	c.egl.MakeCurrent()
+
 	currentFB := uint32(C.get_plane_fb_id(C.int(c.card.FD), C.uint32_t(c.planeID)))
 	if currentFB == 0 {
 		return nil, fmt.Errorf("capture: plane %d has no framebuffer", c.planeID)
@@ -112,6 +114,7 @@ func (c *KMSCapturer) NextFrame() (*Frame, error) {
 	pixels := c.egl.ReadPixels()
 
 	cursorFrame := c.cursor.Capture(c.card.FD)
+	c.egl.MakeCurrent()
 	if cursorFrame != nil {
 		BlendCursor(pixels, int(c.card.Width), int(c.card.Height), cursorFrame)
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -168,6 +169,8 @@ func main() {
 
 	wg.Add(1)
 	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 		defer wg.Done()
 		frameDuration := time.Second / time.Duration(cfg.fps)
 		for {

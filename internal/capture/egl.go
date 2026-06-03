@@ -218,6 +218,10 @@ func (e *EGLState) ImportDMABuf(fd, width, height, stride int, format uint32, mo
 	return nil
 }
 
+func (e *EGLState) MakeCurrent() {
+	C.make_current_surfaceless(e.display, e.context)
+}
+
 func (e *EGLState) ReadPixels() []byte {
 	C.read_texture_pixels(e.texture, C.int(e.width), C.int(e.height), unsafe.Pointer(&e.pixelBuf[0]))
 	return e.pixelBuf[:e.width*e.height*4]

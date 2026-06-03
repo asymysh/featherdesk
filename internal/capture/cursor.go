@@ -124,6 +124,8 @@ func (cs *CursorState) Capture(cardFD int) *CursorFrame {
 		return nil
 	}
 
+	cs.egl.MakeCurrent()
+
 	if uint32(info.fb_id) != cs.lastFBID {
 		cs.lastFBID = uint32(info.fb_id)
 		if cs.lastDMAFD >= 0 {
