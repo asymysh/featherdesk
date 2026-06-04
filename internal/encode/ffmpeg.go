@@ -81,6 +81,8 @@ func (e *FFmpegEncoder) buildArgs() []string {
 
 	args := []string{
 		"-hide_banner", "-nostats",
+		"-fflags", "nobuffer",
+		"-flags", "low_delay",
 		"-f", "rawvideo",
 		"-pix_fmt", "yuv420p",
 		"-video_size", w + "x" + h,
@@ -201,7 +203,7 @@ func (e *FFmpegEncoder) Encode(frame *I420Frame) ([][]byte, error) {
 	select {
 	case nals := <-e.nalCh:
 		return nals, nil
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(16 * time.Millisecond):
 		return nil, nil
 	case <-e.ctx.Done():
 		return nil, e.ctx.Err()

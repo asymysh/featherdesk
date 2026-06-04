@@ -51,16 +51,20 @@ func NewCapturer(parentCtx context.Context, log *logger.Logger) (*Capturer, erro
 }
 
 func (c *Capturer) start() error {
-	// Capture the monitor of the default sink (desktop audio)
-	c.cmd = exec.CommandContext(c.ctx, "pw-cat",
+	target := defaultMonitorSource()
+	args := []string{
 		"--record",
 		"--rate", "48000",
 		"--channels", "2",
 		"--format", "s16",
 		"--latency", "20ms",
-		"--media-category", "Monitor",
-		"-")
+	}
+	if target != "" {
+		args = append(args, "--target", target)
+	}
+	args = append(args, "-")
 
+	c.cmd = exec.CommandContext(c.ctx, "pw-cat", args...)
 	c.cmd.Stderr = &logWriter{log: c.log, module: "pw-cat"}
 
 	var err error
@@ -73,6 +77,16 @@ func (c *Capturer) start() error {
 		return fmt.Errorf("audio: start pw-cat: %w", err)
 	}
 	return nil
+}
+
+func defaultMonitorSource() string {
+	out, err := exec.Command("pactl", "get-default-sink").Output()
+	if err != nil {
+		return ""
+	}
+	sink := string(out)
+	sink = sink[:len(sink)-1] // trim newline
+	return sink + ".monitor"
 }
 
 func (c *Capturer) readLoop() {

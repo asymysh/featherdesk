@@ -47,10 +47,12 @@ if __name__ == '__main__':
 
     cmd = [
         'gst-launch-1.0', '-q',
-        'pipewiresrc', f'path={node_id}', 'do-timestamp=true', '!',
+        'pipewiresrc', f'path={node_id}', 'do-timestamp=true',
+        'min-buffers=1', 'max-buffers=1', '!',
+        'queue', 'max-size-buffers=1', 'leaky=downstream', '!',
         'videoconvert', '!',
         'video/x-raw,format=RGBA', '!',
-        'fdsink', 'fd=1'
+        'fdsink', 'fd=1', 'sync=false'
     ]
 
     proc = subprocess.Popen(cmd, stdout=sys.stdout.buffer)
