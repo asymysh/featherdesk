@@ -61,7 +61,7 @@ func NewX11Capturer(ctx context.Context, fps int) (*X11Capturer, error) {
 		cancel()
 		return nil, fmt.Errorf("capture: failed to create stdout pipe: %w", err)
 	}
-	cmd.Stderr = nil
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		cancel()
