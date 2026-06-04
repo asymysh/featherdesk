@@ -25,6 +25,7 @@ type FFmpegEncoder struct {
 	stdin      io.WriteCloser
 	nalCh      chan [][]byte
 	errCh      chan error
+	writeCh    chan []byte
 	cancel     context.CancelFunc
 	ctx        context.Context
 	idr        atomic.Bool
@@ -40,6 +41,7 @@ func NewFFmpegEncoder(cfg EncoderConfig, log *logger.Logger, hwAccel bool) (*FFm
 		hwAccel: hwAccel,
 		nalCh:   make(chan [][]byte, 4),
 		errCh:   make(chan error, 1),
+		writeCh: make(chan []byte, 2),
 		ctx:     ctx,
 		cancel:  cancel,
 	}
@@ -73,7 +75,18 @@ func (e *FFmpegEncoder) start() error {
 
 	e.running.Store(true)
 	go e.readNALs(stdout)
+	go e.writeLoop()
 	return nil
+}
+
+func (e *FFmpegEncoder) writeLoop() {
+	for raw := range e.writeCh {
+		if _, err := e.stdin.Write(raw); err != nil {
+			e.log.Error("ffmpeg", "write error: "+err.Error())
+			e.running.Store(false)
+			return
+		}
+	}
 }
 
 func (e *FFmpegEncoder) buildArgs() []string {
@@ -201,10 +214,10 @@ drained:
 	raw = append(raw, frame.U...)
 	raw = append(raw, frame.V...)
 
-	if _, err := e.stdin.Write(raw); err != nil {
-		e.log.Error("ffmpeg", "write error: "+err.Error())
-		e.kill()
-		return nil, err
+	select {
+	case e.writeCh <- raw:
+	default:
+		// Drop frame if write queue is full (encoder can't keep up)
 	}
 
 	// For first frame, wait for output
@@ -236,11 +249,13 @@ func (e *FFmpegEncoder) Close() error {
 
 func (e *FFmpegEncoder) restart() error {
 	e.kill()
+	e.writeCh = make(chan []byte, 2)
 	time.Sleep(50 * time.Millisecond)
 	return e.start()
 }
 
 func (e *FFmpegEncoder) kill() {
+	close(e.writeCh)
 	if e.stdin != nil {
 		e.stdin.Close()
 	}
