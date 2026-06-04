@@ -21,6 +21,7 @@ type X11Capturer struct {
 	buf       []byte
 	ctx       context.Context
 	cancel    context.CancelFunc
+	fps       int
 }
 
 func NewX11Capturer(ctx context.Context, fps int) (*X11Capturer, error) {
@@ -35,17 +36,41 @@ func NewX11Capturer(ctx context.Context, fps int) (*X11Capturer, error) {
 	}
 
 	childCtx, cancel := context.WithCancel(ctx)
+	frameSize := int(width) * int(height) * 4
 
+	c := &X11Capturer{
+		frameSize: frameSize,
+		width:     uint32(width),
+		height:    uint32(height),
+		buf:       make([]byte, frameSize),
+		ctx:       childCtx,
+		cancel:    cancel,
+		fps:       fps,
+	}
+
+	if err := c.startProcess(); err != nil {
+		cancel()
+		return nil, err
+	}
+
+	return c, nil
+}
+
+func (c *X11Capturer) startProcess() error {
 	scriptPath := findScreencastScript()
 	var cmd *exec.Cmd
 
 	if scriptPath != "" {
-		cmd = exec.CommandContext(childCtx, "python3", scriptPath, fmt.Sprintf("%d", fps))
+		cmd = exec.CommandContext(c.ctx, "python3", scriptPath, fmt.Sprintf("%d", c.fps))
 	} else {
+		display := os.Getenv("DISPLAY")
+		if display == "" {
+			display = ":0"
+		}
 		args := []string{
 			"-f", "x11grab",
-			"-video_size", fmt.Sprintf("%dx%d", width, height),
-			"-framerate", fmt.Sprintf("%d", fps),
+			"-video_size", fmt.Sprintf("%dx%d", c.width, c.height),
+			"-framerate", fmt.Sprintf("%d", c.fps),
 			"-draw_mouse", "1",
 			"-i", display,
 			"-f", "rawvideo",
@@ -53,38 +78,39 @@ func NewX11Capturer(ctx context.Context, fps int) (*X11Capturer, error) {
 			"-an",
 			"-",
 		}
-		cmd = exec.CommandContext(childCtx, "ffmpeg", args...)
+		cmd = exec.CommandContext(c.ctx, "ffmpeg", args...)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("capture: failed to create stdout pipe: %w", err)
+		return fmt.Errorf("capture: failed to create stdout pipe: %w", err)
 	}
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("capture: failed to start capture process: %w", err)
+		return fmt.Errorf("capture: failed to start capture process: %w", err)
 	}
 
-	frameSize := int(width) * int(height) * 4
-	return &X11Capturer{
-		cmd:       cmd,
-		reader:    bufio.NewReaderSize(stdout, frameSize*2),
-		frameSize: frameSize,
-		width:     uint32(width),
-		height:    uint32(height),
-		buf:       make([]byte, frameSize),
-		ctx:       childCtx,
-		cancel:    cancel,
-	}, nil
+	c.cmd = cmd
+	c.reader = bufio.NewReaderSize(stdout, c.frameSize*2)
+	return nil
 }
 
 func (c *X11Capturer) NextFrame() (*Frame, error) {
 	_, err := io.ReadFull(c.reader, c.buf)
 	if err != nil {
-		return nil, fmt.Errorf("capture: read frame: %w", err)
+		if c.ctx.Err() != nil {
+			return nil, fmt.Errorf("capture: read frame: %w", err)
+		}
+		c.cmd.Wait()
+		time.Sleep(500 * time.Millisecond)
+		if c.ctx.Err() != nil {
+			return nil, fmt.Errorf("capture: context cancelled")
+		}
+		if restartErr := c.startProcess(); restartErr != nil {
+			return nil, fmt.Errorf("capture: respawn failed: %w", restartErr)
+		}
+		return c.NextFrame()
 	}
 
 	return &Frame{

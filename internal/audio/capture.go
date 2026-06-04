@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/aseem/viewport-rds/internal/logger"
@@ -80,13 +81,19 @@ func (c *Capturer) start() error {
 }
 
 func defaultMonitorSource() string {
-	out, err := exec.Command("pactl", "get-default-sink").Output()
+	out, err := exec.Command("pactl", "list", "short", "sources").Output()
 	if err != nil {
 		return ""
 	}
-	sink := string(out)
-	sink = sink[:len(sink)-1] // trim newline
-	return sink + ".monitor"
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, ".monitor") && !strings.Contains(line, "hdmi") {
+			fields := strings.Fields(line)
+			if len(fields) >= 1 {
+				return fields[0]
+			}
+		}
+	}
+	return ""
 }
 
 func (c *Capturer) readLoop() {
