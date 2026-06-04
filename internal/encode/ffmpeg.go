@@ -20,15 +20,16 @@ type FFmpegEncoder struct {
 	log    *logger.Logger
 	hwAccel bool
 
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	nalCh   chan [][]byte
-	errCh   chan error
-	cancel  context.CancelFunc
-	ctx     context.Context
-	idr     atomic.Bool
-	running atomic.Bool
+	mu         sync.Mutex
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	nalCh      chan [][]byte
+	errCh      chan error
+	cancel     context.CancelFunc
+	ctx        context.Context
+	idr        atomic.Bool
+	running    atomic.Bool
+	firstFrame atomic.Bool
 }
 
 func NewFFmpegEncoder(cfg EncoderConfig, log *logger.Logger, hwAccel bool) (*FFmpegEncoder, error) {
@@ -42,6 +43,7 @@ func NewFFmpegEncoder(cfg EncoderConfig, log *logger.Logger, hwAccel bool) (*FFm
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+	e.firstFrame.Store(true)
 	if err := e.start(); err != nil {
 		cancel()
 		return nil, err
@@ -193,10 +195,15 @@ func (e *FFmpegEncoder) Encode(frame *I420Frame) ([][]byte, error) {
 		return nil, err
 	}
 
+	timeout := 16 * time.Millisecond
+	if e.firstFrame.CompareAndSwap(true, false) {
+		timeout = 500 * time.Millisecond
+	}
+
 	select {
 	case nals := <-e.nalCh:
 		return nals, nil
-	case <-time.After(16 * time.Millisecond):
+	case <-time.After(timeout):
 		return nil, nil
 	case <-e.ctx.Done():
 		return nil, e.ctx.Err()
