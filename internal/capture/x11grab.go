@@ -123,8 +123,17 @@ func (c *X11Capturer) NextFrame() (*Frame, error) {
 
 func (c *X11Capturer) Close() error {
 	c.cancel()
-	c.cmd.Wait()
+	if c.cmd != nil {
+		c.cmd.Wait()
+	}
 	return nil
+}
+
+func (c *X11Capturer) Restart() {
+	if c.cmd != nil && c.cmd.Process != nil {
+		c.cmd.Process.Kill()
+		c.cmd.Wait()
+	}
 }
 
 func detectX11Size(display string) (int, int, error) {

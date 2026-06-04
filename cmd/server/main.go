@@ -248,6 +248,7 @@ func main() {
 				}
 				srv.SetNewClientCallback(func() {
 					enc.ForceKeyframe()
+					capturer.Restart()
 				})
 			}
 

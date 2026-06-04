@@ -180,18 +180,30 @@ function updateStats() {
 }
 
 var WORKLET_CODE = 'class PCMProcessor extends AudioWorkletProcessor {\n' +
-    '  constructor() { super(); this.queue = []; this.port.onmessage = (e) => {\n' +
-    '    if (this.queue.length < 32) this.queue.push(e.data);\n' +
-    '  }; }\n' +
+    '  constructor() { super(); this.buf = new Float32Array(0);\n' +
+    '    this.port.onmessage = (e) => {\n' +
+    '      var old = this.buf;\n' +
+    '      var added = e.data;\n' +
+    '      if (old.length > 48000) { old = old.slice(old.length - 24000); }\n' +
+    '      var merged = new Float32Array(old.length + added.length);\n' +
+    '      merged.set(old); merged.set(added, old.length);\n' +
+    '      this.buf = merged;\n' +
+    '    };\n' +
+    '  }\n' +
     '  process(inputs, outputs) {\n' +
     '    var out = outputs[0];\n' +
-    '    if (this.queue.length === 0) { return true; }\n' +
-    '    var chunk = this.queue.shift();\n' +
-    '    for (var ch = 0; ch < out.length && ch < 2; ch++) {\n' +
-    '      var dst = out[ch];\n' +
-    '      for (var i = 0; i < dst.length; i++) {\n' +
-    '        var idx = i * 2 + ch;\n' +
-    '        dst[i] = idx < chunk.length ? chunk[idx] : 0;\n' +
+    '    var needed = out[0].length;\n' +
+    '    var channels = out.length;\n' +
+    '    var samplesNeeded = needed * channels;\n' +
+    '    if (this.buf.length < samplesNeeded) {\n' +
+    '      for (var ch = 0; ch < channels; ch++) out[ch].fill(0);\n' +
+    '      return true;\n' +
+    '    }\n' +
+    '    var consumed = this.buf.slice(0, samplesNeeded);\n' +
+    '    this.buf = this.buf.slice(samplesNeeded);\n' +
+    '    for (var i = 0; i < needed; i++) {\n' +
+    '      for (var ch = 0; ch < channels; ch++) {\n' +
+    '        out[ch][i] = consumed[i * channels + ch];\n' +
     '      }\n' +
     '    }\n' +
     '    return true;\n' +

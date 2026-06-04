@@ -183,6 +183,18 @@ func (e *FFmpegEncoder) Encode(frame *I420Frame) ([][]byte, error) {
 		}
 	}
 
+	// Drain any NALs ready from previous frame before writing new one
+	var result [][]byte
+	for {
+		select {
+		case nals := <-e.nalCh:
+			result = append(result, nals...)
+		default:
+			goto drained
+		}
+	}
+drained:
+
 	frameSize := len(frame.Y) + len(frame.U) + len(frame.V)
 	raw := make([]byte, 0, frameSize)
 	raw = append(raw, frame.Y...)
@@ -195,28 +207,21 @@ func (e *FFmpegEncoder) Encode(frame *I420Frame) ([][]byte, error) {
 		return nil, err
 	}
 
-	timeout := 50 * time.Millisecond
+	// For first frame, wait for output
 	if e.firstFrame.CompareAndSwap(true, false) {
-		timeout = 500 * time.Millisecond
+		select {
+		case nals := <-e.nalCh:
+			result = append(result, nals...)
+		case <-time.After(500 * time.Millisecond):
+		case <-e.ctx.Done():
+			return nil, e.ctx.Err()
+		}
 	}
 
-	select {
-	case nals := <-e.nalCh:
-		// Drain all immediately available NALs (they belong to the same frame)
-		result := nals
-		for {
-			select {
-			case more := <-e.nalCh:
-				result = append(result, more...)
-			default:
-				return result, nil
-			}
-		}
-	case <-time.After(timeout):
-		return nil, nil
-	case <-e.ctx.Done():
-		return nil, e.ctx.Err()
+	if len(result) > 0 {
+		return result, nil
 	}
+	return nil, nil
 }
 
 func (e *FFmpegEncoder) ForceKeyframe() {
