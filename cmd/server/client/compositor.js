@@ -203,20 +203,27 @@ function initAudio() {
     if (audioStarted) return;
     audioStarted = true;
     audioCtx = new AudioContext({sampleRate: 48000});
-    audioCtx.resume();
-    var blob = new Blob([WORKLET_CODE], {type: "application/javascript"});
-    var url = URL.createObjectURL(blob);
-    audioCtx.audioWorklet.addModule(url).then(function() {
-        audioWorklet = new AudioWorkletNode(audioCtx, "pcm-processor", {
-            outputChannelCount: [2]
+    audioCtx.resume().then(function() {
+        var blob = new Blob([WORKLET_CODE], {type: "application/javascript"});
+        var url = URL.createObjectURL(blob);
+        audioCtx.audioWorklet.addModule(url).then(function() {
+            audioWorklet = new AudioWorkletNode(audioCtx, "pcm-processor", {
+                outputChannelCount: [2]
+            });
+            audioWorklet.connect(audioCtx.destination);
+            URL.revokeObjectURL(url);
+        }).catch(function(e) {
+            console.error("audioWorklet load failed:", e);
         });
-        audioWorklet.connect(audioCtx.destination);
-        URL.revokeObjectURL(url);
     });
 }
 
 function playAudio(s16Data) {
     if (!audioWorklet) return;
+    if (audioCtx.state === "suspended") {
+        audioCtx.resume();
+        return;
+    }
     var samples = s16Data.length / 2;
     var floats = new Float32Array(samples);
     var view = new DataView(s16Data.buffer, s16Data.byteOffset, s16Data.byteLength);
@@ -264,8 +271,17 @@ function initInput() {
     canvas.addEventListener("pointermove", function(e) {
         if (!connected) return;
         var rect = canvas.getBoundingClientRect();
-        var x = Math.round((e.clientX - rect.left) / rect.width * canvas.width);
-        var y = Math.round((e.clientY - rect.top) / rect.height * canvas.height);
+        var scaleX = canvas.width / rect.width;
+        var scaleY = canvas.height / rect.height;
+        var scale = Math.max(scaleX, scaleY);
+        var renderedW = canvas.width / scale;
+        var renderedH = canvas.height / scale;
+        var offsetX = (rect.width - renderedW) / 2;
+        var offsetY = (rect.height - renderedH) / 2;
+        var x = Math.round((e.clientX - rect.left - offsetX) / renderedW * canvas.width);
+        var y = Math.round((e.clientY - rect.top - offsetY) / renderedH * canvas.height);
+        x = Math.max(0, Math.min(canvas.width - 1, x));
+        y = Math.max(0, Math.min(canvas.height - 1, y));
         sendInput({type: "mousemove", x: x, y: y});
     });
 
