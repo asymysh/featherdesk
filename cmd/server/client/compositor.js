@@ -18,6 +18,8 @@ var bpsDisplay = 0;
 var audioCtx = null;
 var audioWorklet = null;
 var audioStarted = false;
+var spsNal = null;
+var ppsNal = null;
 
 function init() {
     canvas = document.getElementById("canvas");
@@ -112,11 +114,32 @@ function initDecoder() {
 function decodeFrame(nalData) {
     if (!decoder || decoder.state === "closed") return;
 
-    var isKey = detectKeyframe(nalData);
+    var nalType = getNalType(nalData);
+
+    if (nalType === 7) {
+        spsNal = nalData.slice();
+        return;
+    }
+    if (nalType === 8) {
+        ppsNal = nalData.slice();
+        return;
+    }
+
+    var isKey = (nalType === 5);
+    var data = nalData;
+
+    if (isKey && spsNal && ppsNal) {
+        var combined = new Uint8Array(spsNal.length + ppsNal.length + nalData.length);
+        combined.set(spsNal, 0);
+        combined.set(ppsNal, spsNal.length);
+        combined.set(nalData, spsNal.length + ppsNal.length);
+        data = combined;
+    }
+
     var chunk = new EncodedVideoChunk({
         type: isKey ? "key" : "delta",
         timestamp: performance.now() * 1000,
-        data: nalData
+        data: data
     });
 
     try {
@@ -126,16 +149,20 @@ function decodeFrame(nalData) {
     }
 }
 
-function detectKeyframe(nal) {
-    if (nal.length < 5) return false;
+function getNalType(nal) {
+    if (nal.length < 5) return -1;
     var offset = 0;
     if (nal[0] === 0 && nal[1] === 0 && nal[2] === 0 && nal[3] === 1) {
         offset = 4;
     } else if (nal[0] === 0 && nal[1] === 0 && nal[2] === 1) {
         offset = 3;
     }
-    var nalType = nal[offset] & 0x1F;
-    return nalType === 5 || nalType === 7 || nalType === 8;
+    return nal[offset] & 0x1F;
+}
+
+function detectKeyframe(nal) {
+    var t = getNalType(nal);
+    return t === 5 || t === 7 || t === 8;
 }
 
 function updateStats() {
