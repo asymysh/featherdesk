@@ -104,7 +104,7 @@ function initDecoder() {
         }
     });
     decoder.configure({
-        codec: "avc1.42E01E",
+        codec: "avc1.640033",
         optimizeForLatency: true
     });
 }
@@ -176,6 +176,7 @@ function initAudio() {
     if (audioStarted) return;
     audioStarted = true;
     audioCtx = new AudioContext({sampleRate: 48000});
+    audioCtx.resume();
     var blob = new Blob([WORKLET_CODE], {type: "application/javascript"});
     var url = URL.createObjectURL(blob);
     audioCtx.audioWorklet.addModule(url).then(function() {
@@ -223,6 +224,7 @@ function initInput() {
     document.addEventListener("keydown", function(e) {
         if (!connected) return;
         e.preventDefault();
+        initAudio();
         sendInput({type: "key", event: "down", code: e.code});
     });
 
