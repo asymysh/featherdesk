@@ -230,13 +230,13 @@ func main() {
 					}
 					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 VA-API (hardware)", w, h))
 				} else {
-					encoder, err = encode.NewH264Encoder(encCfg)
+					encoder, err = encode.NewX264Encoder(encCfg)
 					if err != nil {
 						log.Error("main", "encoder init: "+err.Error())
 						cancel()
 						return
 					}
-					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 OpenH264 (software)", w, h))
+					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 x264 ultrafast (software)", w, h))
 				}
 
 				enc = encoder
@@ -244,7 +244,7 @@ func main() {
 				if useHW {
 					srv.SetEncoderType("h264_vaapi")
 				} else {
-					srv.SetEncoderType("openh264")
+					srv.SetEncoderType("x264")
 				}
 				srv.SetNewClientCallback(func() {
 					enc.ForceKeyframe()
