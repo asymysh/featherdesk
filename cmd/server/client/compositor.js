@@ -22,6 +22,14 @@ var audioStarted = false;
 function init() {
     canvas = document.getElementById("canvas");
     ctx2d = canvas.getContext("2d");
+
+    if (typeof VideoDecoder === "undefined") {
+        document.getElementById("info").textContent =
+            "WebCodecs unavailable. Use HTTPS or localhost.";
+        document.querySelector("#status .dot").className = "dot disconnected";
+        return;
+    }
+
     lastStatsTime = performance.now();
     connect();
     requestAnimationFrame(updateStats);

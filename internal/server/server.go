@@ -2,8 +2,15 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"io/fs"
+	"math/big"
 	"net"
 	"net/http"
 	"sync"
@@ -65,22 +72,30 @@ func (s *Server) SetInputCallback(fn func([]byte)) {
 	s.onInput = fn
 }
 
-// Start begins listening. Blocks until context cancels or listener fails.
+// Start begins listening with auto-generated TLS for WebCodecs compatibility.
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(s.cfg.ClientFS)))
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/ws", s.handleWS)
 
+	tlsCert, err := generateSelfSignedCert()
+	if err != nil {
+		return err
+	}
+
 	s.httpSrv = &http.Server{
 		Addr:    net.JoinHostPort(s.cfg.Bind, itoa(s.cfg.Port)),
 		Handler: mux,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+		},
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
 		},
 	}
 
-	ln, err := net.Listen("tcp", s.httpSrv.Addr)
+	ln, err := tls.Listen("tcp", s.httpSrv.Addr, s.httpSrv.TLSConfig)
 	if err != nil {
 		return err
 	}
@@ -92,11 +107,40 @@ func (s *Server) Start(ctx context.Context) error {
 		s.httpSrv.Shutdown(shutCtx)
 	}()
 
-	s.cfg.Log.Info("server", "listening on "+ln.Addr().String())
+	s.cfg.Log.Info("server", "listening on https://"+ln.Addr().String())
 	if err := s.httpSrv.Serve(ln); err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+func generateSelfSignedCert() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "ViewPort RDS"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("0.0.0.0"), net.IPv4(127, 0, 0, 1)},
+		DNSNames:     []string{"localhost"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  key,
+	}, nil
 }
 
 // Broadcast sends an encoded frame to all connected clients.
