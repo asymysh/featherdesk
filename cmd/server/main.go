@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -164,6 +166,8 @@ func main() {
 
 	var converter *encode.Converter
 	var enc encode.Encoder
+	var frameTimes []float64
+	var frameTimesMu sync.Mutex
 
 	var wg sync.WaitGroup
 
@@ -237,12 +241,19 @@ func main() {
 				})
 			}
 
+			encStart := time.Now()
 			i420 := converter.Convert(frame.Data)
 			nals, err := enc.Encode(i420)
+			encElapsed := time.Since(encStart)
+
 			if err != nil {
 				log.Error("encode", err.Error())
 				continue
 			}
+
+			frameTimesMu.Lock()
+			frameTimes = append(frameTimes, float64(encElapsed.Microseconds()))
+			frameTimesMu.Unlock()
 
 			if len(nals) > 0 {
 				srv.Broadcast(nals, uint16(w), uint16(h), frame.Timestamp)
@@ -282,5 +293,38 @@ func main() {
 	<-ctx.Done()
 	log.Info("main", "shutting down")
 	wg.Wait()
+
+	frameTimesMu.Lock()
+	printEncodeStats(frameTimes)
+	frameTimesMu.Unlock()
+
 	log.Info("main", "stopped")
+}
+
+func printEncodeStats(times []float64) {
+	n := len(times)
+	if n == 0 {
+		fmt.Println("\n[encode stats] no frames recorded")
+		return
+	}
+
+	sort.Float64s(times)
+
+	var sum float64
+	for _, t := range times {
+		sum += t
+	}
+	avg := sum / float64(n)
+
+	p1 := times[int(math.Ceil(float64(n)*0.01))-1]
+	p99 := times[int(math.Ceil(float64(n)*0.99))-1]
+	min := times[0]
+	max := times[n-1]
+
+	fmt.Printf("\n[encode stats] %d frames\n", n)
+	fmt.Printf("  avg:  %8.1f us  (%.2f ms)\n", avg, avg/1000)
+	fmt.Printf("  min:  %8.1f us  (%.2f ms)\n", min, min/1000)
+	fmt.Printf("  max:  %8.1f us  (%.2f ms)\n", max, max/1000)
+	fmt.Printf("  P1:   %8.1f us  (%.2f ms)  [1%% low]\n", p1, p1/1000)
+	fmt.Printf("  P99:  %8.1f us  (%.2f ms)\n", p99, p99/1000)
 }
