@@ -195,7 +195,7 @@ func (e *FFmpegEncoder) Encode(frame *I420Frame) ([][]byte, error) {
 		return nil, err
 	}
 
-	timeout := 16 * time.Millisecond
+	timeout := 50 * time.Millisecond
 	if e.firstFrame.CompareAndSwap(true, false) {
 		timeout = 500 * time.Millisecond
 	}
