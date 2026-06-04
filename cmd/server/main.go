@@ -260,15 +260,16 @@ func main() {
 		}
 	}()
 
+	var audioCap *audio.Capturer
 	if !cfg.noAudio {
-		audioCap, audioErr := audio.NewCapturer(ctx, log)
+		var audioErr error
+		audioCap, audioErr = audio.NewCapturer(ctx, log)
 		if audioErr != nil {
 			log.Info("main", "audio: "+audioErr.Error()+" (audio disabled)")
 		} else {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				defer audioCap.Close()
 				for chunk := range audioCap.Chunks() {
 					srv.BroadcastAudio(chunk, uint64(time.Now().UnixMilli()))
 				}
@@ -292,6 +293,9 @@ func main() {
 	<-ctx.Done()
 	log.Info("main", "shutting down")
 	capturer.Close()
+	if audioCap != nil {
+		audioCap.Close()
+	}
 	wg.Wait()
 
 	frameTimesMu.Lock()

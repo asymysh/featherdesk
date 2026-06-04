@@ -90,6 +90,7 @@ func defaultMonitorSource() string {
 }
 
 func (c *Capturer) readLoop() {
+	defer close(c.ch)
 	buf := make([]byte, ChunkBytes)
 	for {
 		if c.ctx.Err() != nil {
