@@ -27,6 +27,13 @@ import (
 //go:embed all:client
 var clientFS embed.FS
 
+type frameStats struct {
+	capture float64
+	convert float64
+	encode  float64
+	total   float64
+}
+
 type config struct {
 	port     int
 	fps      int
@@ -165,8 +172,9 @@ func main() {
 
 	var converter *encode.Converter
 	var enc encode.Encoder
-	var frameTimes []float64
-	var frameTimesMu sync.Mutex
+
+	var stats []frameStats
+	var statsMu sync.Mutex
 
 	var wg sync.WaitGroup
 
@@ -180,7 +188,10 @@ func main() {
 				return
 			}
 
+			captureStart := time.Now()
 			frame, err := capturer.NextFrame()
+			captureDur := time.Since(captureStart)
+
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -240,19 +251,28 @@ func main() {
 				})
 			}
 
-			encStart := time.Now()
+			convertStart := time.Now()
 			i420 := converter.Convert(frame.Data)
+			convertDur := time.Since(convertStart)
+
+			encodeStart := time.Now()
 			nals, err := enc.Encode(i420)
-			encElapsed := time.Since(encStart)
+			encodeDur := time.Since(encodeStart)
 
 			if err != nil {
 				log.Error("encode", err.Error())
 				continue
 			}
 
-			frameTimesMu.Lock()
-			frameTimes = append(frameTimes, float64(encElapsed.Microseconds()))
-			frameTimesMu.Unlock()
+			totalDur := time.Since(captureStart)
+			statsMu.Lock()
+			stats = append(stats, frameStats{
+				capture: float64(captureDur.Microseconds()),
+				convert: float64(convertDur.Microseconds()),
+				encode:  float64(encodeDur.Microseconds()),
+				total:   float64(totalDur.Microseconds()),
+			})
+			statsMu.Unlock()
 
 			if len(nals) > 0 {
 				srv.Broadcast(nals, uint16(w), uint16(h), frame.Timestamp)
@@ -298,37 +318,53 @@ func main() {
 	}
 	wg.Wait()
 
-	frameTimesMu.Lock()
-	printEncodeStats(frameTimes)
-	frameTimesMu.Unlock()
+	statsMu.Lock()
+	printDetailedStats(stats)
+	statsMu.Unlock()
 
 	log.Info("main", "stopped")
 }
 
-func printEncodeStats(times []float64) {
-	n := len(times)
+func printDetailedStats(stats []frameStats) {
+	n := len(stats)
 	if n == 0 {
 		fmt.Println("\n[encode stats] no frames recorded")
 		return
 	}
 
-	sort.Float64s(times)
+	captures := make([]float64, n)
+	converts := make([]float64, n)
+	encodes := make([]float64, n)
+	totals := make([]float64, n)
 
+	for i, s := range stats {
+		captures[i] = s.capture
+		converts[i] = s.convert
+		encodes[i] = s.encode
+		totals[i] = s.total
+	}
+
+	fmt.Printf("\n[pipeline stats] %d frames\n", n)
+	fmt.Println("                    avg       min       max       P1        P99")
+	printStatLine("capture (wait)", captures)
+	printStatLine("convert (yuv) ", converts)
+	printStatLine("encode        ", encodes)
+	printStatLine("total         ", totals)
+}
+
+func printStatLine(label string, vals []float64) {
+	sort.Float64s(vals)
+	n := len(vals)
 	var sum float64
-	for _, t := range times {
-		sum += t
+	for _, v := range vals {
+		sum += v
 	}
 	avg := sum / float64(n)
+	min := vals[0]
+	max := vals[n-1]
+	p1 := vals[int(math.Ceil(float64(n)*0.01))-1]
+	p99 := vals[int(math.Ceil(float64(n)*0.99))-1]
 
-	p1 := times[int(math.Ceil(float64(n)*0.01))-1]
-	p99 := times[int(math.Ceil(float64(n)*0.99))-1]
-	min := times[0]
-	max := times[n-1]
-
-	fmt.Printf("\n[encode stats] %d frames\n", n)
-	fmt.Printf("  avg:  %8.1f us  (%.2f ms)\n", avg, avg/1000)
-	fmt.Printf("  min:  %8.1f us  (%.2f ms)\n", min, min/1000)
-	fmt.Printf("  max:  %8.1f us  (%.2f ms)\n", max, max/1000)
-	fmt.Printf("  P1:   %8.1f us  (%.2f ms)  [1%% low]\n", p1, p1/1000)
-	fmt.Printf("  P99:  %8.1f us  (%.2f ms)\n", p99, p99/1000)
+	fmt.Printf("  %s  %6.1fms  %6.1fms  %6.1fms  %6.1fms  %6.1fms\n",
+		label, avg/1000, min/1000, max/1000, p1/1000, p99/1000)
 }

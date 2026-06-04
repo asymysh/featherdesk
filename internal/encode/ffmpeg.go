@@ -110,9 +110,8 @@ func (e *FFmpegEncoder) buildArgs() []string {
 	}
 
 	args = append(args,
-		"-g", fmt.Sprintf("%d", e.cfg.FPS*10),
+		"-g", "30",
 		"-bf", "0",
-		"-flags", "+cgop",
 		"-f", "h264",
 		"pipe:1",
 	)
@@ -177,12 +176,6 @@ func (e *FFmpegEncoder) Encode(frame *I420Frame) ([][]byte, error) {
 	defer e.mu.Unlock()
 
 	if !e.running.Load() {
-		if err := e.restart(); err != nil {
-			return nil, err
-		}
-	}
-
-	if e.idr.CompareAndSwap(true, false) {
 		if err := e.restart(); err != nil {
 			return nil, err
 		}
