@@ -222,13 +222,13 @@ func main() {
 				}
 
 				if useHW {
-					encoder, err = encode.NewFFmpegEncoder(encCfg, log, true)
+					encoder, err = encode.NewVAAPIEncoder(encCfg)
 					if err != nil {
-						log.Error("main", "ffmpeg hw encoder: "+err.Error())
+						log.Error("main", "vaapi encoder: "+err.Error())
 						cancel()
 						return
 					}
-					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 VA-API (hardware)", w, h))
+					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 VA-API cgo (hardware)", w, h))
 				} else {
 					encoder, err = encode.NewH264Encoder(encCfg)
 					if err != nil {
