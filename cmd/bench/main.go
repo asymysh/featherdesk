@@ -215,11 +215,19 @@ func main() {
 		{"vaapi-h264-qp26-lp", "high", 26, 1, true},
 		{"vaapi-h264-qp26-full", "high", 26, 1, false},
 		{"vaapi-h264-qp20-lp", "high", 20, 1, true},
+		{"vaapi-h264-qp24-lp", "high", 24, 1, true},
+		{"vaapi-h264-qp28-lp", "high", 28, 1, true},
 		{"vaapi-h264-qp32-lp", "high", 32, 1, true},
+		{"vaapi-h264-qp36-lp", "high", 36, 1, true},
+		{"vaapi-h264-qp40-lp", "high", 40, 1, true},
 		{"vaapi-h264-baseline-qp26-lp", "constrained_baseline", 26, 1, true},
+		{"vaapi-h264-baseline-qp32-lp", "constrained_baseline", 32, 1, true},
 		{"vaapi-h264-main-qp26-lp", "main", 26, 1, true},
+		{"vaapi-h264-main-qp32-lp", "main", 32, 1, true},
 		{"vaapi-h264-qp26-lp-async2", "high", 26, 2, true},
 		{"vaapi-h264-qp26-lp-async4", "high", 26, 4, true},
+		{"vaapi-h264-qp20-full", "high", 20, 1, false},
+		{"vaapi-h264-qp32-full", "high", 32, 1, false},
 	}
 	for _, cfg := range vaapiConfigs {
 		cfg := cfg
@@ -260,11 +268,29 @@ func main() {
 			"-vf", "format=nv12,hwupload",
 			"-c:v", "h264_vaapi", "-qp", "32", "-low_power", "1",
 		}},
+		{"ffsub-vaapi-qp36-lp", []string{
+			"-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+			"-filter_hw_device", "va",
+			"-vf", "format=nv12,hwupload",
+			"-c:v", "h264_vaapi", "-qp", "36", "-low_power", "1",
+		}},
+		{"ffsub-vaapi-qp40-lp", []string{
+			"-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+			"-filter_hw_device", "va",
+			"-vf", "format=nv12,hwupload",
+			"-c:v", "h264_vaapi", "-qp", "40", "-low_power", "1",
+		}},
 		{"ffsub-vaapi-baseline-qp26-lp", []string{
 			"-init_hw_device", "vaapi=va:/dev/dri/renderD128",
 			"-filter_hw_device", "va",
 			"-vf", "format=nv12,hwupload",
 			"-c:v", "h264_vaapi", "-qp", "26", "-low_power", "1", "-profile:v", "constrained_baseline",
+		}},
+		{"ffsub-vaapi-main-qp26-lp", []string{
+			"-init_hw_device", "vaapi=va:/dev/dri/renderD128",
+			"-filter_hw_device", "va",
+			"-vf", "format=nv12,hwupload",
+			"-c:v", "h264_vaapi", "-qp", "26", "-low_power", "1", "-profile:v", "main",
 		}},
 	}
 	for _, cfg := range ffmpegHWConfigs {
@@ -273,6 +299,75 @@ func main() {
 			name: cfg.name,
 			factory: func() (EncoderBench, error) {
 				return NewFFmpegSubBench(cfg.name, *width, *height, cfg.args)
+			},
+		})
+	}
+
+	// === LIBRARY 9: Direct libva (raw VA-API) ===
+	libvaConfigs := []struct {
+		name      string
+		qp        int
+		idrPeriod int
+	}{
+		{"libva-direct-qp20-idr30", 20, 30},
+		{"libva-direct-qp26-idr30", 26, 30},
+		{"libva-direct-qp26-idr0", 26, 0},
+		{"libva-direct-qp32-idr30", 32, 30},
+		{"libva-direct-qp36-idr30", 36, 30},
+		{"libva-direct-qp40-idr30", 40, 30},
+	}
+	for _, cfg := range libvaConfigs {
+		cfg := cfg
+		all = append(all, encoderFactory{
+			name: cfg.name,
+			factory: func() (EncoderBench, error) {
+				return NewLibVABench(cfg.name, *width, *height, cfg.qp, cfg.idrPeriod)
+			},
+		})
+	}
+
+	// === LIBRARY 10: Intel VPL/QSV ===
+	vplConfigs := []struct {
+		name        string
+		qp          int
+		targetUsage int
+	}{
+		{"vpl-qp26-tu1", 26, 1},
+		{"vpl-qp26-tu4", 26, 4},
+		{"vpl-qp26-tu7", 26, 7},
+		{"vpl-qp32-tu7", 32, 7},
+		{"vpl-qp20-tu7", 20, 7},
+	}
+	for _, cfg := range vplConfigs {
+		cfg := cfg
+		all = append(all, encoderFactory{
+			name: cfg.name,
+			factory: func() (EncoderBench, error) {
+				return NewVPLBench(cfg.name, *width, *height, cfg.qp, cfg.targetUsage)
+			},
+		})
+	}
+
+	// === LIBRARY 11: GStreamer vah264lpenc ===
+	gstConfigs := []struct {
+		name  string
+		props map[string]string
+	}{
+		{"gst-vaapi-qp26-tu4", map[string]string{"qpi": "26", "qpp": "26", "target-usage": "4"}},
+		{"gst-vaapi-qp26-tu1", map[string]string{"qpi": "26", "qpp": "26", "target-usage": "1"}},
+		{"gst-vaapi-qp26-tu7", map[string]string{"qpi": "26", "qpp": "26", "target-usage": "7"}},
+		{"gst-vaapi-qp32-tu4", map[string]string{"qpi": "32", "qpp": "32", "target-usage": "4"}},
+		{"gst-vaapi-qp32-tu7", map[string]string{"qpi": "32", "qpp": "32", "target-usage": "7"}},
+		{"gst-vaapi-qp20-tu4", map[string]string{"qpi": "20", "qpp": "20", "target-usage": "4"}},
+		{"gst-vaapi-qp26-nocabac", map[string]string{"qpi": "26", "qpp": "26", "target-usage": "4", "cabac": "false"}},
+		{"gst-vaapi-qp26-ref1", map[string]string{"qpi": "26", "qpp": "26", "target-usage": "4", "ref-frames": "1"}},
+	}
+	for _, cfg := range gstConfigs {
+		cfg := cfg
+		all = append(all, encoderFactory{
+			name: cfg.name,
+			factory: func() (EncoderBench, error) {
+				return NewGStreamerBench(cfg.name, *width, *height, cfg.props)
 			},
 		})
 	}
