@@ -1,4 +1,8 @@
+github.com/KarpelesLab/goavif v0.1.0 h1:CJ5go0sQPjpfNL0E7Zzgn/IMi5ppv/gd1oy4URU2+j4=
+github.com/KarpelesLab/goavif v0.1.0/go.mod h1:JvXzaymMyoNY+cWkJhMLM1f89NM2+4cYaYOz2P5vgO8=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
+github.com/opd-ai/vp8 v0.0.0-20260601221734-3caecc15c9dc h1:dlro4FjTniN7GWb0tyP2Es83TeivdRf1vMYudYBMkeM=
+github.com/opd-ai/vp8 v0.0.0-20260601221734-3caecc15c9dc/go.mod h1:HZ0hbgXC96+GvJ61xM1lma7OZN96VyBJXaH/F1SUqwo=
 golang.org/x/sys v0.45.0 h1:dO4czNzziLiiXplLQgBCEpCvXQ3dnkn0SdaZSYdQ+FY=
 golang.org/x/sys v0.45.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
