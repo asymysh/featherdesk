@@ -132,7 +132,6 @@ func main() {
 		log.Error("main", "capture: "+err.Error())
 		os.Exit(1)
 	}
-	defer capturer.Close()
 	log.Info("main", "capture: X11 capturer initialized")
 
 	clientContent, err := fs.Sub(clientFS, "client")
@@ -292,6 +291,7 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("main", "shutting down")
+	capturer.Close()
 	wg.Wait()
 
 	frameTimesMu.Lock()
