@@ -202,7 +202,16 @@ func (e *FFmpegEncoder) Encode(frame *I420Frame) ([][]byte, error) {
 
 	select {
 	case nals := <-e.nalCh:
-		return nals, nil
+		// Drain all immediately available NALs (they belong to the same frame)
+		result := nals
+		for {
+			select {
+			case more := <-e.nalCh:
+				result = append(result, more...)
+			default:
+				return result, nil
+			}
+		}
 	case <-time.After(timeout):
 		return nil, nil
 	case <-e.ctx.Done():
