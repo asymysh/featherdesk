@@ -32,12 +32,17 @@ function init() {
 
     lastStatsTime = performance.now();
     connect();
+    initInput();
     requestAnimationFrame(updateStats);
 }
 
 function connect() {
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     var url = proto + "//" + location.host + "/ws?role=control";
+    var token = new URLSearchParams(location.search).get("token");
+    if (token) {
+        url += "&token=" + encodeURIComponent(token);
+    }
     ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
 
@@ -300,15 +305,6 @@ function initInput() {
     canvas.addEventListener("contextmenu", function(e) {
         e.preventDefault();
     });
-}
-
-function init() {
-    canvas = document.getElementById("canvas");
-    ctx2d = canvas.getContext("2d");
-    lastStatsTime = performance.now();
-    connect();
-    initInput();
-    requestAnimationFrame(updateStats);
 }
 
 document.addEventListener("DOMContentLoaded", init);
