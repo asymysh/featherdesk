@@ -18,8 +18,6 @@ var bpsDisplay = 0;
 var audioCtx = null;
 var audioWorklet = null;
 var audioStarted = false;
-var spsNal = null;
-var ppsNal = null;
 
 function init() {
     canvas = document.getElementById("canvas");
@@ -115,31 +113,12 @@ function decodeFrame(nalData) {
     if (!decoder || decoder.state === "closed") return;
 
     var nalType = getNalType(nalData);
-
-    if (nalType === 7) {
-        spsNal = nalData.slice();
-        return;
-    }
-    if (nalType === 8) {
-        ppsNal = nalData.slice();
-        return;
-    }
-
-    var isKey = (nalType === 5);
-    var data = nalData;
-
-    if (isKey && spsNal && ppsNal) {
-        var combined = new Uint8Array(spsNal.length + ppsNal.length + nalData.length);
-        combined.set(spsNal, 0);
-        combined.set(ppsNal, spsNal.length);
-        combined.set(nalData, spsNal.length + ppsNal.length);
-        data = combined;
-    }
+    var isKey = (nalType === 5 || nalType === 7);
 
     var chunk = new EncodedVideoChunk({
         type: isKey ? "key" : "delta",
         timestamp: performance.now() * 1000,
-        data: data
+        data: nalData
     });
 
     try {
