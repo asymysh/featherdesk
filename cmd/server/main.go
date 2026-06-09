@@ -18,12 +18,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aseem/viewport-rds/internal/audio"
-	"github.com/aseem/viewport-rds/internal/capture"
-	"github.com/aseem/viewport-rds/internal/encode"
-	"github.com/aseem/viewport-rds/internal/input"
-	"github.com/aseem/viewport-rds/internal/logger"
-	"github.com/aseem/viewport-rds/internal/server"
+	"github.com/asymysh/featherdesk/internal/audio"
+	"github.com/asymysh/featherdesk/internal/capture"
+	"github.com/asymysh/featherdesk/internal/encode"
+	"github.com/asymysh/featherdesk/internal/input"
+	"github.com/asymysh/featherdesk/internal/logger"
+	"github.com/asymysh/featherdesk/internal/server"
 )
 
 //go:embed all:client
@@ -133,7 +133,7 @@ func main() {
 	cfg := parseFlags()
 	log := newLogger(cfg)
 
-	log.Info("main", "ViewPort RDS v0.1.0")
+	log.Info("main", "FeatherDesk v0.1.0")
 
 	token := cfg.token
 	if cfg.noAuth {

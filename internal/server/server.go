@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -17,8 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aseem/viewport-rds/internal/logger"
-	"github.com/aseem/viewport-rds/internal/protocol"
+	"github.com/asymysh/featherdesk/internal/logger"
+	"github.com/asymysh/featherdesk/internal/protocol"
 	"github.com/coder/websocket"
 )
 
@@ -28,6 +29,9 @@ type Config struct {
 	Bind     string
 	Log      *logger.Logger
 	ClientFS fs.FS
+	// Token, when non-empty, is required as a ?token= query parameter
+	// on WebSocket connections.
+	Token string
 }
 
 const maxClients = 25
@@ -48,11 +52,16 @@ type Server struct {
 	bytesBroadcast  atomic.Uint64
 	encoderType     string
 	audioEnabled    bool
+
+	connLimiter *rateLimiter
 }
 
 // New creates a Server ready to listen.
 func New(cfg Config) *Server {
-	return &Server{cfg: cfg}
+	return &Server{
+		cfg:         cfg,
+		connLimiter: newRateLimiter(5, 10), // 5 handshakes/sec, burst 10
+	}
 }
 
 // SetNewClientCallback registers a function called on each new client connection.
@@ -219,6 +228,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if !s.connLimiter.allow() {
+		http.Error(w, "too many connection attempts", http.StatusTooManyRequests)
+		return
+	}
+
+	if s.cfg.Token != "" {
+		got := r.URL.Query().Get("token")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.Token)) != 1 {
+			s.cfg.Log.Info("server", "ws rejected: bad or missing token from "+r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	if int(s.count.Load()) >= maxClients {
 		http.Error(w, "max clients reached", http.StatusServiceUnavailable)
 		return

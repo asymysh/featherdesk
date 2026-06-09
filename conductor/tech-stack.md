@@ -1,4 +1,4 @@
-# Tech Stack - ViewPort RDS
+# Tech Stack - FeatherDesk
 
 ## Language
 

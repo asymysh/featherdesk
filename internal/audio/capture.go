@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aseem/viewport-rds/internal/logger"
+	"github.com/asymysh/featherdesk/internal/logger"
 )
 
 const (

@@ -10,8 +10,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/aseem/viewport-rds/internal/logger"
-	"github.com/aseem/viewport-rds/internal/protocol"
+	"github.com/asymysh/featherdesk/internal/logger"
+	"github.com/asymysh/featherdesk/internal/protocol"
 	"github.com/coder/websocket"
 )
 

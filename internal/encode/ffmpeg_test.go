@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/aseem/viewport-rds/internal/logger"
+	"github.com/asymysh/featherdesk/internal/logger"
 )
 
 func ffmpegAvailable() bool {

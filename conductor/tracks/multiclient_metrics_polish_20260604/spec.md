@@ -47,7 +47,7 @@ Upgrade the server from single-client to supporting 25 concurrent viewers with r
 - Non-blocking: test data uses bandwidth_test frame type
 
 ### FR-6: Production Readiness
-- systemd service unit file (viewport-rds.service)
+- systemd service unit file (featherdesk.service)
 - setcap documentation and helper script
 - Graceful shutdown drains all clients
 - `--bind` flag for listen address (default 0.0.0.0)

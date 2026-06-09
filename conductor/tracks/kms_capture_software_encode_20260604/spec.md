@@ -65,7 +65,7 @@ This is the first working demo - a single viewer connecting to the server and se
 
 ## Acceptance Criteria
 
-1. `viewport-rds --port 30084` starts and captures screen via KMS
+1. `featherdesk --port 30084` starts and captures screen via KMS
 2. Opening `http://host:30084/` in Chrome shows the live desktop
 3. Stream runs at target FPS (configurable, default 30)
 4. No memory growth over time (stable RSS)

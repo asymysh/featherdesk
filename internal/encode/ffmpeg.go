@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aseem/viewport-rds/internal/logger"
+	"github.com/asymysh/featherdesk/internal/logger"
 )
 
 type FFmpegEncoder struct {

@@ -1,7 +1,7 @@
 # Review: T1 - Initialize Go module and directory structure
 
 ## Changes Made
-- Created Go module (`go.mod`) with module path `github.com/aseem/viewport-rds`
+- Created Go module (`go.mod`) with module path `github.com/aseem/featherdesk`
 - Created directory structure: `cmd/server/`, `internal/capture/`, `internal/encode/`, `internal/server/`, `internal/protocol/`, `client/`
 - Created Makefile with build, test, lint, fmt, vet, cover, clean, check targets
 - Created `.gitignore` for Go project artifacts

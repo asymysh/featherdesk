@@ -3,7 +3,7 @@
 ## Phase 1: Project Foundation [checkpoint: e2d5bea]
 
 - [x] Task: Initialize Go module and directory structure [71e1084]
-    - [ ] Create `go.mod` with module path `github.com/aseem/viewport-rds`
+    - [ ] Create `go.mod` with module path `github.com/aseem/featherdesk`
     - [ ] Create directories: `cmd/server/`, `internal/capture/`, `internal/encode/`, `internal/server/`, `internal/protocol/`, `client/`
     - [ ] Create Makefile (build, test, lint, fmt, clean targets)
     - [ ] Create `.gitignore` for Go project

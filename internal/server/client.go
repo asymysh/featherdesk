@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aseem/viewport-rds/internal/logger"
+	"github.com/asymysh/featherdesk/internal/logger"
 	"github.com/coder/websocket"
 )
 

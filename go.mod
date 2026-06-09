@@ -1,4 +1,4 @@
-module github.com/aseem/viewport-rds
+module github.com/asymysh/featherdesk
 
 go 1.26.0
 

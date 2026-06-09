@@ -169,11 +169,11 @@ go mod tidy
 ### Daily Development
 ```bash
 # Build
-go build -o viewport-rds ./cmd/server
+go build -o featherdesk ./cmd/server
 
 # Run
-sudo setcap cap_sys_admin+p ./viewport-rds
-./viewport-rds --hardware --port 30084
+sudo setcap cap_sys_admin+p ./featherdesk
+./featherdesk --hardware --port 30084
 
 # Run tests
 go test ./...
