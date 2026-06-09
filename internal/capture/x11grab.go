@@ -121,6 +121,11 @@ func (c *X11Capturer) NextFrame() (*Frame, error) {
 	}, nil
 }
 
+// Size returns the capture dimensions in pixels.
+func (c *X11Capturer) Size() (width, height int) {
+	return int(c.width), int(c.height)
+}
+
 func (c *X11Capturer) Close() error {
 	c.cancel()
 	if c.cmd != nil {
@@ -162,7 +167,7 @@ func findScreencastScript() string {
 	dir := filepath.Dir(exe)
 	candidates := []string{
 		filepath.Join(dir, "screencast.py"),
-		"/home/aseem/internal/capture/screencast.py",
+		filepath.Join(dir, "internal", "capture", "screencast.py"),
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
