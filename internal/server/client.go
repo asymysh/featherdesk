@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/aseem/viewport-rds/internal/logger"
@@ -16,10 +17,12 @@ const (
 
 // Client represents a connected WebSocket viewer.
 type Client struct {
-	conn    *websocket.Conn
-	send    chan []byte
-	log     *logger.Logger
-	onText  func([]byte)
+	conn        *websocket.Conn
+	send        chan []byte
+	log         *logger.Logger
+	onText      func([]byte)
+	textLimiter *rateLimiter
+	textDropped uint64
 }
 
 func newClient(conn *websocket.Conn, log *logger.Logger) *Client {
@@ -27,6 +30,9 @@ func newClient(conn *websocket.Conn, log *logger.Logger) *Client {
 		conn: conn,
 		send: make(chan []byte, writeBufferSize),
 		log:  log,
+		// Input messages: high-frequency mousemove tops out well below
+		// this; anything beyond is abuse or a client bug.
+		textLimiter: newRateLimiter(500, 1000),
 	}
 	go c.writePump()
 	return c
@@ -44,12 +50,22 @@ func (c *Client) Send(msg []byte) {
 // ReadLoop blocks reading messages from the client until disconnect.
 func (c *Client) ReadLoop(ctx context.Context) {
 	defer c.conn.CloseNow()
+	c.log.Info("server", "ReadLoop started")
 	for {
 		typ, data, err := c.conn.Read(ctx)
 		if err != nil {
+			c.log.Info("server", "ReadLoop exit: "+err.Error())
 			return
 		}
+		c.log.Debug("server", fmt.Sprintf("ReadLoop msg type=%d len=%d", typ, len(data)))
 		if typ == websocket.MessageText && c.onText != nil {
+			if !c.textLimiter.allow() {
+				c.textDropped++
+				if c.textDropped == 1 || c.textDropped%1000 == 0 {
+					c.log.Info("server", "input rate limit exceeded, dropping messages")
+				}
+				continue
+			}
 			c.onText(data)
 		}
 	}

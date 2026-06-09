@@ -168,7 +168,6 @@ func (c *X11Capturer) Close() error {
 func (c *X11Capturer) Restart() {
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
-		c.cmd.Wait()
 	}
 }
 

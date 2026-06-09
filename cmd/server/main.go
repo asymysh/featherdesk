@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -44,6 +46,8 @@ type config struct {
 	software bool
 	noAudio  bool
 	bind     string
+	token    string
+	noAuth   bool
 }
 
 func parseFlags() config {
@@ -56,9 +60,19 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.hardware, "hardware", false, "Force VA-API hardware encoding")
 	flag.BoolVar(&cfg.software, "software", false, "Force OpenH264 software encoding")
 	flag.BoolVar(&cfg.noAudio, "no-audio", false, "Disable audio capture")
-	flag.StringVar(&cfg.bind, "bind", "0.0.0.0", "Bind address")
+	flag.StringVar(&cfg.bind, "bind", "127.0.0.1", "Bind address (use 0.0.0.0 to expose on the network)")
+	flag.StringVar(&cfg.token, "token", "", "Auth token required on client connections (auto-generated if empty)")
+	flag.BoolVar(&cfg.noAuth, "no-auth", false, "Disable token authentication (not recommended)")
 	flag.Parse()
 	return cfg
+}
+
+func generateToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func newLogger(cfg config) *logger.Logger {
@@ -120,7 +134,29 @@ func main() {
 	log := newLogger(cfg)
 
 	log.Info("main", "ViewPort RDS v0.1.0")
-	log.Info("main", fmt.Sprintf("listening on http://%s:%d/", cfg.bind, cfg.port))
+
+	token := cfg.token
+	if cfg.noAuth {
+		token = ""
+		log.Info("main", "auth: DISABLED (--no-auth)")
+	} else if token == "" {
+		var tokErr error
+		token, tokErr = generateToken()
+		if tokErr != nil {
+			log.Error("main", "token generation: "+tokErr.Error())
+			os.Exit(1)
+		}
+	}
+
+	host := cfg.bind
+	if host == "0.0.0.0" {
+		host = "localhost"
+	}
+	if token != "" {
+		log.Info("main", fmt.Sprintf("connect at https://%s:%d/?token=%s", host, cfg.port, token))
+	} else {
+		log.Info("main", fmt.Sprintf("connect at https://%s:%d/", host, cfg.port))
+	}
 
 	capKMS := os.Geteuid() == 0
 	capVAAPI := encode.ProbeVAAPI()
@@ -152,22 +188,28 @@ func main() {
 		Bind:     cfg.bind,
 		Log:      log,
 		ClientFS: clientContent,
+		Token:    token,
 	})
 
-	// Input injection (best-effort: non-fatal if uinput unavailable)
-	inputDev, inputErr := input.NewDevice(2560, 1440)
+	// Input injection (best-effort: non-fatal if uinput unavailable).
+	// Device geometry must match the captured display, or absolute mouse
+	// coordinates from the client will be mispositioned.
+	capW, capH := capturer.Size()
+	inputDev, inputErr := input.NewDevice(capW, capH)
 	if inputErr != nil {
 		log.Info("main", "input: "+inputErr.Error()+" (input disabled)")
 	} else {
 		defer inputDev.Close()
 		srv.SetInputCallback(func(data []byte) {
+			log.Debug("input", "recv: "+string(data))
 			msg, err := input.ParseMessage(data)
 			if err != nil {
+				log.Debug("input", "malformed message dropped: "+err.Error())
 				return
 			}
 			inputDev.HandleMessage(msg)
 		})
-		log.Info("main", "input: uinput device created")
+		log.Info("main", fmt.Sprintf("input: uinput device created (%dx%d)", capW, capH))
 	}
 
 	var converter *encode.Converter
@@ -213,9 +255,9 @@ func main() {
 				}
 
 				var encoder encode.Encoder
-				useHW := cfg.hardware || (!cfg.software && encode.ProbeVAAPI())
+				useHW := cfg.hardware || (!cfg.software && capVAAPI)
 
-				if cfg.hardware && !encode.ProbeVAAPI() {
+				if cfg.hardware && !capVAAPI {
 					log.Error("main", "VA-API hardware encoding requested but not available")
 					cancel()
 					return
@@ -248,7 +290,6 @@ func main() {
 				}
 				srv.SetNewClientCallback(func() {
 					enc.ForceKeyframe()
-					capturer.Restart()
 				})
 			}
 
@@ -267,6 +308,12 @@ func main() {
 
 			totalDur := time.Since(captureStart)
 			statsMu.Lock()
+			// Bound memory on long sessions: keep the most recent half
+			// once the cap is reached (~55 min @ 30fps).
+			const maxStatsSamples = 100000
+			if len(stats) >= maxStatsSamples {
+				stats = append(stats[:0], stats[len(stats)/2:]...)
+			}
 			stats = append(stats, frameStats{
 				capture: float64(captureDur.Microseconds()),
 				convert: float64(convertDur.Microseconds()),
