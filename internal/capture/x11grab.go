@@ -7,21 +7,25 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 type X11Capturer struct {
-	cmd       *exec.Cmd
-	reader    *bufio.Reader
-	frameSize int
-	width     uint32
-	height    uint32
-	buf       []byte
-	ctx       context.Context
-	cancel    context.CancelFunc
-	fps       int
+	cmd         *exec.Cmd
+	reader      *bufio.Reader
+	frameSize   int
+	width       uint32
+	height      uint32
+	buf         []byte
+	ctx         context.Context
+	cancel      context.CancelFunc
+	fps         int
+	nodeID      uint32
+	dbusConn    *dbus.Conn
+	sessionPath dbus.ObjectPath
 }
 
 func NewX11Capturer(ctx context.Context, fps int) (*X11Capturer, error) {
@@ -57,38 +61,62 @@ func NewX11Capturer(ctx context.Context, fps int) (*X11Capturer, error) {
 }
 
 func (c *X11Capturer) startProcess() error {
-	scriptPath := findScreencastScript()
-	var cmd *exec.Cmd
-
-	if scriptPath != "" {
-		cmd = exec.CommandContext(c.ctx, "python3", scriptPath, fmt.Sprintf("%d", c.fps))
-	} else {
-		display := os.Getenv("DISPLAY")
-		if display == "" {
-			display = ":0"
-		}
-		args := []string{
-			"-f", "x11grab",
-			"-video_size", fmt.Sprintf("%dx%d", c.width, c.height),
-			"-framerate", fmt.Sprintf("%d", c.fps),
-			"-draw_mouse", "1",
-			"-i", display,
-			"-f", "rawvideo",
-			"-pix_fmt", "rgba",
-			"-an",
-			"-",
-		}
-		cmd = exec.CommandContext(c.ctx, "ffmpeg", args...)
+	nodeID, conn, sessionPath, err := getMutterScreencastNode()
+	if err == nil {
+		c.nodeID = nodeID
+		c.dbusConn = conn
+		c.sessionPath = sessionPath
+		fmt.Fprintf(os.Stderr, "PipeWire node: %d\n", nodeID)
+		return c.startGStreamer(nodeID)
 	}
 
+	fmt.Fprintf(os.Stderr, "screencast unavailable (%v), falling back to x11grab\n", err)
+	return c.startX11Grab()
+}
+
+func (c *X11Capturer) startGStreamer(nodeID uint32) error {
+	args := []string{
+		"-q",
+		"pipewiresrc", fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
+		"keepalive-time=100", "resend-last=true", "!",
+		"queue", "max-size-buffers=1", "max-size-time=0", "max-size-bytes=0", "leaky=downstream", "!",
+		"videoconvert", "!",
+		"video/x-raw,format=RGBA", "!",
+		"fdsink", "fd=1", "sync=false",
+	}
+	cmd := exec.CommandContext(c.ctx, "gst-launch-1.0", args...)
+	return c.attachCmd(cmd)
+}
+
+func (c *X11Capturer) startX11Grab() error {
+	display := os.Getenv("DISPLAY")
+	if display == "" {
+		display = ":0"
+	}
+	args := []string{
+		"-f", "x11grab",
+		"-video_size", fmt.Sprintf("%dx%d", c.width, c.height),
+		"-framerate", fmt.Sprintf("%d", c.fps),
+		"-draw_mouse", "1",
+		"-i", display,
+		"-f", "rawvideo",
+		"-pix_fmt", "rgba",
+		"-an",
+		"-",
+	}
+	cmd := exec.CommandContext(c.ctx, "ffmpeg", args...)
+	return c.attachCmd(cmd)
+}
+
+func (c *X11Capturer) attachCmd(cmd *exec.Cmd) error {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("capture: failed to create stdout pipe: %w", err)
+		return fmt.Errorf("capture: stdout pipe: %w", err)
 	}
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("capture: failed to start capture process: %w", err)
+		return fmt.Errorf("capture: start process: %w", err)
 	}
 
 	c.cmd = cmd
@@ -121,7 +149,6 @@ func (c *X11Capturer) NextFrame() (*Frame, error) {
 	}, nil
 }
 
-// Size returns the capture dimensions in pixels.
 func (c *X11Capturer) Size() (width, height int) {
 	return int(c.width), int(c.height)
 }
@@ -130,6 +157,10 @@ func (c *X11Capturer) Close() error {
 	c.cancel()
 	if c.cmd != nil {
 		c.cmd.Wait()
+	}
+	if c.dbusConn != nil {
+		stopMutterSession(c.dbusConn, c.sessionPath)
+		c.dbusConn = nil
 	}
 	return nil
 }
@@ -157,22 +188,4 @@ func detectX11Size(display string) (int, int, error) {
 		}
 	}
 	return 0, 0, fmt.Errorf("capture: could not detect display dimensions")
-}
-
-func findScreencastScript() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	dir := filepath.Dir(exe)
-	candidates := []string{
-		filepath.Join(dir, "screencast.py"),
-		filepath.Join(dir, "internal", "capture", "screencast.py"),
-	}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
 }

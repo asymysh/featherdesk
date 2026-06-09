@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/KarpelesLab/goavif v0.1.0 // indirect
+	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/opd-ai/vp8 v0.0.0-20260601221734-3caecc15c9dc // indirect
 )
