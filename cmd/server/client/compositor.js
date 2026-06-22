@@ -104,15 +104,32 @@ function initDecoder() {
         }
     });
     decoder.configure({
-        codec: "vp8",
+        codec: "avc1.42E01E",  // H.264 Constrained Baseline Level 3.0
         optimizeForLatency: true
     });
+}
+
+function detectH264Keyframe(data) {
+    // Scan Annex B NAL units for an IDR slice (type 5)
+    // Start codes are 00 00 00 01 or 00 00 01
+    for (var i = 0; i < data.length - 4; i++) {
+        if (data[i] === 0 && data[i+1] === 0) {
+            var nalStart = -1;
+            if (data[i+2] === 0 && data[i+3] === 1) nalStart = i + 4;
+            else if (data[i+2] === 1) nalStart = i + 3;
+            if (nalStart >= 0 && nalStart < data.length) {
+                var nalType = data[nalStart] & 0x1f;
+                if (nalType === 5) return true;  // IDR slice
+            }
+        }
+    }
+    return false;
 }
 
 function decodeFrame(nalData) {
     if (!decoder || decoder.state === "closed") return;
 
-    var isKey = (nalData.length > 0 && (nalData[0] & 0x01) === 0);
+    var isKey = detectH264Keyframe(nalData);
 
     var chunk = new EncodedVideoChunk({
         type: isKey ? "key" : "delta",

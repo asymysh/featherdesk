@@ -229,23 +229,23 @@ func main() {
 						return
 					}
 					log.Info("main", fmt.Sprintf("encode: %dx%d H.264 VA-API (hardware)", w, h))
-				} else {
-					encoder, err = encode.NewVP8Encoder(encCfg)
-					if err != nil {
-						log.Error("main", "encoder init: "+err.Error())
-						cancel()
-						return
-					}
-					log.Info("main", fmt.Sprintf("encode: %dx%d VP8 libvpx speed8 (software)", w, h))
+			} else {
+				encoder, err = encode.NewH264Encoder(encCfg)
+				if err != nil {
+					log.Error("main", "encoder init: "+err.Error())
+					cancel()
+					return
 				}
+				log.Info("main", fmt.Sprintf("encode: %dx%d H.264 OpenH264 (software)", w, h))
+			}
 
-				enc = encoder
-				defer enc.Close()
-				if useHW {
-					srv.SetEncoderType("h264_vaapi")
-				} else {
-					srv.SetEncoderType("vp8")
-				}
+			enc = encoder
+			defer enc.Close()
+			if useHW {
+				srv.SetEncoderType("h264_vaapi")
+			} else {
+				srv.SetEncoderType("openh264")
+			}
 				srv.SetNewClientCallback(func() {
 					enc.ForceKeyframe()
 					capturer.Restart()
