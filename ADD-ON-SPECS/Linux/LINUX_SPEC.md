@@ -227,47 +227,19 @@ GPU↔CPU copies: **1** (~30KB compressed NALs vs ~36MB raw pixels in software p
 
 ---
 
-## Audio
+## Audio + Input
 
-**Status: ✅ Working.**
+⏸️ **Deferred.** The audio and input subsystems are working in the current codebase
+(PipeWire `pw-cat` for audio loopback, `uinput` for keyboard/mouse injection) but
+their platform-spec sections have been deliberately removed from this document to
+keep the focus on the capture and encode pipeline.
 
-| API | Status | Notes |
-|-----|--------|-------|
-| **PipeWire `pw-cat`** | ✅ Primary | Monitor source capture, 48kHz stereo S16LE |
-| ALSA loopback | Fallback | `arecord` with loopback module |
-| PulseAudio `parec` | Fallback | If PipeWire is unavailable |
+When we resume work on audio and input, the existing core specs remain authoritative:
+- [`specs/MODULE_AUDIO.md`](../../specs/MODULE_AUDIO.md)
+- [`specs/MODULE_INPUT.md`](../../specs/MODULE_INPUT.md)
 
-PipeWire source auto-detected via `pactl list short sources` — selects first
-`.monitor` source (system audio loopback). 20ms chunks (960 samples × 2ch × 16-bit = 3840 bytes).
-
-**File:** `internal/audio/capture.go`
-
-**Known issues to fix:**
-- Race condition on `cmd`/`stdout` fields (TD-08)
-- SIGKILL instead of SIGTERM (R-AUD-02)
-- Fixed 2s reconnect delay — needs exponential backoff (R-AUD-03)
-
----
-
-## Input Injection
-
-**Status: ✅ Working.**
-
-Linux kernel uinput subsystem. Virtual keyboard + absolute mouse. No root required
-(user must be in `input` group, or `/dev/uinput` must be world-writable).
-
-```
-JSON text WebSocket → ParseMessage → BrowserCodeToLinux keymap
-    → write(input_event{EV_KEY/EV_ABS/EV_REL}) + SYN_REPORT → /dev/uinput
-```
-
-**File:** `internal/input/device.go`
-
-**Key known issues to fix:**
-- Hardcoded 2560×1440 resolution for input device (TD-05 / TD-27)
-- All inject errors silently discarded (TD-11)
-- Wheel magnitude discarded — normalized to ±1 (R-INP-03)
-- No horizontal scroll support (R-INP-10)
+This platform spec will be updated with Linux-specific details (PipeWire backend
+selection, uinput permissions, keymap coverage) at that point.
 
 ---
 
@@ -278,9 +250,6 @@ JSON text WebSocket → ParseMessage → BrowserCodeToLinux keymap
 | Minimum kernel | 4.15+ (DRM universal planes, VA-API modern drivers) |
 | KMS capture | `CAP_SYS_ADMIN` or root — `sudo setcap cap_sys_admin+p ./viewport-rds` |
 | VA-API encode | Intel: `intel-media-va-driver` or `i965-va-driver`; AMD: `mesa-va-drivers` |
-| uinput | User in `input` group or `chmod a+rw /dev/uinput` |
-| PipeWire | `pipewire` daemon running (standard on modern desktops) |
-| ffmpeg | Only needed for X11grab fallback capture — not for encode |
 
 ---
 
@@ -303,13 +272,13 @@ Verified results from `review/kms_capture_software_encode/`:
 
 ---
 
-## Current vs Target State
+## Current vs Target State (Capture + Encode)
 
 | Component | Current code | Target (refactor) |
 |-----------|-------------|------------------|
-| Capture | KMS+EGL (working) + X11grab subprocess | KMS+EGL + XShm direct (no subprocess) |
+| Capture | KMS+EGL (working) + X11grab subprocess | KMS+EGL only (no fallback in default binary) |
 | SW encode | VP8 libvpx → **OpenH264 CGo** ✅ | OpenH264 CGo |
 | HW encode | ffmpeg pipe → h264_vaapi (CPU copies) | libva CGo direct (zero-copy, no ffmpeg) |
-| Audio | PipeWire pw-cat ✅ | PipeWire pw-cat (+ fix race/backoff) |
-| Input | uinput ✅ | uinput (+ Resize(), error surfacing) |
 | Protocol | 17-byte header | 22-byte header v1 (versioned, sequenced) |
+
+(Audio and input current-vs-target deferred — see Audio + Input section above.)

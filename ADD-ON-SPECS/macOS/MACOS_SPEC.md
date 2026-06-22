@@ -228,37 +228,18 @@ configures `VideoDecoder` from this string — never hardcoded.
 
 ---
 
-## Audio
+## Audio + Input
 
-| API | Status | Notes |
-|-----|--------|-------|
-| **CoreAudio loopback** | ✅ Primary path | Capture system audio output via virtual aggregate device or tap |
-| **BlackHole** | Optional | Third-party virtual audio device for loopback (common on macOS) |
-| **ScreenCaptureKit audio** | ✅ Built-in | SCK can capture audio alongside video with `capturesAudio = true` — simplest path |
+⏸️ **Deferred.** The macOS audio (CoreAudio / SCK built-in capture) and input
+(CGEvent) sections have been deliberately removed from this document to keep the
+focus on the capture and encode pipeline.
 
-**Recommended:** Use SCK's built-in audio capture (`SCStreamConfiguration.capturesAudio = true`). This captures system audio automatically, no virtual audio device needed. PCM output format from SCK: Float32, 48kHz, stereo.
+When we resume work on audio and input, the existing core specs remain authoritative:
+- [`specs/MODULE_AUDIO.md`](../../specs/MODULE_AUDIO.md)
+- [`specs/MODULE_INPUT.md`](../../specs/MODULE_INPUT.md)
 
----
-
-## Input Injection
-
-| API | Status | Notes |
-|-----|--------|-------|
-| **CGEvent** | ✅ Primary | `CGEventCreateKeyboardEvent`, `CGEventCreateMouseEvent`. Requires Accessibility permission. |
-| **IOKit HID** | Optional | Lower-level, game controller support |
-
-```swift
-// Mouse move
-let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
-                    mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
-event?.post(tap: .cghidEventTap)
-
-// Key press
-let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: true)
-keyDown?.post(tap: .cghidEventTap)
-```
-
-**Requires:** Accessibility permission (System Settings → Privacy → Accessibility). Separate from Screen Recording permission.
+This platform spec will be updated with macOS-specific details (SCK `capturesAudio`,
+CGEvent + Accessibility permission, keymap coverage) at that point.
 
 ---
 
@@ -269,7 +250,7 @@ keyDown?.post(tap: .cghidEventTap)
 | Minimum macOS | **12.3 (Monterey)** — SCK minimum |
 | Code signing | **Apple Developer ID** — required for SCK TCC permission |
 | Notarization | Required for distribution outside Mac App Store |
-| Permissions | Screen Recording + Accessibility |
+| Permissions | Screen Recording (input permissions deferred with audio/input sections) |
 | Architecture | Universal binary (arm64 + x86_64) recommended |
 | App bundle | Required — raw CLI binary cannot request SCK permission |
 

@@ -132,46 +132,18 @@ CPU usage with this path: <3% at 1080p60. Without it (CPU copy then encode): 15�
 
 ---
 
-## Audio
+## Audio + Input
 
-| API | Status | Notes |
-|-----|--------|-------|
-| **WASAPI loopback** | ✅ Primary | `IAudioClient` with `AUDCLNT_STREAMFLAGS_LOOPBACK`. Captures system audio output. |
-| **Steam Streaming Speakers** | Optional | Virtual audio device installed by Steam. Clean loopback point. Sunshine uses this. |
+⏸️ **Deferred.** The Windows audio (WASAPI loopback) and input (SendInput, ViGEmBus,
+InjectSyntheticPointerInput) sections have been deliberately removed from this
+document to keep the focus on the capture and encode pipeline.
 
-```cpp
-// WASAPI loopback — exact flags used in production (from Sunshine)
-AUDCLNT_SHAREMODE_SHARED
-| AUDCLNT_STREAMFLAGS_LOOPBACK
-| AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-| AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-| AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+When we resume work on audio and input, the existing core specs remain authoritative:
+- [`specs/MODULE_AUDIO.md`](../../specs/MODULE_AUDIO.md)
+- [`specs/MODULE_INPUT.md`](../../specs/MODULE_INPUT.md)
 
-// Thread priority — use MMCSS "Pro Audio" task
-AvSetMmThreadCharacteristics(L"Pro Audio", &taskIndex);
-```
-
-Format: 48kHz, stereo, auto-resampled to match device.
-
----
-
-## Input Injection
-
-| API | Status | Notes |
-|-----|--------|-------|
-| **SendInput** | ✅ Primary | Keyboard + absolute mouse. Simple, well-supported. |
-| **ViGEmBus** | Optional | Virtual gamepad (Xbox 360, DS4). Install as driver. Gaming use case only. |
-| **InjectSyntheticPointerInput** | Optional | Touch/pen input (Windows 10 1809+). Remote control edge case. |
-
-```cpp
-// Absolute mouse move (scale client coords to virtual desktop space)
-INPUT input = {};
-input.type = INPUT_MOUSE;
-input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
-input.mi.dx = (clientX * 65535) / virtualDesktopWidth;
-input.mi.dy = (clientY * 65535) / virtualDesktopHeight;
-SendInput(1, &input, sizeof(INPUT));
-```
+This platform spec will be updated with Windows-specific details (WASAPI loopback,
+SendInput, optional ViGEmBus for gamepads) at that point.
 
 ---
 
