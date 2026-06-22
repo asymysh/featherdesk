@@ -108,20 +108,30 @@ Skip:      VP8/VP9                    ← no HW path on macOS, not worth SW cost
 advertised in the Config handshake. Clients that support HEVC WebCodecs decode get the
 better-compressed stream; others fall back to H.264.
 
-### Software Fallback (macOS-specific)
-
-On macOS the **software fallback is also VideoToolbox** — Apple's own SW H.264/HEVC
-implementation — not OpenH264. VideoToolbox is the single encoder API for all paths on
-macOS (HW and SW). OpenH264 CGo is the cross-platform software encoder used on
-Linux and Windows; it is not used on macOS.
+### Confirmed Fallback Order
 
 ```
-macOS encoder selection:
-  VTCopyVideoEncoderList contains h264.gva?  → VideoToolbox H.264 HW   (primary)
-  VTCopyVideoEncoderList contains hevc.gva?  → VideoToolbox HEVC HW    (secondary)
-  Neither (no GPU / unsupported hardware)?   → VideoToolbox H.264 SW   (fallback)
-  VideoToolbox completely unavailable?       → Error — macOS < 12.3 unsupported
+1. HEVC hardware  (hevc.gva in VTCopyVideoEncoderList)
+     → kCMVideoCodecType_HEVC + RequireHardwareAcceleratedVideoEncoder: true
+     → Skylake+ Intel, all Apple Silicon
+     → Config codec string: "hvc1.1.6.L93.B0"
+
+2. H.264 hardware (h264.gva in VTCopyVideoEncoderList)
+     → kCMVideoCodecType_H264 + RequireHardwareAcceleratedVideoEncoder: true
+     → All Macs from Sandy Bridge (2011+)
+     → Config codec string: "avc1.42E01E"
+
+3. H.264 software (VideoToolbox SW — Apple's own implementation)
+     → kCMVideoCodecType_H264 + EnableHardwareAcceleratedVideoEncoder: false
+     → Fallback when no supported GPU present
+     → Same Config codec string: "avc1.42E01E"
 ```
+
+VideoToolbox is the **single encoder API** for all three tiers on macOS — HW and SW.
+OpenH264 CGo (used on Linux and Windows) is not used on macOS.
+
+**No software HEVC fallback.** If HEVC hardware is unavailable, fall straight to
+H.264 — never to libx265 (triple patent pool exposure).
 
 ### VideoToolbox Benchmark Results
 

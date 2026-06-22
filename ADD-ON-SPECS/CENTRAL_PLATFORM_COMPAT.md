@@ -10,24 +10,51 @@
 
 ---
 
-## Codec Support — The Practical Matrix
+## Codec Fallback Order (Confirmed)
 
-The rule: **H.264 hardware encoding everywhere. AV1 hardware on M2+ Mac and RTX40+/RDNA3+ GPU as a quality upgrade. Everything else is noise for a remote desktop product.**
+**Server-side encode fallback** (tried in this order at startup based on hardware probe):
 
-| Platform | Hardware | H.264 HW | HEVC HW | AV1 HW | Default |
-|----------|----------|---------|---------|--------|---------|
-| Linux | Intel (VA-API) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Alder Lake+ | H.264 |
-| Linux | AMD (VA-API) | ✅ GCN+ | ✅ Polaris+ | ✅ RDNA2+ | H.264 |
-| Linux | NVIDIA (NVENC) | ✅ Kepler+ | ✅ Maxwell+ | ✅ Ada+ | H.264 |
-| Linux | No GPU | ❌ | ❌ | ❌ | SW (OpenH264) |
-| Windows | NVIDIA | ✅ | ✅ | ✅ RTX40+ | H.264 |
-| Windows | AMD | ✅ | ✅ | ✅ RDNA2+ | H.264 |
-| Windows | Intel | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ 12th gen+ | H.264 |
-| Windows | No GPU | ❌ | ❌ | ❌ | SW (libx264) |
-| macOS | **Apple Silicon M1** | ✅ | ✅ | ❌ | H.264 |
-| macOS | **Apple Silicon M2+** | ✅ | ✅ | **✅** | H.264 (AV1 opt-in) |
-| macOS | Intel + AMD discrete | ✅ AMD VCE | ✅ | ❌ | H.264 |
-| macOS | Intel integrated only | ✅ Quick Sync | ✅ Skylake+ | ❌ | H.264 |
+```
+1. HEVC hardware   — best compression (~40% better than H.264)
+                     licensing: covered by GPU/OS vendor (Intel/AMD/Apple)
+                     NO software HEVC fallback (libx265 has triple patent pool exposure)
+
+2. H.264 hardware  — hardware accelerated, no CPU cost
+                     licensing: covered by GPU/OS vendor
+
+3. H.264 software  — OpenH264 CGo, Cisco pays MPEG-LA royalties
+                     licensing: zero concern, runs on any hardware
+```
+
+**Client-side decode:**
+No codec negotiation needed. The server picks the best codec it can encode and
+sends it in `FrameTypeConfig`. The client decodes whatever arrives.
+
+> **Firefox is not a supported browser.** Firefox has no HEVC WebCodecs support.
+> Minimum browser requirement: **Chrome 107+, Edge, Safari 14.1+**. All three
+> support HEVC hardware decode. This removes the need for any client-side codec
+> capability advertisement or fallback negotiation.
+
+## Codec Support Matrix
+
+| Platform | Hardware | H.264 HW | HEVC HW | AV1 HW | SW Fallback |
+|----------|----------|---------|---------|--------|------------|
+| Linux | Intel (VA-API) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 CGo |
+| Linux | AMD (VA-API) | ✅ GCN+ | ✅ Polaris+ | ✅ RDNA2+ | OpenH264 CGo |
+| Linux | NVIDIA (via nvidia-vaapi-driver) | ✅ | ✅ | ❌ | OpenH264 CGo |
+| Linux | No GPU | ❌ | ❌ | ❌ | OpenH264 CGo |
+| Windows | NVIDIA (NVENC) | ✅ | ✅ | ✅ RTX40+ | OpenH264 CGo |
+| Windows | AMD (AMF) | ✅ | ✅ | ✅ RDNA2+ | OpenH264 CGo |
+| Windows | Intel (QSV) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 CGo |
+| Windows | No GPU | ❌ | ❌ | ❌ | OpenH264 CGo |
+| macOS | Apple Silicon M1 | ✅ | ✅ | ❌ encode | OpenH264 CGo* |
+| macOS | Apple Silicon M2+ | ✅ | ✅ | ✅ | OpenH264 CGo* |
+| macOS | Intel + AMD discrete | ✅ | ✅ | ❌ | OpenH264 CGo* |
+| macOS | Intel integrated Skylake+ | ✅ | ✅ | ❌ | OpenH264 CGo* |
+| macOS | Intel integrated pre-Skylake | ✅ | ❌ | ❌ | OpenH264 CGo* |
+
+> *macOS software fallback: VideoToolbox SW H.264 preferred over OpenH264 CGo since
+> VideoToolbox is macOS-native. OpenH264 CGo is the universal fallback if VT fails.
 
 ---
 

@@ -60,64 +60,81 @@ Target: replace with XShm direct capture (no subprocess) for production deployme
 
 ---
 
-## Video Encoding — Confirmed Codec Targets
+## Video Encoding
 
-| Codec | Path | Status |
-|-------|------|--------|
-| **H.264 Baseline** | OpenH264 CGo (SW) | ✅ Working — default |
-| **H.264** | libva CGo HW (Intel/AMD/NVIDIA) | 📋 Specced — MODULE_CUSTOM_LIBVA.md |
-| **HEVC Main** | libva CGo HW (`VAProfileHEVCMain`) | 📋 Specced — same module |
-| AV1 | libva CGo HW (Intel Arc, AMD RDNA2+) | 📋 Future |
+### VA-API is the Single Hardware Interface on Linux
 
----
+Unlike Windows (NVENC / AMF / QSV — three separate vendor APIs) or macOS (VideoToolbox),
+**Linux uses VA-API for all GPU hardware encoding regardless of vendor.** Intel, AMD,
+and NVIDIA all expose their hardware encoders through the same `libva` interface:
 
-## Software Encoding — OpenH264 CGo
+| GPU vendor | Linux VA-API driver | Underlying hardware |
+|-----------|-------------------|---------------------|
+| Intel | `iHD` (Skylake+) / `i965` (older) | Intel Quick Sync |
+| AMD | Mesa `radeonsi` | AMD VCE / VCN |
+| NVIDIA | `nvidia-vaapi-driver` *(unofficial)* | NVENC wrapped behind VA-API |
 
-**Status: ✅ Working. Default encoder.**
+One libva CGo binary handles all three. At startup `vaQueryConfigEntrypoints` returns
+what the installed GPU and driver support — no vendor branching in application code.
 
-Same CGo file as Windows and macOS (cross-platform). No ffmpeg. No subprocess.
-License: BSD-2.
+> **NVIDIA note:** `nvidia-vaapi-driver` is an unofficial community wrapper. It works
+> well but is not supported by NVIDIA. Intel and AMD VA-API support is first-party.
+
+### Confirmed Fallback Order
 
 ```
-I420Frame → CGo → WelsCreateSVCEncoder → EncodeFrame → SFrameBSInfo → NAL units
+1. HEVC hardware  (VAProfileHEVCMain)
+     → Intel Skylake+, AMD Polaris+, NVIDIA via wrapper
+     → Config codec string: "hvc1.1.6.L93.B0"
+     → Status: 📋 Specced — MODULE_CUSTOM_LIBVA.md
+
+2. H.264 hardware (VAProfileH264Baseline)
+     → Intel Sandy Bridge+, AMD GCN+, NVIDIA via wrapper
+     → Config codec string: "avc1.42E01E"
+     → Status: 📋 Specced — MODULE_CUSTOM_LIBVA.md
+
+3. H.264 software (OpenH264 CGo)
+     → No GPU present, or GPU has no VA-API encode support
+     → Works on every machine including no-GPU ARM/x86 (Graviton etc.)
+     → Config codec string: "avc1.42E01E"
+     → Status: ✅ Working — current default
 ```
+
+**No software HEVC.** libx265 has triple HEVC patent pool exposure (MPEG-LA, HEVC
+Advance, Velos Media). If HEVC hardware is unavailable, fall straight to H.264.
+
+### GPU Encode Capability Matrix
+
+| GPU | Driver | H.264 HW | HEVC HW | AV1 HW |
+|-----|--------|---------|---------|--------|
+| Intel Sandy Bridge–Broadwell (2011–2015) | `i965` | ✅ | ❌ | ❌ |
+| Intel Skylake–Ice Lake (2015–2019) | `iHD` | ✅ | ✅ | ❌ |
+| Intel Tiger Lake / Xe / Arc (2020+) | `iHD` | ✅ | ✅ 10-bit | ✅ Arc+ |
+| AMD GCN / RX 400+ (2016+) | Mesa | ✅ | ✅ | ❌ |
+| AMD RDNA2 / RX 6000+ (2020+) | Mesa | ✅ | ✅ 10-bit | ✅ |
+| AMD RDNA3 / RX 7000+ (2022+) | Mesa | ✅ | ✅ 10-bit | ✅ |
+| NVIDIA *(via nvidia-vaapi-driver)* | unofficial | ✅ | ✅ | ❌ |
+| No GPU / CPU-only | — | ❌ | ❌ | ❌ → OpenH264 SW |
+
+### Software Fallback — OpenH264 CGo
+
+**Status: ✅ Working. Current default (hardware path not yet built).**
+
+Same CGo file as Windows and macOS. No subprocess. No ffmpeg. BSD-2 licensed.
 
 | Resolution | FPS ceiling | p50 latency | CPU (1 core) |
 |-----------|------------|------------|-------------|
 | 1920×1080 | ~125 fps | ~8ms | ~25% |
 | 2560×1440 | ~65 fps | ~15ms | ~25% |
 
-- `CAMERA_VIDEO_REAL_TIME` usage type
-- Single-thread (`iMultipleThreadIdc=1`)
-- No B-frames, on-demand IDR only
-- Profile: H.264 Baseline (browser-native, maximum compatibility)
-
 **File:** `internal/encode/openh264.go`
 
----
-
-## Hardware Encoding — libva CGo (Direct VA-API)
+### Hardware Path — libva CGo
 
 **Status: 📋 Specced in `specs/MODULE_CUSTOM_LIBVA.md`. Not yet built.**
 
-No ffmpeg. `libva` is MIT licensed. Calls VA-API directly from Go via CGo.
-
-### GPU Compatibility
-
-| GPU | Driver | H.264 HW | HEVC HW | AV1 HW |
-|-----|--------|---------|---------|--------|
-| Intel Sandy Bridge–Broadwell (2011–2015) | `i965` | ✅ | ❌ | ❌ |
-| Intel Skylake–Ice Lake (2015–2019) | `iHD` | ✅ | ✅ | ❌ |
-| Intel Tiger Lake / Xe / Arc (2020+) | `iHD` | ✅ | ✅ 10-bit | ✅ Arc |
-| AMD GCN / RX 400+ (2016+) | Mesa `radeonsi` | ✅ | ✅ | ❌ |
-| AMD RDNA2 / RX 6000+ (2020+) | Mesa | ✅ | ✅ 10-bit | ✅ |
-| AMD RDNA3 / RX 7000+ (2022+) | Mesa | ✅ | ✅ 10-bit | ✅ |
-| NVIDIA (unofficial) | `nvidia-vaapi-driver` | ✅ wraps NVENC | ✅ | ❌ |
-
-**The same binary works on all of the above.** At startup, `vaQueryConfigEntrypoints`
-reports what the GPU supports. The pipeline selects accordingly.
-
-### VA-API Pipeline (zero-copy path)
+No ffmpeg. `libva` MIT licensed. Direct CGo. Zero-copy path when combined with
+KMS DMA-BUF capture:
 
 ```
 KMS DMA-BUF fd → vaCreateSurfaces (VASurfaceAttribExternalBuffers)
@@ -127,26 +144,16 @@ KMS DMA-BUF fd → vaCreateSurfaces (VASurfaceAttribExternalBuffers)
     → vaUnmapBuffer
 ```
 
-GPU↔CPU copies: **1** (compressed output only, ~30KB/frame vs ~36MB software path)
+GPU↔CPU copies: **1** (~30KB compressed NALs vs ~36MB raw pixels in software path)
 
-### Expected Performance (from MODULE_CUSTOM_LIBVA.md targets)
-
-| GPU class | H.264 1080p p50 | HEVC 1080p p50 | CPU |
-|-----------|----------------|----------------|-----|
+| GPU | H.264 1080p p50 | HEVC 1080p p50 | CPU at 60fps |
+|-----|----------------|----------------|-------------|
 | Intel Skylake / iHD | <3ms | <3ms | <2% |
-| AMD RDNA2 | <4ms | <4ms | <3% |
-| NVIDIA via wrapper | <3ms | <3ms | <3% |
+| AMD RDNA2 / Mesa | <4ms | <4ms | <3% |
+| NVIDIA / vaapi-driver | <3ms | <3ms | <3% |
 
-### Implementation Reference
-
-See `specs/MODULE_CUSTOM_LIBVA.md` for:
-- Full 6-phase implementation plan
-- Complete CGo preamble with all required libva functions
-- SPS/PPS serialization strategy (copy from libva-utils `h264encode.c`, MIT)
-- Surface ring buffer design
-- Format negotiation (XRGB8888 → NV12 GPU-side conversion when needed)
-
-**Dependencies:** `libva` (MIT), `libva-drm` (MIT), `libdrm` (MIT)
+**Dependencies:** `libva` (MIT), `libva-drm` (MIT), `libdrm` (MIT)  
+**Full implementation plan:** `specs/MODULE_CUSTOM_LIBVA.md`
 
 ---
 
