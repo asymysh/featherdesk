@@ -4,3 +4,8 @@ coverage.out
 *.prof
 *.pprof
 /tmp/
+
+bench.exe
+bench_out/
+*.db
+
