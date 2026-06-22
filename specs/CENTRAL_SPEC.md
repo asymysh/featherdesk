@@ -3,9 +3,9 @@
 ## Product Overview
 
 **Name:** FeatherDesk (binary: `viewport-rds`)
-**Type:** Low-latency remote desktop streaming server for Linux
+**Type:** Low-latency remote desktop streaming server (Linux primary, Windows + macOS planned)
 **Language:** Go 1.26+ with CGo
-**Deployment:** Single binary with embedded web client
+**Deployment:** Single binary with embedded web client + optional add-on encoder binaries
 **Target:** Parsec/Sunshine-level latency on LAN
 
 ## Product Goals
@@ -19,22 +19,120 @@
 
 ---
 
-## Module Map
+## Pluggable Architecture (Default + Add-Ons)
 
-The system is decomposed into 10 plug-and-play modules. Each module has its own spec sheet with complete interface contracts, internal architecture, and refactoring directives.
+FeatherDesk is a **pluggable, add-on based project**. The core binary ships with the
+encoders/capturers needed to cover the vast majority of hardware. Vendor-specific or
+emerging-tech paths are shipped as **optional add-on binaries** that the core probes for
+at runtime.
+
+### Ship-by-default (in the core binary)
+
+| Platform | Default capture | Default HW encode | Default SW encode |
+|----------|----------------|-------------------|-------------------|
+| Linux | KMS/DRM+EGL → X11grab fallback | **VA-API** (Intel/AMD/NVIDIA via wrapper) | **OpenH264 CGo** |
+| Windows | DXGI Desktop Duplication → WGC fallback | (TBD — see Windows spec) | OpenH264 CGo |
+| macOS | ScreenCaptureKit | **VideoToolbox** (HW + SW) | VideoToolbox SW |
+
+The default set ships **on every binary** of FeatherDesk. Single download, works
+on every supported machine.
+
+### Add-on binaries (optional, vendor-specific)
+
+| Add-on | Platform | Reason for separate binary |
+|--------|----------|---------------------------|
+| NVENC direct | Linux + Windows | Unlocks NVIDIA-specific features (REF_FRAMES_INVALIDATION) unavailable via VA-API wrapper |
+| AMF on ROCm | Linux | AMD-specific tuning beyond what Mesa VA-API exposes |
+| Vulkan Video | Linux + Windows | Cross-vendor royalty-free path; emerging, not yet mature for production primary |
+| AMF (Windows) | Windows | AMD primary HW path on Windows |
+| Quick Sync (QSV) | Windows | Intel primary HW path on Windows (oneVPL) |
+
+**How add-ons work:**
+- Each add-on is a separate compiled binary or Go build-tagged variant
+- Naming convention: `viewport-rds-{platform}-{vendor}` (e.g. `viewport-rds-linux-nvenc`)
+- Same `Encoder` interface, same protocol, same client
+- Pipeline probes available encoders at startup, picks best
+- User can ship just the default binary OR the default + any subset of add-ons
+
+**Priority order at runtime probe (Linux example):**
+```
+1. NVENC add-on present?       → use NVENC direct (NVIDIA only, best NVIDIA path)
+2. AMF-ROCm add-on present?    → use AMF (AMD only, opt-in beyond Mesa VA-API)
+3. Vulkan Video add-on present?→ use Vulkan Video (cross-vendor, when mature)
+4. VA-API in default binary    → use VA-API (Intel/AMD always, NVIDIA via wrapper)
+5. OpenH264 SW in default      → universal fallback
+```
+
+This pattern keeps the default binary minimal and dependency-light while letting power
+users opt into vendor-specific performance gains.
+
+---
+
+## Module Map (Core Modules)
+
+The system is decomposed into 11 plug-and-play modules. Each module has its own spec
+sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
 |---|--------|-----------|----------------|
 | 1 | **Capture** | [`./MODULE_CAPTURE.md`](./MODULE_CAPTURE.md) | Screen frame acquisition (KMS/DRM/EGL/X11/PipeWire) |
-| 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software video encoding (OpenH264/FFmpeg/VP8) |
-| 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Zero-copy GPU encoding (VA-API DMA-BUF direct) |
-| 4 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Remote input injection (uinput keyboard/mouse) |
-| 5 | **Audio** | [`./MODULE_AUDIO.md`](./MODULE_AUDIO.md) | System audio capture (PipeWire) |
-| 6 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) |
-| 7 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | WebSocket server, client management, TLS |
-| 8 | **Logger** | [`./MODULE_LOGGER.md`](./MODULE_LOGGER.md) | Structured logging subsystem |
-| 9 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs + AudioWorklet) |
-| 10 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: lifecycle, pacing, frame drops, wiring |
+| 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software video encoding (OpenH264 default) |
+| 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Zero-copy GPU encoding interface (DMA-BUF) |
+| 4 | **Custom libva** | [`./MODULE_CUSTOM_LIBVA.md`](./MODULE_CUSTOM_LIBVA.md) | Direct VA-API CGo implementation (no ffmpeg) |
+| 5 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Remote input injection (uinput keyboard/mouse) |
+| 6 | **Audio** | [`./MODULE_AUDIO.md`](./MODULE_AUDIO.md) | System audio capture (PipeWire) |
+| 7 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) |
+| 8 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | WebSocket server, client management, TLS |
+| 9 | **Logger** | [`./MODULE_LOGGER.md`](./MODULE_LOGGER.md) | Structured logging subsystem |
+| 10 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs + AudioWorklet) |
+| 11 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: lifecycle, pacing, frame drops, wiring |
+
+---
+
+## Platform & Add-On Spec Index
+
+OS-specific platform specs and vendor-specific add-on encoder specs live under
+[`../ADD-ON-SPECS/`](../ADD-ON-SPECS/). This index is the **single source of truth**
+for where any platform or add-on document lives — never duplicate specs, always link here.
+
+### Platform specs
+
+| Platform | Spec | Default capture | Default encode |
+|----------|------|----------------|----------------|
+| **Cross-platform compat** | [`ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`](../ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md) | — | — |
+| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | KMS+EGL / X11grab | VA-API → OpenH264 |
+| **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | ScreenCaptureKit | VideoToolbox |
+| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | DXGI / WGC | (TBD) |
+
+### Linux encoder add-on specs
+
+| Add-on | Spec | Hardware | Status |
+|--------|------|---------|--------|
+| NVENC direct | [`ADD-ON-SPECS/Linux/encoders/NVENC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
+| AMF on ROCm | [`ADD-ON-SPECS/Linux/encoders/AMF_ROCM_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
+| Vulkan Video | [`ADD-ON-SPECS/Linux/encoders/VULKAN_VIDEO_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/VULKAN_VIDEO_SPEC.md) | Any Vulkan 1.3+ GPU | 📋 Specced |
+
+> **Intel on Linux is not a separate add-on** — Intel Quick Sync is exposed exclusively
+> through VA-API on Linux. The default binary's VA-API path already covers Intel
+> Sandy Bridge through Arc.
+
+### Windows encoder add-on specs (future)
+
+| Add-on | Spec | Hardware | Status |
+|--------|------|---------|--------|
+| NVENC Windows | TBD | NVIDIA | 📋 Planned |
+| AMF Windows | TBD | AMD | 📋 Planned |
+| Quick Sync (oneVPL) | TBD | Intel | 📋 Planned |
+| MediaFoundation | TBD | Software / ARM | 📋 Planned |
+
+### Where to register a new add-on
+
+When adding a new vendor-specific encoder:
+1. Write the spec at `ADD-ON-SPECS/{Platform}/encoders/{NAME}_SPEC.md`
+2. Add a row to the relevant table in **this** section of CENTRAL_SPEC.md
+3. Add a row to the compat matrix in `ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`
+4. Implement under `internal/hwencode/{name}/` with a Go build tag
+5. Wire the runtime probe order in `MODULE_PIPELINE.md`
 
 ---
 
