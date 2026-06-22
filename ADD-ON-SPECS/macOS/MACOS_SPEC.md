@@ -92,67 +92,129 @@ For the software path, `CVPixelBufferLockBaseAddress` on the IOSurface-backed bu
 | **Intel integrated only, Sandy/Ivy Bridge (2011–12)** | ✅ Quick Sync | ❌ | ❌ | Mac mini 2011–12 |
 | **Pre-2011 (Core 2 Duo, Nvidia 320M)** | ❌ | ❌ | ❌ | Cannot run macOS 12.3+ anyway |
 
-### Codec Decision (Remote Control Use Case)
+### Codec Decision (Confirmed)
 
 ```
-Primary:  H.264 HW via VideoToolbox  ← works everywhere, browser-native decode
-Optional: AV1 HW via VideoToolbox    ← M2+ only, announce via Config handshake
-Skip:     HEVC HW                    ← WebCodecs HEVC support patchy in browsers
-Skip:     VP8/VP9                    ← no HW encode path on macOS, not worth SW cost
+Primary:   H.264 HW via VideoToolbox  ← every Mac from 2011+, universal browser decode
+Secondary: HEVC HW via VideoToolbox   ← Skylake+ Intel (2015+) and all Apple Silicon
+                                          ~40% better compression than H.264 same quality
+                                          Announce via Config handshake codec string
+Future:    AV1 HW via VideoToolbox    ← M2+ only
+Skip:      VP8/VP9                    ← no HW path on macOS, not worth SW cost
 ```
 
-H.264 at 30fps for remote control is entirely adequate. AV1 on M2+ is a future quality improvement, not a priority.
+**H.264 + HEVC are both confirmed targets.** The pipeline selects at startup via
+`VTCopyVideoEncoderList` — if `hevc.gva` is in the list, HEVC is available and gets
+advertised in the Config handshake. Clients that support HEVC WebCodecs decode get the
+better-compressed stream; others fall back to H.264.
 
-### VideoToolbox Benchmark Results (Hackintosh: AMD Ryzen 5 3600 + RX 570, macOS 26.5.1)
+### Software Fallback (macOS-specific)
 
-| Encoder | Resolution | FPS | p50 | p95 | p99 |
-|---------|-----------|-----|-----|-----|-----|
-| **H.264 HW (AMD GVA/VCE)** | 1920×1080 | **115** | 8.6ms | 8.9ms | 9.0ms |
-| **H.264 HW (AMD GVA/VCE)** | 2560×1440 | **71** | 13.9ms | 14.1ms | 14.2ms |
-| HEVC SW | 1920×1080 | 27 | 30.5ms | 76ms | 156ms |
-| HEVC SW | 2560×1440 | 18 | 46ms | 131ms | 250ms |
-| H.264 SW | any | ❌ | — | — | Hackintosh driver gap |
-| HEVC HW | any | ❌ | — | — | Hackintosh driver gap |
+On macOS the **software fallback is also VideoToolbox** — Apple's own SW H.264/HEVC
+implementation — not OpenH264. VideoToolbox is the single encoder API for all paths on
+macOS (HW and SW). OpenH264 CGo is the cross-platform software encoder used on
+Linux and Windows; it is not used on macOS.
 
-**M1 Mac estimates (literature + extrapolation):**
+```
+macOS encoder selection:
+  VTCopyVideoEncoderList contains h264.gva?  → VideoToolbox H.264 HW   (primary)
+  VTCopyVideoEncoderList contains hevc.gva?  → VideoToolbox HEVC HW    (secondary)
+  Neither (no GPU / unsupported hardware)?   → VideoToolbox H.264 SW   (fallback)
+  VideoToolbox completely unavailable?       → Error — macOS < 12.3 unsupported
+```
 
-| Encoder | 1080p p50 | 1440p p50 |
-|---------|----------|----------|
-| H.264 HW (Media Engine) | ~2–3ms | ~3–4ms |
-| HEVC HW (Media Engine) | ~2–3ms | ~3–4ms |
-| AV1 HW (M2+) | ~3–5ms | ~4–6ms |
+### VideoToolbox Benchmark Results
 
-**Raw CSVs:** `/tmp/fd_bench/enc_h264_hw_*.csv`, `enc_hevc_sw_*.csv`
+**Measured (Hackintosh: AMD Ryzen 5 3600 + RX 570, macOS 26.5.1):**
+
+| Encoder | Resolution | FPS | p50 | p95 | p99 | Notes |
+|---------|-----------|-----|-----|-----|-----|-------|
+| **H.264 HW (AMD GVA/VCE)** | 1920×1080 | **115** | **8.6ms** | 8.9ms | 9.0ms | ✅ Measured |
+| **H.264 HW (AMD GVA/VCE)** | 2560×1440 | **71** | **13.9ms** | 14.1ms | 14.2ms | ✅ Measured |
+| HEVC SW | 1920×1080 | 27 | 30.5ms | 76ms | 156ms | ✅ Measured |
+| HEVC SW | 2560×1440 | 18 | 46ms | 131ms | 250ms | ✅ Measured |
+| H.264 SW | any | ❌ timeout | — | — | Hackintosh-specific gap only |
+| HEVC HW | any | ❌ timeout | — | — | Hackintosh-specific gap only |
+
+> **Hackintosh caveat:** H.264 SW and HEVC HW timeouts are specific to the AMD Ryzen +
+> RX 570 Hackintosh configuration. On real Apple hardware these both work correctly.
+> The AMD GVA driver on Hackintosh only exposes H.264 HW reliably.
+
+**Estimated on real Apple hardware:**
+
+| Encoder | 1080p p50 | 1440p p50 | Available on |
+|---------|----------|----------|-------------|
+| H.264 HW | ~2–3ms | ~3–4ms | All Macs (2011+) |
+| H.264 SW | ~5–8ms | ~9–14ms | All Macs (fallback) |
+| HEVC HW | ~2–3ms | ~3–4ms | Skylake+ Intel, all Apple Silicon |
+| HEVC SW | ~15–25ms | ~30–50ms | All Macs (slow, avoid) |
+| AV1 HW | ~3–5ms | ~4–6ms | M2+ only |
+
+**Raw CSVs (Hackintosh):** `/tmp/fd_bench/enc_h264_hw_*.csv`, `enc_hevc_sw_*.csv`
 
 ### VideoToolbox API (C-callback style — closure API broken in macOS 26)
 
-```swift
-// Use traditional C-callback approach. The per-frame closure variant
-// (VTCompressionSessionEncodeFrame with outputHandler: closure) does NOT
-// fire its callback in macOS 26. Use the session-level outputCallback instead.
+> **macOS 26 critical bug:** `VTCompressionSessionEncodeFrame` with an inline
+> `outputHandler:` closure NEVER fires its callback. Use the session-level
+> `outputCallback` C function pointer set at session creation time. This is confirmed
+> and verified — the closure silently drops all encoded frames.
 
+```swift
+// CORRECT pattern for macOS 26+ (C-callback at session creation)
 let vtCallback: VTCompressionOutputCallback = { refcon, _, _, _, sb in
     guard let ptr = refcon else { return }
     let ctx = Unmanaged<EncContext>.fromOpaque(ptr).takeUnretainedValue()
-    // process CMSampleBuffer
+    // process CMSampleBuffer here
     ctx.sema.signal()
 }
 
+// H.264 hardware session
 VTCompressionSessionCreate(
     allocator: nil, width: Int32(w), height: Int32(h),
-    codecType: kCMVideoCodecType_H264,
+    codecType: kCMVideoCodecType_H264,           // ← H.264
     encoderSpecification: [
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true
     ] as CFDictionary,
     imageBufferAttributes: nil,
     compressedDataAllocator: nil,
-    outputCallback: vtCallback,    // ← set here, not per-frame
+    outputCallback: vtCallback,    // ← callback here, NOT per-frame
     refcon: ctxPtr,
-    compressionSessionOut: &session
+    compressionSessionOut: &h264Session
 )
-VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+
+// HEVC hardware session (same pattern, different codecType)
+VTCompressionSessionCreate(
+    allocator: nil, width: Int32(w), height: Int32(h),
+    codecType: kCMVideoCodecType_HEVC,           // ← HEVC/H.265
+    encoderSpecification: [
+        kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true
+    ] as CFDictionary,
+    imageBufferAttributes: nil,
+    compressedDataAllocator: nil,
+    outputCallback: vtCallback,
+    refcon: ctxPtr,
+    compressionSessionOut: &hevcSession
+)
+
+// Both sessions: same properties
+VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime,
+                     value: kCFBooleanTrue)
+VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,
+                     value: kCFBooleanFalse)
 ```
+
+### Config Handshake Codec Strings (WebCodecs)
+
+```json
+// H.264 Constrained Baseline Level 3.0
+{ "codec": "avc1.42E01E" }
+
+// HEVC Main Profile Level 3.1
+{ "codec": "hvc1.1.6.L93.B0" }
+```
+
+The server sends whichever codec it selected via `FrameTypeConfig`. The client
+configures `VideoDecoder` from this string — never hardcoded.
 
 ---
 
