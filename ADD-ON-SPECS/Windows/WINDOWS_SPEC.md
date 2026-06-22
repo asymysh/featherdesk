@@ -74,61 +74,48 @@ Check DXGI_ERROR_UNSUPPORTED on IDXGIOutput1::DuplicateOutput()
 
 ## Video Encoding
 
-### H.264 Hardware — The Practical Default
+### Every encoder is an add-on (pluggable architecture)
 
-H.264 hardware encoding is available on every machine with a dedicated GPU sold in the last 10+ years. Software fallback covers anything older. **This is all anyone needs for remote desktop.**
-
-### Encoder Priority (matches Sunshine)
-
-```
-NVENC (NVIDIA)  →  QSV (Intel)  →  AMF (AMD)  →  MF (MediaFoundation/ARM)  →  libx264 (SW)
-```
-
-### Support Matrix
-
-| Hardware | H.264 HW Encoder | HEVC HW | AV1 HW | API |
-|----------|-----------------|---------|--------|-----|
-| **NVIDIA GTX 600+** (Kepler, 2012+) | ✅ NVENC | ✅ Maxwell+ | ✅ Ada Lovelace (RTX 40+) | `h264_nvenc` |
-| **AMD RX 400+** (Polaris, 2016+) | ✅ AMF/VCE | ✅ | ✅ RDNA2+ | `h264_amf` |
-| **Intel HD/Iris (Sandy Bridge, 2011+)** | ✅ Quick Sync | ✅ Skylake+ | ✅ Arc/12th gen+ | `h264_qsv` |
-| **Qualcomm Snapdragon** (ARM Windows) | ✅ MF | ✅ | limited | `h264_mf` |
-| **No GPU / ancient GPU** | ❌ | ❌ | ❌ | `libx264` SW |
-
-### Codec Decision (Remote Desktop)
+The Windows default binary contains **no encoders**. Every encoder — software and
+hardware — is a build-tagged add-on. Users compile in exactly the encoders they
+want. The full set:
 
 ```
-Primary:   H.264 HW        ← universal compatibility, browser WebCodecs
-Secondary: HEVC HW         ← better quality/bit when available (announce in Config)
-Future:    AV1 HW          ← RDNA2+ AMD, RTX 40+ NVIDIA, Arc+ Intel
-Skip:      VP8/VP9         ← no useful HW path on Windows, not worth SW cost
+encoders/
+├── SW/
+│   ├── OPENH264_CGO_WINDOWS_SPEC.md           ← cross-platform SW (same code as Linux + macOS)
+│   └── MEDIAFOUNDATION_SW_WINDOWS_SPEC.md     ← Windows-native SW (no third-party DLL)
+└── HW/
+    ├── MEDIAFOUNDATION_HW_WINDOWS_SPEC.md     ← cross-vendor HW (NVIDIA + AMD + Intel + Qualcomm)
+    ├── NVENC_WINDOWS_SPEC.md                  ← NVIDIA direct (REF_FRAMES_INVALIDATION)
+    ├── AMF_WINDOWS_SPEC.md                    ← AMD direct (Pre-Analysis, Apache 2.0)
+    ├── QSV_WINDOWS_SPEC.md                    ← Intel direct via oneVPL (covers Arc)
+    └── VULKAN_VIDEO_WINDOWS_SPEC.md           ← cross-vendor royalty-free, future-facing
 ```
 
-AV1 is a long-term improvement. Practical deployment today: H.264 HW everywhere.
+See [`encoders/README.md`](./encoders/README.md) for recommended combinations,
+runtime probe order, and rationale.
 
-### Key NVENC Flags (from Sunshine source — copy these exactly)
+### Why MF HW is the recommended cross-vendor default
 
-```cpp
-// These are the production-tested latency settings:
-NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY  // single most important flag
-CBR rate control                       // constant bitrate for streaming
-surfaces = 1                           // minimum pipeline depth
-delay = 0                              // no frame reorder delay
-```
+Unlike Linux (where VA-API uniformly covers Intel + AMD + NVIDIA), Windows
+historically fragmented per-vendor. **MediaFoundation Hardware Transform** is the
+closest equivalent: a single Microsoft API that routes to whatever vendor MFT is
+registered. For most deployments, `mf_hw` alone is sufficient.
 
-**REF_FRAMES_INVALIDATION (NVENC only):** When a client reports packet loss, instead of forcing a full IDR keyframe (expensive, causes bitrate spike), NVENC can invalidate only the affected reference frames. This is the biggest latency advantage NVENC has over AMF/QSV for streaming. Worth implementing.
+For peak performance or vendor-specific features (NVENC's
+`REF_FRAMES_INVALIDATION`, AMF's Pre-Analysis), add the vendor-direct add-on
+alongside MF HW.
 
-### Zero-Copy D3D11 → Encoder Path
+### TL;DR — recommended combinations
 
-For minimum latency and CPU load, frames from DXGI DDup should go directly to the hardware encoder without CPU involvement:
-
-```
-DXGI DDup → ID3D11Texture2D (GPU memory)
-    → NVENC: NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX
-    → AMF:   AMFSurface from D3D11 texture
-    → QSV:   mfxFrameSurface1 from D3D11 texture (via DXVA interop)
-```
-
-CPU usage with this path: <3% at 1080p60. Without it (CPU copy then encode): 15–25%.
+| Deployment | Add-ons |
+|-----------|---------|
+| Generic Windows (any GPU) | `openh264` + `mf_hw` |
+| ARM Snapdragon | `mf_sw` + `mf_hw` |
+| NVIDIA-only | `openh264` + `nvenc` |
+| AMD-only | `openh264` + `amf` |
+| Intel-only | `openh264` + `qsv` |
 
 ---
 

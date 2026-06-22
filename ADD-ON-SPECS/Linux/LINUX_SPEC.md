@@ -96,59 +96,42 @@ Target: replace with XShm direct capture (no subprocess) for production deployme
 
 ## Video Encoding
 
-### Default Binary: VA-API + OpenH264
+### Every encoder is an add-on (pluggable architecture)
 
-The **default** FeatherDesk binary on Linux ships with two encoders covering every
-machine:
+The Linux default binary contains **no encoders**. Every encoder — software and
+hardware — is a build-tagged add-on. Users compile in exactly the encoders they
+want. The full set:
 
-- **VA-API CGo** for hardware encode on Intel + AMD (first-party) and NVIDIA (via the
-  unofficial `nvidia-vaapi-driver` wrapper)
-- **OpenH264 CGo** as universal software fallback when no GPU is present
+```
+encoders/
+├── SW/
+│   └── OPENH264_CGO_LINUX_SPEC.md    ← cross-platform SW H.264 (Cisco, BSD-2)
+└── HW/
+    ├── LIBVA_LINUX_SPEC.md            ← Intel + AMD + NVIDIA via VA-API (MIT)
+    ├── NVENC_LINUX_SPEC.md            ← NVIDIA direct (REF_FRAMES_INVALIDATION)
+    ├── AMF_ROCM_SPEC.md               ← AMD direct via ROCm (Apache 2.0)
+    └── VULKAN_VIDEO_LINUX_SPEC.md     ← cross-vendor royalty-free, future-facing
+```
 
-This is enough for the majority of deployments. No extra binaries needed.
+See [`encoders/README.md`](./encoders/README.md) for recommended combinations,
+runtime probe order, and rationale.
 
-### Optional Add-On Binaries (vendor-specific)
+### TL;DR — recommended combinations
 
-For users who need vendor-specific features not exposed through VA-API, FeatherDesk
-ships **opt-in add-on binaries**:
-
-| Add-on | Hardware | Spec | Why opt in |
-|--------|---------|------|-----------|
-| **NVENC direct** | NVIDIA Kepler+ | [`encoders/NVENC_LINUX_SPEC.md`](./encoders/NVENC_LINUX_SPEC.md) | Unlocks `REF_FRAMES_INVALIDATION` (partial IDR on loss), official AV1 support, lower latency vs VA-API wrapper |
-| **AMF on ROCm** | AMD with GPU PRO driver | [`encoders/AMF_ROCM_SPEC.md`](./encoders/AMF_ROCM_SPEC.md) | AMD-specific tuning, Pre-Analysis quality boost |
-| **Vulkan Video** | Any Vulkan 1.3+ GPU | [`encoders/VULKAN_VIDEO_SPEC.md`](./encoders/VULKAN_VIDEO_SPEC.md) | One binary for Intel + AMD + NVIDIA; future-facing |
-
-**Intel does not need an add-on on Linux** — Intel Quick Sync is exposed exclusively
-through VA-API. The default binary covers Intel Sandy Bridge through Arc.
+| Deployment | Add-ons | Why |
+|-----------|---------|-----|
+| Generic Linux server | `openh264` + `libva` | Universal coverage, smallest add-on set |
+| NVIDIA workstation | `openh264` + `nvenc` | REF_FRAMES_INVALIDATION for lossy networks |
+| AMD workstation | `openh264` + `libva` + `amf_rocm` | AMD-specific tuning + universal fallback |
+| Container / no GPU | `openh264` only | SW-only, smallest binary |
 
 ### How vendor APIs map to Linux
 
-| GPU vendor | Default binary path | Add-on options |
-|-----------|--------------------|--------------|
-| Intel | VA-API (`iHD` / `i965`) | Vulkan Video |
-| AMD | VA-API (Mesa `radeonsi`) | AMF on ROCm, Vulkan Video |
-| NVIDIA | VA-API (`nvidia-vaapi-driver` wrapper) | **NVENC direct (recommended)**, Vulkan Video |
-
-> **NVIDIA recommendation:** if deploying to NVIDIA GPUs and packet loss matters
-> (WAN, lossy networks), ship the NVENC add-on. The `REF_FRAMES_INVALIDATION` feature
-> it unlocks is the single biggest streaming-quality advantage NVIDIA has, and the
-> VA-API wrapper cannot expose it.
-
-### Runtime encoder probe order
-
-The pipeline checks at startup, in this order:
-
-```
-1. NVENC add-on compiled in AND NVIDIA GPU present?    → use NVENC direct
-2. AMF add-on compiled in AND AMD PRO driver present?  → use AMF
-3. Vulkan Video add-on compiled in AND mature on this GPU? → use Vulkan
-4. VA-API (default binary) with HEVC support?          → use VA-API HEVC
-5. VA-API (default binary) with H.264 support?         → use VA-API H.264
-6. OpenH264 CGo (default binary, always present)       → SW fallback
-```
-
-The first available encoder wins. User controls the priority by choosing which add-ons
-to install — the binary itself does not need command-line flags to switch encoders.
+| GPU vendor | LIBVA covers | Vendor-direct add-on available |
+|-----------|--------------|-------------------------------|
+| Intel | ✅ first-party (`iHD` / `i965`) | — (no separate Intel SDK on Linux) |
+| AMD | ✅ first-party (Mesa `radeonsi`) | `amf_rocm` for AMF tuning |
+| NVIDIA | ⚠️ via unofficial `nvidia-vaapi-driver` | `nvenc` recommended for NVIDIA deployments |
 
 ### Confirmed Fallback Order
 

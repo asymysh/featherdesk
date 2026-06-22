@@ -70,22 +70,27 @@ users opt into vendor-specific performance gains.
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 11 plug-and-play modules. Each module has its own spec
+The system is decomposed into 10 plug-and-play modules. Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
 |---|--------|-----------|----------------|
 | 1 | **Capture** | [`./MODULE_CAPTURE.md`](./MODULE_CAPTURE.md) | Screen frame acquisition (KMS/DRM/EGL/X11/PipeWire) |
-| 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software video encoding (OpenH264 default) |
-| 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Zero-copy GPU encoding interface (DMA-BUF) |
-| 4 | **Custom libva** | [`./MODULE_CUSTOM_LIBVA.md`](./MODULE_CUSTOM_LIBVA.md) | Direct VA-API CGo implementation (no ffmpeg) |
-| 5 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Remote input injection (uinput keyboard/mouse) |
-| 6 | **Audio** | [`./MODULE_AUDIO.md`](./MODULE_AUDIO.md) | System audio capture (PipeWire) |
-| 7 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) |
-| 8 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | WebSocket server, client management, TLS |
-| 9 | **Logger** | [`./MODULE_LOGGER.md`](./MODULE_LOGGER.md) | Structured logging subsystem |
-| 10 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs + AudioWorklet) |
-| 11 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: lifecycle, pacing, frame drops, wiring |
+| 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software encoder interface (concrete impls are add-ons) |
+| 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface (concrete impls are add-ons) |
+| 4 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Remote input injection (uinput keyboard/mouse) |
+| 5 | **Audio** | [`./MODULE_AUDIO.md`](./MODULE_AUDIO.md) | System audio capture (PipeWire) |
+| 6 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) |
+| 7 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | WebSocket server, client management, TLS |
+| 8 | **Logger** | [`./MODULE_LOGGER.md`](./MODULE_LOGGER.md) | Structured logging subsystem |
+| 9 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs + AudioWorklet) |
+| 10 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: lifecycle, pacing, frame drops, wiring |
+
+> **Encoder implementations are not core modules.** Every encoder (OpenH264 CGo,
+> VideoToolbox, VA-API/libva, NVENC, AMF, QSV, MediaFoundation, Vulkan Video) is
+> a build-tagged add-on under [`../ADD-ON-SPECS/{Platform}/encoders/{SW,HW}/`](../ADD-ON-SPECS/).
+> The default binary ships with zero encoders — users compile in what they need.
+> See the index below for the full add-on catalogue.
 
 ---
 
@@ -125,15 +130,16 @@ for the full rationale.
 
 ### Linux encoder add-on specs
 
-| Add-on | Spec | Hardware | Status |
-|--------|------|---------|--------|
-| NVENC direct | [`ADD-ON-SPECS/Linux/encoders/NVENC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
-| AMF on ROCm | [`ADD-ON-SPECS/Linux/encoders/AMF_ROCM_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
-| Vulkan Video | [`ADD-ON-SPECS/Linux/encoders/VULKAN_VIDEO_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/VULKAN_VIDEO_SPEC.md) | Any Vulkan 1.3+ GPU | 📋 Specced |
+| Add-on | Path | Spec | Hardware | Status |
+|--------|------|------|---------|--------|
+| OpenH264 CGo | SW | [`Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
+| libva direct | HW | [`Linux/encoders/HW/LIBVA_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
+| NVENC direct | HW | [`Linux/encoders/HW/NVENC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
+| AMF on ROCm | HW | [`Linux/encoders/HW/AMF_ROCM_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
+| Vulkan Video | HW | [`Linux/encoders/HW/VULKAN_VIDEO_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/VULKAN_VIDEO_LINUX_SPEC.md) | Any Vulkan 1.3+ GPU | 📋 Specced |
 
 > **Intel on Linux is not a separate add-on** — Intel Quick Sync is exposed exclusively
-> through VA-API on Linux. The default binary's VA-API path already covers Intel
-> Sandy Bridge through Arc.
+> through VA-API. The `libva` add-on covers Intel Sandy Bridge through Arc.
 
 ### macOS capture add-on specs
 
@@ -145,35 +151,40 @@ for the explanation. SCK is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
 
 ### macOS encoder add-on specs
 
-**No add-ons needed.** VideoToolbox is a single unified API that covers Intel Quick
-Sync, AMD VCE/GVA, Apple Media Engine (M1/M2+), and Apple's software encoder.
+| Add-on | Path | Spec | Hardware | Status |
+|--------|------|------|---------|--------|
+| VideoToolbox SW | SW | [`macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
+| VideoToolbox HW | HW | [`macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC), M2+ (HW AV1) | 📋 Specced |
 
-See [`ADD-ON-SPECS/macOS/encoders/README.md`](../ADD-ON-SPECS/macOS/encoders/README.md)
-for the explanation. VideoToolbox is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
+> **No vendor-specific add-ons on macOS** — Apple controls the entire graphics stack.
+> VideoToolbox is the single API for Intel Quick Sync, AMD VCE, and Apple Media Engine.
+> The SW/HW split is purely build-modularity (same CGo file, different config).
+> The Linux SW add-on (`openh264`) also works on macOS for cross-platform binary
+> consistency.
 
 ### Windows capture add-on specs
 
 ⏸️ **Pending architecture discussion** — see
 [`ADD-ON-SPECS/Windows/capture/README.md`](../ADD-ON-SPECS/Windows/capture/README.md).
 
-Likely single candidate: NVENC's NvFBC for Windows (Sunshine pattern). DDup is the
-default for everything else.
+Likely single candidate: NvFBC for Windows (Sunshine pattern). DXGI Desktop
+Duplication is the default for everything else.
 
 ### Windows encoder add-on specs
 
-⏸️ **Pending architecture discussion.** Windows has the most fragmented vendor encoder
-API landscape (NVENC, AMF, QSV, MediaFoundation) with no unified equivalent of VA-API
-or VideoToolbox.
+| Add-on | Path | Spec | Hardware | Status |
+|--------|------|------|---------|--------|
+| OpenH264 CGo | SW | [`Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | 📋 Specced |
+| MediaFoundation SW | SW | [`Windows/encoders/SW/MEDIAFOUNDATION_SW_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/MEDIAFOUNDATION_SW_WINDOWS_SPEC.md) | Any Windows 10+ | 📋 Specced |
+| MediaFoundation HW | HW | [`Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | 📋 Specced |
+| NVENC | HW | [`Windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
+| AMF | HW | [`Windows/encoders/HW/AMF_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/AMF_WINDOWS_SPEC.md) | AMD GCN+ | 📋 Specced |
+| QSV (oneVPL) | HW | [`Windows/encoders/HW/QSV_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/QSV_WINDOWS_SPEC.md) | Intel Sandy Bridge+ (covers Arc) | 📋 Specced |
+| Vulkan Video | HW | [`Windows/encoders/HW/VULKAN_VIDEO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/VULKAN_VIDEO_WINDOWS_SPEC.md) | Any Vulkan 1.3+ GPU | 📋 Specced |
 
-See [`ADD-ON-SPECS/Windows/encoders/README.md`](../ADD-ON-SPECS/Windows/encoders/README.md)
-for the open questions and likely add-on candidates.
-
-| Add-on | Spec | Hardware | Status |
-|--------|------|---------|--------|
-| NVENC Windows | TBD | NVIDIA | ⏸️ Pending discussion |
-| AMF Windows | TBD | AMD | ⏸️ Pending discussion |
-| QSV (oneVPL) | TBD | Intel | ⏸️ Pending discussion |
-| MediaFoundation | TBD | Software / ARM | ⏸️ Pending discussion |
+> **MediaFoundation HW is the recommended cross-vendor default for Windows** —
+> closest equivalent to VA-API on Linux. Ship `mf_hw` for one-binary-covers-everything;
+> add vendor SDKs (NVENC/AMF/QSV) for peak performance and vendor-specific features.
 
 ### Where to register a new add-on
 

@@ -92,6 +92,29 @@ For the software path, `CVPixelBufferLockBaseAddress` on the IOSurface-backed bu
 | **Intel integrated only, Sandy/Ivy Bridge (2011–12)** | ✅ Quick Sync | ❌ | ❌ | Mac mini 2011–12 |
 | **Pre-2011 (Core 2 Duo, Nvidia 320M)** | ❌ | ❌ | ❌ | Cannot run macOS 12.3+ anyway |
 
+### Every encoder is an add-on (pluggable architecture)
+
+The macOS default binary contains **no encoders**. Every encoder is a build-tagged
+add-on. The full set:
+
+```
+encoders/
+├── SW/
+│   └── VIDEOTOOLBOX_SW_MACOS_SPEC.md   ← Apple's tuned SW H.264/HEVC
+│   └── (OpenH264 CGo also works — same spec as Linux/SW)
+└── HW/
+    └── VIDEOTOOLBOX_HW_MACOS_SPEC.md   ← unified HW: Intel QS + AMD VCE + Apple Media Engine
+```
+
+See [`encoders/README.md`](./encoders/README.md) for recommended combinations.
+
+### TL;DR — recommended combinations
+
+| Deployment | Add-ons | Why |
+|-----------|---------|-----|
+| Any Mac (default) | `vt_sw` + `vt_hw` | One HW API covers every Mac via VideoToolbox |
+| Cross-platform binary | `openh264` + `vt_hw` | Same SW encoder as Linux + Windows |
+
 ### Codec Decision (Confirmed)
 
 ```
@@ -105,8 +128,7 @@ Skip:      VP8/VP9                    ← no HW path on macOS, not worth SW cost
 
 **H.264 + HEVC are both confirmed targets.** The pipeline selects at startup via
 `VTCopyVideoEncoderList` — if `hevc.gva` is in the list, HEVC is available and gets
-advertised in the Config handshake. Clients that support HEVC WebCodecs decode get the
-better-compressed stream; others fall back to H.264.
+advertised in the Config handshake.
 
 ### Confirmed Fallback Order
 
