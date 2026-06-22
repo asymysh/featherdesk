@@ -4,6 +4,8 @@
 
 The Hardware Encode module provides a zero-copy GPU-resident encoding path. Unlike the software encode path (which round-trips pixels through CPU via `glReadPixels` → libyuv → ffmpeg stdin), this module keeps the framebuffer on the GPU: `DMA-BUF fd → VA-API encoder → encoded NALs`. This eliminates two expensive GPU↔CPU copies and is the performance-critical path for 1080p60 / 1440p60 streaming.
 
+**ffmpeg is NOT a dependency of this module.** VA-API is a direct Linux C library (`libva`). This module calls it via CGo — no subprocess, no pipe, no runtime binary dependency. The existing `internal/encode/ffmpeg.go` with `hwAccel=true` (the old `h264_vaapi` subprocess path) is replaced entirely by this module.
+
 ---
 
 ## Public Interface
@@ -200,15 +202,98 @@ The cursor source (DRM cursor plane position + image) is exposed by the capturer
 
 ---
 
+## Current Implementation vs This Module
+
+The existing codebase encodes hardware H.264 via `internal/encode/ffmpeg.go` with `hwAccel=true`:
+
+```go
+// CURRENT — to be replaced
+encoder, err = encode.NewFFmpegEncoder(encCfg, log, true)
+// Internally: ffmpeg -i pipe:0 -vf format=nv12,hwupload -c:v h264_vaapi pipe:1
+// Problems:
+//   1. glReadPixels (GPU→CPU: ~24MB/frame at 1440p)
+//   2. libyuv I420 conversion (CPU)
+//   3. ffmpeg stdin write (pipe, process overhead)
+//   4. hwupload (CPU→GPU: ~12MB NV12 re-upload)
+//   5. VAAPI encode
+//   6. ffmpeg stdout read (pipe)
+// Total: 2 bulk PCIe transfers, 1 subprocess, ~36MB/frame bandwidth
+```
+
+This module replaces that entirely:
+
+```go
+// TARGET — this module
+encoder, err = hwencode.NewVAAPIEncoder(hwencode.HWEncoderConfig{
+    EncoderConfig: encCfg,
+    RenderNode:    "/dev/dri/renderD128",
+    Codec:         hwencode.HWCodecH264,
+    Profile:       hwencode.HWProfileConstrained,
+})
+// Internally: DMA-BUF fd → vaCreateSurfaces → encode → vaMapBuffer
+// Benefits:
+//   1. DMA-BUF stays on GPU (0 CPU pixel copies)
+//   2. No ffmpeg binary needed at runtime
+//   3. No subprocess or pipe overhead
+//   4. ~30KB/frame bus bandwidth (compressed output only)
+```
+
+---
+
 ## Refactoring Directives
 
 ### R-HWE-01: Implement VA-API CGo Bindings
-Create CGo wrappers for libva:
-- `vaGetDisplayDRM`, `vaInitialize`, `vaTerminate`
-- `vaCreateConfig`, `vaCreateContext`
-- `vaCreateSurfaces` (with external buffer import)
-- `vaBeginPicture`, `vaRenderPicture`, `vaEndPicture`, `vaSyncSurface`
-- `vaCreateBuffer`, `vaMapBuffer`, `vaUnmapBuffer`, `vaDestroyBuffer`
+Create `internal/hwencode/vaapi/vaapi.go` with a CGo preamble that wraps the following libva functions. These six are the complete set needed for the encode loop — nothing else is required:
+
+```c
+/*
+#cgo pkg-config: libva libva-drm libdrm
+
+#include <va/va.h>
+#include <va/va_drm.h>
+#include <va/va_enc_h264.h>
+#include <drm/drm_fourcc.h>
+
+// Session init
+VADisplay   vaGetDisplayDRM(int fd);
+VAStatus    vaInitialize(VADisplay dpy, int *major, int *minor);
+VAStatus    vaTerminate(VADisplay dpy);
+
+// Encoder config & context
+VAStatus    vaCreateConfig(VADisplay dpy, VAProfile profile,
+                VAEntrypoint entrypoint, VAConfigAttrib *attrs,
+                int numAttribs, VAConfigID *configID);
+VAStatus    vaCreateContext(VADisplay dpy, VAConfigID configID,
+                int picW, int picH, int flag,
+                VASurfaceID *renderTargets, int numRenderTargets,
+                VAContextID *contextID);
+
+// Surface import from DMA-BUF (zero-copy — framebuffer stays on GPU)
+VAStatus    vaCreateSurfaces(VADisplay dpy, unsigned int format,
+                unsigned int width, unsigned int height,
+                VASurfaceID *surfaces, unsigned int numSurfaces,
+                VASurfaceAttrib *attribList, unsigned int numAttribs);
+// Set attribList[0].type = VASurfaceAttribExternalBufferDescriptor
+// Set attribList[0].value = VASurfaceAttribExternalBuffers{fd, stride, ...}
+
+// Per-frame encode
+VAStatus    vaBeginPicture(VADisplay dpy, VAContextID ctx, VASurfaceID surface);
+VAStatus    vaRenderPicture(VADisplay dpy, VAContextID ctx,
+                VABufferID *buffers, int numBuffers);
+VAStatus    vaEndPicture(VADisplay dpy, VAContextID ctx);
+VAStatus    vaSyncSurface(VADisplay dpy, VASurfaceID surface);
+
+// Coded output readback (only copy: ~30KB compressed NALs)
+VAStatus    vaCreateBuffer(VADisplay dpy, VAContextID ctx,
+                VABufferType type, unsigned int size, unsigned int numElements,
+                void *data, VABufferID *bufID);
+VAStatus    vaMapBuffer(VADisplay dpy, VABufferID buf, void **pbuf);
+VAStatus    vaUnmapBuffer(VADisplay dpy, VABufferID buf);
+VAStatus    vaDestroyBuffer(VADisplay dpy, VABufferID buf);
+*/
+```
+
+**No other libva functions are needed for the core encode loop.** Format conversion (XRGB8888→NV12 when required) adds `vaQueryVideoProcFilters` / `vaProcPipeline`, but that is an optional extension.
 
 ### R-HWE-02: Implement DMA-BUF Surface Import
 Use `VASurfaceAttribExternalBuffers` to import DMA-BUF fds as VA-API surfaces without any GPU→CPU→GPU round-trip.
