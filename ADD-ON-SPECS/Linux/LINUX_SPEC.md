@@ -11,15 +11,36 @@ hardware encoder path still to be built.
 
 ## Capture
 
-### Backend Selection
+### Default Binary
+
+The default Linux binary ships with three capture backends — universal coverage
+for Intel, AMD, and NVIDIA-open-source on X11 or Wayland:
 
 ```
 Root / CAP_SYS_ADMIN available AND DRM card found?
     YES → KMS/DRM + EGL              (primary — lowest latency)
-    NO  → Is Wayland + Mutter?
-              YES → PipeWire ScreenCast  (Wayland fallback)
-              NO  → X11grab via ffmpeg   (X11 fallback)
+    NO  → Is Wayland?
+              GNOME/KDE → PipeWire ScreenCast portal
+              wlroots   → (see add-on below for direct DMA-BUF path)
+          Is X11?
+              YES       → X11grab via ffmpeg
 ```
+
+### Optional Add-On Capture Backends
+
+For users who can benefit from vendor-specific or compositor-specific capture paths:
+
+| Add-on | Hardware / compositor | Spec | Why opt in |
+|--------|---------------------|------|-----------|
+| **NvFBC** | NVIDIA proprietary driver | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower latency on NVIDIA, direct GPU framebuffer, official NVIDIA path |
+| **wlr-screencopy** | Sway, Hyprland, river, dwl, labwc | [`capture/WLROOTS_SCREENCOPY_SPEC.md`](./capture/WLROOTS_SCREENCOPY_SPEC.md) | Direct DMA-BUF from compositor, no PipeWire portal indirection |
+
+**Intel and AMD do not need capture add-ons** — neither vendor has a proprietary
+capture API on Linux. KMS+EGL via the standard Linux graphics stack is the entire
+path and is genuinely the best available.
+
+For full rationale and the runtime capture probe order, see
+[`capture/README.md`](./capture/README.md).
 
 ### KMS/DRM + EGL (Primary — requires root or CAP_SYS_ADMIN)
 

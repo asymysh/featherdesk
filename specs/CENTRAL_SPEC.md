@@ -104,6 +104,21 @@ for where any platform or add-on document lives — never duplicate specs, alway
 | **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | ScreenCaptureKit | VideoToolbox |
 | **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | DXGI / WGC | (TBD) |
 
+### Linux capture add-on specs
+
+| Add-on | Spec | Hardware / compositor | Status |
+|--------|------|----------------------|--------|
+| NvFBC | [`ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
+| wlr-screencopy | [`ADD-ON-SPECS/Linux/capture/WLROOTS_SCREENCOPY_SPEC.md`](../ADD-ON-SPECS/Linux/capture/WLROOTS_SCREENCOPY_SPEC.md) | wlroots compositors (Sway, Hyprland, etc.) | 📋 Specced |
+
+> **Intel / AMD do not have separate capture add-ons** — neither vendor has a
+> proprietary capture API on Linux. KMS+EGL via the standard Linux graphics stack
+> is the entire path. GNOME / KDE Wayland users get PipeWire ScreenCast in the
+> default binary; X11 users get X11grab.
+
+See [`ADD-ON-SPECS/Linux/capture/README.md`](../ADD-ON-SPECS/Linux/capture/README.md)
+for the full rationale and runtime probe order.
+
 ### Linux encoder add-on specs
 
 | Add-on | Spec | Hardware | Status |
@@ -116,21 +131,35 @@ for where any platform or add-on document lives — never duplicate specs, alway
 > through VA-API on Linux. The default binary's VA-API path already covers Intel
 > Sandy Bridge through Arc.
 
+### macOS capture add-on specs
+
+**No add-ons needed.** ScreenCaptureKit is the only capture API on macOS 26+. All
+legacy alternatives (CGDisplayStream, CGWindowListCreateImage, etc.) were removed.
+
+See [`ADD-ON-SPECS/macOS/capture/README.md`](../ADD-ON-SPECS/macOS/capture/README.md)
+for the explanation. SCK is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
+
 ### macOS encoder add-on specs
 
 **No add-ons needed.** VideoToolbox is a single unified API that covers Intel Quick
-Sync, AMD VCE/GVA, Apple Media Engine (M1/M2+), and Apple's software encoder. All four
-paths are documented in the macOS platform spec.
+Sync, AMD VCE/GVA, Apple Media Engine (M1/M2+), and Apple's software encoder.
 
 See [`ADD-ON-SPECS/macOS/encoders/README.md`](../ADD-ON-SPECS/macOS/encoders/README.md)
-for the explanation and the pointer to where VideoToolbox is specced.
+for the explanation. VideoToolbox is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
+
+### Windows capture add-on specs
+
+⏸️ **Pending architecture discussion** — see
+[`ADD-ON-SPECS/Windows/capture/README.md`](../ADD-ON-SPECS/Windows/capture/README.md).
+
+Likely single candidate: NVENC's NvFBC for Windows (Sunshine pattern). DDup is the
+default for everything else.
 
 ### Windows encoder add-on specs
 
 ⏸️ **Pending architecture discussion.** Windows has the most fragmented vendor encoder
 API landscape (NVENC, AMF, QSV, MediaFoundation) with no unified equivalent of VA-API
-or VideoToolbox. The pluggability strategy needs to be decided before individual
-specs are written.
+or VideoToolbox.
 
 See [`ADD-ON-SPECS/Windows/encoders/README.md`](../ADD-ON-SPECS/Windows/encoders/README.md)
 for the open questions and likely add-on candidates.
