@@ -116,14 +116,31 @@ for where any platform or add-on document lives — never duplicate specs, alway
 > through VA-API on Linux. The default binary's VA-API path already covers Intel
 > Sandy Bridge through Arc.
 
-### Windows encoder add-on specs (future)
+### macOS encoder add-on specs
+
+**No add-ons needed.** VideoToolbox is a single unified API that covers Intel Quick
+Sync, AMD VCE/GVA, Apple Media Engine (M1/M2+), and Apple's software encoder. All four
+paths are documented in the macOS platform spec.
+
+See [`ADD-ON-SPECS/macOS/encoders/README.md`](../ADD-ON-SPECS/macOS/encoders/README.md)
+for the explanation and the pointer to where VideoToolbox is specced.
+
+### Windows encoder add-on specs
+
+⏸️ **Pending architecture discussion.** Windows has the most fragmented vendor encoder
+API landscape (NVENC, AMF, QSV, MediaFoundation) with no unified equivalent of VA-API
+or VideoToolbox. The pluggability strategy needs to be decided before individual
+specs are written.
+
+See [`ADD-ON-SPECS/Windows/encoders/README.md`](../ADD-ON-SPECS/Windows/encoders/README.md)
+for the open questions and likely add-on candidates.
 
 | Add-on | Spec | Hardware | Status |
 |--------|------|---------|--------|
-| NVENC Windows | TBD | NVIDIA | 📋 Planned |
-| AMF Windows | TBD | AMD | 📋 Planned |
-| Quick Sync (oneVPL) | TBD | Intel | 📋 Planned |
-| MediaFoundation | TBD | Software / ARM | 📋 Planned |
+| NVENC Windows | TBD | NVIDIA | ⏸️ Pending discussion |
+| AMF Windows | TBD | AMD | ⏸️ Pending discussion |
+| QSV (oneVPL) | TBD | Intel | ⏸️ Pending discussion |
+| MediaFoundation | TBD | Software / ARM | ⏸️ Pending discussion |
 
 ### Where to register a new add-on
 
