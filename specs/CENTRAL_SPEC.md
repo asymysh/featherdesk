@@ -106,18 +106,22 @@ for where any platform or add-on document lives — never duplicate specs, alway
 
 ### Linux capture add-on specs
 
-| Add-on | Spec | Hardware / compositor | Status |
-|--------|------|----------------------|--------|
+| Add-on | Spec | Hardware | Status |
+|--------|------|---------|--------|
 | NvFBC | [`ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
-| wlr-screencopy | [`ADD-ON-SPECS/Linux/capture/WLROOTS_SCREENCOPY_SPEC.md`](../ADD-ON-SPECS/Linux/capture/WLROOTS_SCREENCOPY_SPEC.md) | wlroots compositors (Sway, Hyprland, etc.) | 📋 Specced |
 
-> **Intel / AMD do not have separate capture add-ons** — neither vendor has a
-> proprietary capture API on Linux. KMS+EGL via the standard Linux graphics stack
-> is the entire path. GNOME / KDE Wayland users get PipeWire ScreenCast in the
-> default binary; X11 users get X11grab.
+> **Default binary capture is KMS+EGL only.** KMS+EGL works on X11, Wayland (all
+> compositors), and headless — it operates below the display server, so display server
+> choice is irrelevant. Requires root / `CAP_SYS_ADMIN`. No-root fallback paths
+> (XShm, PipeWire portal, wlr-screencopy, X11grab) were considered and explicitly
+> rejected — none beat KMS+EGL when root is available, and no-root deployment is not
+> currently a target.
+>
+> **Intel / AMD do not need capture add-ons** — neither vendor has a proprietary
+> capture API on Linux. KMS+EGL is the entire path.
 
 See [`ADD-ON-SPECS/Linux/capture/README.md`](../ADD-ON-SPECS/Linux/capture/README.md)
-for the full rationale and runtime probe order.
+for the full rationale.
 
 ### Linux encoder add-on specs
 

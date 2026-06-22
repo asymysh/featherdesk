@@ -11,36 +11,49 @@ hardware encoder path still to be built.
 
 ## Capture
 
-### Default Binary
+### Default Binary: KMS+EGL only
 
-The default Linux binary ships with three capture backends — universal coverage
-for Intel, AMD, and NVIDIA-open-source on X11 or Wayland:
+The default Linux binary uses a single capture backend:
 
 ```
-Root / CAP_SYS_ADMIN available AND DRM card found?
-    YES → KMS/DRM + EGL              (primary — lowest latency)
-    NO  → Is Wayland?
-              GNOME/KDE → PipeWire ScreenCast portal
-              wlroots   → (see add-on below for direct DMA-BUF path)
-          Is X11?
-              YES       → X11grab via ffmpeg
+Root or CAP_SYS_ADMIN available AND DRM card found?
+    YES → KMS+EGL with DMA-BUF zero-copy
+    NO  → fatal: insufficient permissions
 ```
 
-### Optional Add-On Capture Backends
+KMS+EGL operates at the kernel/DRM level below the display server, so it works on
+**X11, Wayland (GNOME/KDE/wlroots), or no display server at all** — display server
+choice is irrelevant. The constraint is `CAP_SYS_ADMIN` only.
 
-For users who can benefit from vendor-specific or compositor-specific capture paths:
+```
+DRM card → drmPrimeHandleToFD → DMA-BUF fd → encoder (zero CPU pixel copies)
+```
 
-| Add-on | Hardware / compositor | Spec | Why opt in |
-|--------|---------------------|------|-----------|
-| **NvFBC** | NVIDIA proprietary driver | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower latency on NVIDIA, direct GPU framebuffer, official NVIDIA path |
-| **wlr-screencopy** | Sway, Hyprland, river, dwl, labwc | [`capture/WLROOTS_SCREENCOPY_SPEC.md`](./capture/WLROOTS_SCREENCOPY_SPEC.md) | Direct DMA-BUF from compositor, no PipeWire portal indirection |
+Latency: ~0.5ms — gold standard, nothing beats it.
+
+**No no-root fallback paths in the default binary.** If a deployment needs to run
+without root, that requirement will be addressed when it comes up. Until then,
+users grant the capability once at install:
+
+```bash
+sudo setcap cap_sys_admin+p ./viewport-rds
+```
+
+### Optional Capture Add-On
+
+| Add-on | Hardware | Spec | Why opt in |
+|--------|---------|------|-----------|
+| **NvFBC** | NVIDIA proprietary driver | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower than KMS+EGL on NVIDIA proprietary stack; official NVIDIA path; pairs with NVENC encoder for full zero-copy GPU-resident pipeline |
+
+NvFBC is the only capture path that beats KMS+EGL on any hardware — and only on
+NVIDIA, where KMS+EGL has historically been finicky with the proprietary driver.
 
 **Intel and AMD do not need capture add-ons** — neither vendor has a proprietary
-capture API on Linux. KMS+EGL via the standard Linux graphics stack is the entire
-path and is genuinely the best available.
+capture API on Linux.
 
-For full rationale and the runtime capture probe order, see
-[`capture/README.md`](./capture/README.md).
+See [`capture/README.md`](./capture/README.md) for the runtime probe order and the
+documented reasoning for why other paths (wlr-screencopy, XShm, etc.) were considered
+and rejected.
 
 ### KMS/DRM + EGL (Primary — requires root or CAP_SYS_ADMIN)
 
