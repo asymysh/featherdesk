@@ -11,86 +11,54 @@ hardware encoder path still to be built.
 
 ## Capture
 
-### Default Binary: KMS+EGL only
+### Every capture backend is an add-on (pluggable architecture)
 
-The default Linux binary uses a single capture backend:
-
-```
-Root or CAP_SYS_ADMIN available AND DRM card found?
-    YES → KMS+EGL with DMA-BUF zero-copy
-    NO  → fatal: insufficient permissions
-```
-
-KMS+EGL operates at the kernel/DRM level below the display server, so it works on
-**X11, Wayland (GNOME/KDE/wlroots), or no display server at all** — display server
-choice is irrelevant. The constraint is `CAP_SYS_ADMIN` only.
+The Linux default binary contains **no capture backends**. Every capture path is
+a build-tagged add-on, mirroring the encoder architecture. Users compile in
+exactly the capture method(s) they need.
 
 ```
-DRM card → drmPrimeHandleToFD → DMA-BUF fd → encoder (zero CPU pixel copies)
+capture/
+├── KMS_EGL_LINUX_SPEC.md   ← default recommended add-on, universal GPU coverage
+├── NVFBC_LINUX_SPEC.md     ← NVIDIA proprietary, lower-latency alternative
+└── README.md               ← runtime probe order + recommended combinations
 ```
 
-Latency: ~0.5ms — gold standard, nothing beats it.
+### Add-on summary
 
-**No no-root fallback paths in the default binary.** If a deployment needs to run
-without root, that requirement will be addressed when it comes up. Until then,
-users grant the capability once at install:
+| Add-on | Build tag | Hardware | Spec | When to use |
+|--------|-----------|----------|------|------------|
+| **KMS+EGL DMA-BUF** | `kms_egl` | Any GPU, any display server | [`capture/KMS_EGL_LINUX_SPEC.md`](./capture/KMS_EGL_LINUX_SPEC.md) | Universal default — requires `CAP_SYS_ADMIN` |
+| **NvFBC** | `nvfbc` | NVIDIA proprietary driver only | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower than KMS+EGL on NVIDIA proprietary; official NVIDIA path; pairs with NVENC encoder for full zero-copy GPU-resident pipeline |
+
+KMS+EGL operates at the kernel/DRM level below the display server, so it works
+on X11, Wayland (GNOME/KDE/wlroots), or no display server at all. The only
+constraint is `CAP_SYS_ADMIN`:
 
 ```bash
 sudo setcap cap_sys_admin+p ./viewport-rds
 ```
 
-### Optional Capture Add-On
-
-| Add-on | Hardware | Spec | Why opt in |
-|--------|---------|------|-----------|
-| **NvFBC** | NVIDIA proprietary driver | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower than KMS+EGL on NVIDIA proprietary stack; official NVIDIA path; pairs with NVENC encoder for full zero-copy GPU-resident pipeline |
-
 NvFBC is the only capture path that beats KMS+EGL on any hardware — and only on
-NVIDIA, where KMS+EGL has historically been finicky with the proprietary driver.
+NVIDIA, where KMS+EGL has historically been finicky with the proprietary
+driver. Intel and AMD do not need capture add-ons; neither vendor has a
+proprietary capture API on Linux, so KMS+EGL is the entire path.
 
-**Intel and AMD do not need capture add-ons** — neither vendor has a proprietary
-capture API on Linux.
+**No no-root fallback paths exist today.** If a deployment needs to run without
+root, that requirement will be addressed when it comes up — likely as a future
+XShm or PipeWire portal add-on.
 
-See [`capture/README.md`](./capture/README.md) for the runtime probe order and the
-documented reasoning for why other paths (wlr-screencopy, XShm, etc.) were considered
-and rejected.
-
-### KMS/DRM + EGL (Primary — requires root or CAP_SYS_ADMIN)
-
-Direct kernel framebuffer capture. No display server involvement.
+### Runtime probe order
 
 ```
-/dev/dri/card* → DRM plane enumeration → primary plane framebuffer
-    → drmPrimeHandleToFD → DMA-BUF fd
-    → EGL: eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)
-    → GL: texture → blit to linear renderbuffer → glReadPixels → BGRA []byte
+1. nvfbc add-on compiled in AND NVIDIA proprietary driver present?  → use NvFBC
+2. kms_egl add-on compiled in AND root / CAP_SYS_ADMIN?             → use KMS+EGL
+3. None of the above?                                                → fatal: no capture
 ```
 
-**Benchmark (Intel HD 630, 2560×1440):**
-- EGL context init: 170ms (one-time)
-- glReadPixels per frame: **50ms** at 1440p — this is the software path cost
-- With hardware encode (DMA-BUF direct to VA-API): eliminates glReadPixels entirely
-
-**Dependencies:** `libdrm`, `libgbm`, `libEGL`, `libGL`
-
-**Key known issues (to fix in refactor):**
-- DMA-BUF fd leak on EGL import failure (TD-01)
-- Static C globals prevent thread safety (TD-03)
-- fps parameter unused — no frame pacing (TD-13)
-
-### PipeWire ScreenCast (Wayland fallback)
-
-D-Bus → Mutter ScreenCast API → PipeWire node → GStreamer → raw RGBA pipe.
-GNOME-specific. No root required.
-
-### X11grab via ffmpeg subprocess (X11 fallback)
-
-```bash
-ffmpeg -f x11grab -video_size WxH -framerate N -i $DISPLAY -f rawvideo -pix_fmt rgba -
-```
-
-Current default for development. **Subprocess overhead: ~5% CPU per pod.**
-Target: replace with XShm direct capture (no subprocess) for production deployments.
+The first available capture wins. See [`capture/README.md`](./capture/README.md)
+for recommended add-on combinations and the documented reasoning for why other
+paths (wlr-screencopy, XShm, X11grab, etc.) were considered and rejected.
 
 ---
 

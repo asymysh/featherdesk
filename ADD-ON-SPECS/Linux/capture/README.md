@@ -1,39 +1,36 @@
 # Linux Capture Add-Ons
 
-## Default binary capture: KMS+EGL only
+## Default binary capture: NONE
 
-The default FeatherDesk Linux binary uses a single capture backend:
+Mirroring the encoder architecture: the default Linux binary ships with **zero
+capture backends**. Every capture method is an opt-in build-tagged add-on. Users
+compose the binary they need by choosing capture add-on(s) + encoder add-on(s).
 
-**KMS+EGL with DMA-BUF zero-copy** — see [`../LINUX_SPEC.md`](../LINUX_SPEC.md).
-
-| Aspect | Detail |
-|--------|--------|
-| Requires | Root or `CAP_SYS_ADMIN` (`setcap cap_sys_admin+p ./viewport-rds`) |
-| Display server | Works on X11, Wayland (GNOME/KDE/wlroots), or no display server |
-| Path | DRM card → DMA-BUF fd → encoder (zero CPU pixel copies) |
-| Latency | ~0.5ms — gold standard, nothing beats it |
-
-KMS+EGL operates at the kernel/DRM level **below the display server**, so it works
-identically on X11 and Wayland regardless of compositor. The only constraint is
-`CAP_SYS_ADMIN`.
-
-> **No-root fallbacks are out of scope for now.** If a deployment needs to run without
-> root, that requirement will be addressed when it comes up — likely by adding XShm
-> for X11 and/or PipeWire portal for Wayland as a future enhancement. Until then, the
-> default binary requires `CAP_SYS_ADMIN` and uses KMS+EGL exclusively.
+This keeps the default binary tiny, makes licensing and dependency surface
+explicit per deployment, and lets a single source tree produce binaries for
+wildly different environments (rootful KMS+EGL on bare metal, NvFBC on an
+NVIDIA GPU server, future no-root XShm for a kiosk) without `#ifdef` spaghetti.
 
 ---
 
 ## Available capture add-ons
 
-| Add-on | Spec | When to use | Status |
-|--------|------|------------|--------|
-| **NvFBC** | [`./NVFBC_LINUX_SPEC.md`](./NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver — ~2–3ms lower latency than KMS+EGL on NVIDIA, official path | 📋 Specced |
+| Add-on | Build tag | Spec | When to use | Status |
+|--------|-----------|------|------------|--------|
+| **KMS+EGL DMA-BUF** | `kms_egl` | [`./KMS_EGL_LINUX_SPEC.md`](./KMS_EGL_LINUX_SPEC.md) | Universal default — every GPU, any display server, requires `CAP_SYS_ADMIN` | ✅ Working |
+| **NvFBC** | `nvfbc` | [`./NVFBC_LINUX_SPEC.md`](./NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver — ~2–3ms lower latency than KMS+EGL on NVIDIA, official path | 📋 Specced |
 
-NvFBC is the only capture method that beats KMS+EGL on any hardware. It does so only
-on NVIDIA's proprietary driver stack, where KMS+EGL has historically been finicky
-(multi-monitor edge cases, `nvidia-drm.modeset=1` requirement). NvFBC bypasses all
-of that with direct GPU framebuffer access.
+### Recommended add-on combinations
+
+| Deployment | Capture add-on | Encoder add-on(s) | Build command |
+|------------|---------------|-------------------|---------------|
+| Bare-metal Linux server, any GPU | `kms_egl` | `libva` (HW) + `openh264` (SW fallback) | `go build -tags "kms_egl,libva,openh264"` |
+| NVIDIA proprietary GPU host | `kms_egl,nvfbc` | `nvenc` + `openh264` | `go build -tags "kms_egl,nvfbc,nvenc,openh264"` |
+| AMD ROCm workstation | `kms_egl` | `libva,amf,openh264` | `go build -tags "kms_egl,libva,amf,openh264"` |
+| Intel Arc on Linux | `kms_egl` | `libva,openh264` | `go build -tags "kms_egl,libva,openh264"` (libva handles Arc via iHD driver) |
+
+KMS+EGL is the only add-on in the default recommended set because it's the only
+universally compatible capture backend that works without proprietary SDKs.
 
 ---
 
@@ -41,33 +38,36 @@ of that with direct GPU framebuffer access.
 
 | Hardware / scenario | Why no add-on |
 |---------------------|--------------|
-| Intel HD / Iris / UHD / Arc | No proprietary capture API exists. KMS+EGL is the entire path. |
-| AMD GCN / RDNA | No proprietary capture API exists. KMS+EGL is the entire path. |
+| Intel HD / Iris / UHD / Arc | No proprietary capture API exists. KMS+EGL handles all of it. |
+| AMD GCN / RDNA | No proprietary capture API exists. KMS+EGL handles all of it. |
 | NVIDIA open driver (Nouveau / NVK) | KMS+EGL works well here; NvFBC requires the proprietary driver. |
-| Wayland-specific paths (wlr-screencopy, PipeWire portal) | KMS+EGL works on Wayland without needing the compositor's cooperation. Considered and rejected — marginal benefit for the no-root case which we're not targeting. |
-| X11-specific paths (XShm, XComposite/XDamage) | KMS+EGL works on X11 too. Considered and rejected — same reason. |
+| Wayland-specific (wlr-screencopy, PipeWire portal) | KMS+EGL works on Wayland without needing compositor cooperation. Rejected — marginal benefit only for the no-root case we're not targeting. |
+| X11-specific (XShm, XComposite/XDamage) | KMS+EGL works on X11 too. Rejected — same reason. |
+
+> **No-root fallbacks remain out of scope.** If a deployment needs to run without
+> root, that requirement will be addressed when it comes up — likely as a future
+> XShm (X11) or PipeWire portal (Wayland) add-on.
 
 ---
 
 ## Runtime capture probe order
 
+When multiple capture add-ons are compiled into the same binary, the pipeline
+selects in this priority order:
+
 ```
-1. NvFBC add-on compiled in AND NVIDIA proprietary driver present? → use NvFBC
-2. KMS+EGL with root / CAP_SYS_ADMIN?                              → use KMS+EGL (default)
-3. None of the above?                                              → fatal error: insufficient permissions
+1. nvfbc compiled in AND NVIDIA proprietary driver present?  → use NvFBC
+2. kms_egl compiled in AND root / CAP_SYS_ADMIN?             → use KMS+EGL
+3. None of the above?                                         → fatal: no usable capture
 ```
 
-The first available capture wins. Users on NVIDIA proprietary opt into the NvFBC
-binary if they want maximum performance; everyone else uses the default binary's
-KMS+EGL path.
+The first available capture wins. Compile with only what you need.
 
 ---
 
 ## When ready to add a new capture backend
 
-Follow the same pattern as encoders:
-
-1. Write the spec at `ADD-ON-SPECS/Linux/capture/{NAME}_SPEC.md`
+1. Write the spec at `ADD-ON-SPECS/Linux/capture/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
 4. Implement under `internal/capture/{name}/` with a Go build tag

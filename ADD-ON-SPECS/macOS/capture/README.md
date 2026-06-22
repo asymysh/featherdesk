@@ -1,58 +1,72 @@
 # macOS Capture Add-Ons
 
-## No separate capture add-ons are needed on macOS.
+## Default binary capture: NONE
 
-macOS 26 (Tahoe) removed every legacy capture API simultaneously, leaving exactly one
-supported path: **ScreenCaptureKit (SCK)**. There is no vendor-specific alternative
-because there is no vendor fragmentation on macOS — Apple controls the entire graphics
-stack from Metal up.
+Mirroring the Linux and encoder architecture: the default macOS binary ships
+with **zero capture backends**. Capture is an opt-in build-tagged add-on. Build
+with `-tags sck` to compile in ScreenCaptureKit.
+
+In practice, **every** real macOS deployment will compile in the SCK add-on —
+it's the only supported capture path on macOS 12.3+. The pluggable structure
+exists for architectural symmetry across platforms, not because there's a
+realistic choice to make.
+
+---
+
+## Available capture add-ons
+
+| Add-on | Build tag | Spec | When to use | Status |
+|--------|-----------|------|------------|--------|
+| **ScreenCaptureKit (SCK)** | `sck` | [`./SCK_MACOS_SPEC.md`](./SCK_MACOS_SPEC.md) | Always — the only supported macOS capture API | ✅ Working |
+
+### Recommended combinations
+
+| Deployment | Capture add-on | Encoder add-on(s) | Build command |
+|------------|---------------|-------------------|---------------|
+| Apple Silicon Mac | `sck` | `vt_hw` (HEVC + H.264 via Apple Media Engine) | `go build -tags "sck,vt_hw"` |
+| Intel Mac | `sck` | `vt_hw,vt_sw` (HW preferred, VT-SW fallback for legacy Intel) | `go build -tags "sck,vt_hw,vt_sw"` |
+| Universal macOS binary | `sck` | `vt_hw,vt_sw,openh264` (max compatibility + SW fallback) | `go build -tags "sck,vt_hw,vt_sw,openh264"` |
+
+---
+
+## Why no other capture add-ons exist on macOS
+
+macOS 26 (Tahoe) removed every legacy capture API simultaneously:
 
 | API | macOS 26 Status |
 |-----|-----------------|
-| **ScreenCaptureKit (SCK)** | ✅ Only option |
+| **ScreenCaptureKit** | ✅ Only option |
 | CGDisplayStream | ❌ Removed — compiler error |
 | CGWindowListCreateImage | ❌ Removed — compiler error |
 | CGDisplayCreateImage | ❌ Removed — compiler error |
 | AVCaptureScreenInput | ❌ Removed — compiler error |
 
-All four legacy APIs return: *"unavailable in macOS: Please use ScreenCaptureKit instead."*
+All four legacy APIs throw: *"unavailable in macOS: Please use ScreenCaptureKit instead."*
 
-## Why this folder exists
+There is also no vendor fragmentation on macOS — Apple controls the entire
+graphics stack from Metal up, so there's no NVIDIA/AMD/Intel-specific capture
+path to add as an alternative.
 
-This folder is kept **empty** intentionally to maintain a symmetric directory structure
-across all platforms:
+---
+
+## Runtime capture probe order
+
+With only one capture add-on possible, the probe collapses to:
 
 ```
-ADD-ON-SPECS/
-├── Linux/capture/        ← 2 add-on specs (NvFBC, wlr-screencopy)
-├── macOS/capture/        ← this README only (SCK is the only option)
-└── Windows/capture/      ← pending architecture discussion
+1. sck compiled in AND Screen Recording TCC granted? → use SCK
+2. Otherwise                                          → fatal: no usable capture
 ```
 
-This way every implementor knows the capture spec location for every OS follows the
-same path pattern: `ADD-ON-SPECS/{Platform}/capture/`.
+---
 
-## Where SCK is specced
+## If a separate capture is ever needed
 
-The full ScreenCaptureKit capture spec lives in the platform spec:
-
-**📄 [`../MACOS_SPEC.md`](../MACOS_SPEC.md)** — see the "Capture" section for:
-- ScreenCaptureKit-only environment on macOS 26
-- Minimum macOS requirement (12.3 Monterey for SCK)
-- TCC permission requirements + signed app bundle requirement
-- macOS 26 TCC HMAC enforcement (sqlite injection no longer grants permissions)
-- Benchmark results: 89–91 fps at ~11ms p50 (Hackintosh measured)
-- Zero-copy IOSurface → VideoToolbox path
-- Implementation example with `SCStream` + `SCStreamConfiguration`
-
-## If a separate capture is ever needed on macOS
-
-Extremely unlikely given Apple's consolidation onto SCK, but in case some future
-workload requires it (e.g., a hypothetical pre-compositor frame access API Apple ships):
+Extremely unlikely given Apple's consolidation onto SCK, but if some future
+workload requires it (e.g., a hypothetical pre-compositor frame access API):
 
 1. Write the spec at `ADD-ON-SPECS/macOS/capture/{NAME}_MACOS_SPEC.md`
-2. Add a row to the macOS capture table in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-3. Implement under `internal/capture/{name}/` with a Go build tag
-4. Wire the runtime probe order in `MODULE_PIPELINE.md`
-
-Until then, this folder remains intentionally empty.
+2. Add a row to the add-on table above
+3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
+4. Implement under `internal/capture/{name}/` with a Go build tag
+5. Wire the runtime probe order in `MODULE_PIPELINE.md`

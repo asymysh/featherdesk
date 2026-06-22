@@ -8,7 +8,26 @@ macOS is a secondary target for FeatherDesk. The use case is **remote control on
 
 ## Capture
 
-### Only One Option: ScreenCaptureKit
+### Every capture backend is an add-on (pluggable architecture)
+
+The macOS default binary contains **no capture backends**. Capture is a
+build-tagged add-on, mirroring the Linux structure for architectural symmetry.
+In practice, every real macOS deployment will compile in the `sck` add-on —
+ScreenCaptureKit is the only supported capture path on macOS 12.3+.
+
+```
+capture/
+├── SCK_MACOS_SPEC.md   ← the only macOS capture add-on
+└── README.md           ← context on why no alternatives exist
+```
+
+### Add-on summary
+
+| Add-on | Build tag | Spec | When to use |
+|--------|-----------|------|------------|
+| **ScreenCaptureKit (SCK)** | `sck` | [`capture/SCK_MACOS_SPEC.md`](./capture/SCK_MACOS_SPEC.md) | Always — the only supported macOS capture API |
+
+### Why no other capture add-ons exist
 
 macOS 26 (Tahoe) removed every legacy capture API simultaneously:
 
@@ -21,51 +40,26 @@ macOS 26 (Tahoe) removed every legacy capture API simultaneously:
 | AVCaptureScreenInput | ❌ Removed — compiler error |
 
 All four throw: *"unavailable in macOS: Please use ScreenCaptureKit instead."*
+**ScreenCaptureKit minimum requirement: macOS 12.3 (Monterey).** Macs that
+cannot upgrade past macOS 12 are end-of-support and out of scope.
 
-**ScreenCaptureKit minimum requirement:** macOS 12.3 (Monterey). Macs that cannot upgrade past macOS 12 are end-of-support and out of scope.
+There is also no vendor fragmentation on macOS — Apple controls the entire
+graphics stack from Metal up, so there's no NVIDIA/AMD/Intel-specific capture
+path to add as an alternative.
 
-### SCK Permission Requirements
+### Runtime probe order
 
-SCK requires Screen Recording permission granted through System Settings. The binary **must be in a proper app bundle** (with `Info.plist` containing a `CFBundleIdentifier`) for the permission dialog to appear. A raw CLI binary cannot request the permission.
+Effectively collapses to a single check:
 
-For production deployment: the app bundle must be **code-signed with an Apple Developer ID certificate** and **notarized**. Ad-hoc signing (`codesign -s -`) is sufficient for development but macOS 26 enforces HMAC-signed TCC entries that can only be created through the legitimate permission dialog flow.
-
-### SCK Benchmark Results (Hackintosh: AMD Ryzen 5 3600 + RX 570, macOS 26.5.1)
-
-| Resolution | FPS | p50 | p95 | p99 |
-|-----------|-----|-----|-----|-----|
-| 2112×1188 (native 2x) | 89.6 | 11.9ms | 14.1ms | 14.1ms |
-| 1920×1080 | 91.4 | 10.5ms | 14.1ms | 14.3ms |
-
-**Raw CSV:** `/tmp/fd_bench/cap_sck_native.csv`, `cap_sck_1080p.csv`
-
-> Note: These numbers are from a Hackintosh with a virtual display adapter. A real Apple Silicon Mac will be significantly faster (~2–4ms p50) due to unified memory and tighter display compositor integration.
-
-### SCK Implementation Notes
-
-```swift
-// Minimum viable SCK stream setup
-let content = try await SCShareableContent.current
-let filter = SCContentFilter(display: content.displays.first!, excludingWindows: [])
-let cfg = SCStreamConfiguration()
-cfg.width = 1920; cfg.height = 1080
-cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60) // 60fps cap
-cfg.pixelFormat = kCVPixelFormatType_32BGRA
-cfg.showsCursor = false  // hardware path: cursor sent separately as CursorUpdate
-cfg.queueDepth = 6
-
-let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
-try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
-try await stream.startCapture()
+```
+1. sck compiled in AND Screen Recording TCC granted? → use SCK
+2. Otherwise                                          → fatal: no capture
 ```
 
-Frame delivery: `SCStreamOutput.stream(_:didOutputSampleBuffer:of:)` — one call per frame on the specified queue. Frame is a `CMSampleBuffer` backed by an `IOSurface` (stays on GPU — zero-copy path is possible if the encoder can consume IOSurface directly).
-
-### Zero-Copy Path (macOS)
-
-The gold standard on macOS: `SCStream` → `CMSampleBuffer.imageBuffer` → `IOSurface` → `VTCompressionSession` directly. No CPU readback at any stage. This is what Sunshine does on macOS.
-
-For the software path, `CVPixelBufferLockBaseAddress` on the IOSurface-backed buffer forces a GPU→CPU copy, same as `glReadPixels` on Linux.
+Full details — permission requirements, app-bundle requirement, HMAC-signed
+TCC enforcement on macOS 26, Hackintosh benchmark numbers, zero-copy
+IOSurface → VideoToolbox path, and implementation sketch — are in
+[`capture/SCK_MACOS_SPEC.md`](./capture/SCK_MACOS_SPEC.md).
 
 ---
 

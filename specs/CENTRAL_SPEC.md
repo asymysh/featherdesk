@@ -102,25 +102,32 @@ for where any platform or add-on document lives — never duplicate specs, alway
 
 ### Platform specs
 
-| Platform | Spec | Default capture | Default encode |
-|----------|------|----------------|----------------|
+| Platform | Spec | Capture add-on(s) | Encoder add-on(s) |
+|----------|------|------------------|-------------------|
 | **Cross-platform compat** | [`ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`](../ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md) | — | — |
-| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | KMS+EGL / X11grab | VA-API → OpenH264 |
-| **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | ScreenCaptureKit | VideoToolbox |
-| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | DXGI / WGC | (TBD) |
+| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `libva`, `nvenc`, `amf`, `vulkan_video` |
+| **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | `sck` | `vt_sw`, `vt_hw`, `openh264` |
+| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | (TBD — see below) | `openh264`, `mf_sw`, `mf_hw`, `nvenc`, `amf`, `qsv`, `vulkan_video` |
+
+> **Default binary on every platform contains zero capture backends and zero
+> encoders.** Every backend is an opt-in build-tagged add-on. Users compose the
+> binary they need by combining one or more capture add-ons with one or more
+> encoder add-ons. See each platform's `capture/README.md` and `encoders/README.md`
+> for recommended combinations.
 
 ### Linux capture add-on specs
 
-| Add-on | Spec | Hardware | Status |
-|--------|------|---------|--------|
-| NvFBC | [`ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
+| Add-on | Build tag | Spec | Hardware | Status |
+|--------|-----------|------|---------|--------|
+| KMS+EGL DMA-BUF | `kms_egl` | [`ADD-ON-SPECS/Linux/capture/KMS_EGL_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/capture/KMS_EGL_LINUX_SPEC.md) | Universal — every GPU, any display server | ✅ Working |
+| NvFBC | `nvfbc` | [`ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
 
-> **Default binary capture is KMS+EGL only.** KMS+EGL works on X11, Wayland (all
-> compositors), and headless — it operates below the display server, so display server
-> choice is irrelevant. Requires root / `CAP_SYS_ADMIN`. No-root fallback paths
-> (XShm, PipeWire portal, wlr-screencopy, X11grab) were considered and explicitly
-> rejected — none beat KMS+EGL when root is available, and no-root deployment is not
-> currently a target.
+> **KMS+EGL is the recommended default capture add-on.** Works on X11, Wayland
+> (all compositors), and headless — it operates below the display server, so
+> display server choice is irrelevant. Requires root / `CAP_SYS_ADMIN`. No-root
+> fallback paths (XShm, PipeWire portal, wlr-screencopy, X11grab) were considered
+> and explicitly rejected — none beat KMS+EGL when root is available, and no-root
+> deployment is not currently a target.
 >
 > **Intel / AMD do not need capture add-ons** — neither vendor has a proprietary
 > capture API on Linux. KMS+EGL is the entire path.
