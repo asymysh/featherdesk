@@ -75,22 +75,30 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 
 | # | Module | Spec File | Responsibility |
 |---|--------|-----------|----------------|
-| 1 | **Capture** | [`./MODULE_CAPTURE.md`](./MODULE_CAPTURE.md) | Screen frame acquisition (KMS/DRM/EGL/X11/PipeWire) |
-| 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software encoder interface (concrete impls are add-ons) |
-| 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface (concrete impls are add-ons) |
-| 4 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Remote input injection (uinput keyboard/mouse) |
-| 5 | **Audio** | [`./MODULE_AUDIO.md`](./MODULE_AUDIO.md) | System audio capture (PipeWire) |
-| 6 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) |
-| 7 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | WebSocket server, client management, TLS |
-| 8 | **Logger** | [`./MODULE_LOGGER.md`](./MODULE_LOGGER.md) | Structured logging subsystem |
-| 9 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs + AudioWorklet) |
-| 10 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: lifecycle, pacing, frame drops, wiring |
+| 1 | **Capture** | [`./MODULE_CAPTURE.md`](./MODULE_CAPTURE.md) | Cross-platform `Capturer` interface contract (concrete impls are add-ons per OS) |
+| 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software encoder interface contract (concrete impls are add-ons) |
+| 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface contract (concrete impls are add-ons) |
+| 4 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) — transport-agnostic; see also [`./FUTURE_NATIVE_CLIENT.md`](./FUTURE_NATIVE_CLIENT.md) |
+| 5 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | HTTPS+WebSocket transport, client management, TLS |
+| 6 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs) |
+| 7 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: probe + select compiled-in add-ons, lifecycle, pacing, frame drops, wiring |
+| 8 | **Config** | [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
 
-> **Encoder implementations are not core modules.** Every encoder (OpenH264 CGo,
-> VideoToolbox, VA-API/libva, NVENC, AMF, QSV, MediaFoundation, Vulkan Video) is
-> a build-tagged add-on under [`../ADD-ON-SPECS/{Platform}/encoders/{SW,HW}/`](../ADD-ON-SPECS/).
-> The default binary ships with zero encoders — users compile in what they need.
-> See the index below for the full add-on catalogue.
+> **Encoder + capture implementations are not core modules.** Every encoder
+> (OpenH264 CGo, VideoToolbox, libva, NVENC, AMF, QSV, MediaFoundation, Vulkan
+> Video) and every capture backend (KMS+EGL, NvFBC, SCK, plus Windows TBD) is
+> a build-tagged add-on under
+> [`../ADD-ON-SPECS/{Platform}/{capture,encoders}/`](../ADD-ON-SPECS/).
+> The default binary ships with zero encoders and zero capture backends — users
+> compile in what they need. See the index below.
+
+> **Removed from the module map:**
+> - **Logger** — replaced by stdlib `log/slog`. No dedicated module spec needed.
+>   Server/Pipeline take a `*slog.Logger` directly. Behavior (text vs JSON,
+>   level, output) is set via the `[log]` config section.
+> - **Audio** + **Input** — deferred until video capture+encode is stable
+>   across all three OSes. Specs retained at `MODULE_AUDIO.md` / `MODULE_INPUT.md`
+>   for reference but marked deferred at the top of each file.
 
 ---
 
@@ -471,34 +479,45 @@ type Server interface {
 ## Module Dependency Graph
 
 ```
-              logger (leaf - no deps)
+              log/slog (stdlib, no deps)
                 │
-    ┌───────────┼───────────────────────────────────────────┐
-    │           │           │          │             │       │
-    ▼           ▼           ▼          ▼             ▼       ▼
- capture     encode     hwencode    audio         server   input
-    │           │           │                        │
-    │           │           │                        │
-    ▼           ▼           ▼                        ▼
- (system)   (system)    (system)                 protocol
- libdrm     libyuv      libva
- EGL        openh264    libva-drm
- GBM        libvpx      libdrm
-             ffmpeg
+    ┌───────────┼───────────────────────────────────┐
+    │           │           │             │          │
+    ▼           ▼           ▼             ▼          ▼
+ capture     encode     hwencode      server      config
+    │           │           │             │
+    │           │           │             ▼
+    ▼           ▼           ▼          protocol
+ (per OS,   (per OS,    (per OS,
+  add-on)    add-on)     add-on)
+ libdrm     openh264    libva (Linux)
+ EGL/GBM    libyuv      NVENC SDK
+ (KMS+EGL)  (every SW   AMF SDK
+ SCK macOS  add-on uses oneVPL (Win)
+ NvFBC      libyuv for  MediaFoundation
+            RGBA→I420)  VideoToolbox
+                        Vulkan Video
 
-              pipeline (imports ALL modules + wires them)
+              pipeline (imports core interfaces + probes compiled-in add-ons)
                 │
-    ┌───────────┼───────────┼───────────┼────────────┐
-    ▼           ▼           ▼           ▼            ▼
- capture    encode/hw    server      audio        input
+    ┌───────────┼───────────┼───────────┐
+    ▼           ▼           ▼           ▼
+ capture    encode/hw    server      config
 ```
 
+> Notes:
+> - Each compiled-in add-on contributes its own native-library deps via CGo
+>   (e.g. enabling `libva` build tag pulls in libva-dev at link time).
+> - No `ffmpeg`, no `libavcodec`, no `libvpx` — all rejected.
+> - No custom `logger` module — every module takes `*slog.Logger` directly.
+> - Audio + Input not shown — deferred from the core dependency graph.
+
 **Key Properties:**
-- Each domain module is a leaf or near-leaf (depends only on logger + system libs)
+- Each domain module is a leaf or near-leaf (depends only on stdlib + system libs via CGo)
 - Modules NEVER import each other (zero import cycles)
 - Only `pipeline` imports all modules — it's the sole wiring point
 - `protocol` is shared between `server` and `client` (pure data, no logic deps)
-- `hwencode` and `encode` are sibling modules, not parent-child (both implement `encode.Encoder`)
+- `hwencode` and `encode` are sibling modules, not parent-child (both define separate interfaces; add-ons implement one)
 
 ---
 
@@ -506,17 +525,17 @@ type Server interface {
 
 The orchestrator is now a proper module (`MODULE_PIPELINE.md`) — not inline in main.go. It:
 
-1. Parses CLI flags (`--port`, `--fps`, `--hardware`, `--software`, `--no-audio`, `--verbose`, `--quiet`, `--bind`, `--log-file`)
-2. Probes system capabilities (KMS root, VAAPI, uinput, PipeWire, ffmpeg)
-3. Selects capture backend (KMS preferred, X11 fallback)
-4. Selects encode path:
-   - **Hardware:** DMABufCapturer + HardwareEncoder (zero-copy, GPU-resident)
-   - **Software:** Capturer + Converter + Encoder (CPU round-trip)
+1. Loads config via `config.Load(--config path)` per [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) — the only CLI flag is `--config`
+2. Probes compiled-in capture + encoder add-ons (no static enum; the runtime asks each compiled-in add-on whether its prerequisites are met)
+3. Selects capture add-on per `[capture]` config (auto-probe order or forced)
+4. Selects encode path per `[encode]` config:
+   - **Hardware add-on** picked when it accepts the zero-copy surface handle produced by the selected capture add-on (DMA-BUF / IOSurface / D3D11 texture)
+   - **Software add-on** picked when no compatible HW add-on is compiled in OR `force_addon` names a SW add-on
 5. Creates and connects all modules
-6. Manages lifecycle (signal handling, graceful shutdown)
+6. Manages lifecycle (signal handling, graceful shutdown, SIGHUP config reload)
 7. Runs the frame pipeline loop with pacing and drop logic
 8. Enforces 5 FPS minimum floor under all conditions
-9. Collects rolling-window statistics (fixed memory, O(1) per frame)
+9. Exports rolling-window statistics via Prometheus on the metrics port (see `[metrics]` in MODULE_CONFIG)
 
 ---
 
@@ -584,10 +603,10 @@ capturer detects resolution change (monitor hotplug / mode switch)
 The pipeline owns this orchestration; no module drives it alone.
 
 ### Configuration
-- CLI flags for user-facing options
-- Compile-time constants for protocol parameters
-- Runtime capability probing for hardware detection
-- No config file (single-binary philosophy)
+- Single TOML config file at a known OS-conventional path; only `--config <path>` CLI flag exists. Full schema in [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
+- Compile-time constants for protocol parameters (Version byte, header layout).
+- Runtime capability probing for compiled-in add-on detection.
+- Hot reload via `SIGHUP` (Linux/macOS) — most sections reload without restart; TLS / port / `force_addon` need a restart (marked in MODULE_CONFIG).
 
 ---
 
@@ -596,7 +615,7 @@ The pipeline owns this orchestration; no module drives it alone.
 1. **Interface-First:** Every module exposes a Go interface. Implementations are private.
 2. **Zero Import Cycles:** Modules never import each other (only the orchestrator imports all).
 3. **Testable in Isolation:** Each module has unit tests that run without hardware.
-4. **Hot-Swappable:** Changing a capture backend or encoder should be a config flag change, not a code change.
+4. **Hot-Swappable:** Changing a capture or encoder add-on is a config change (`[capture] force_addon`, `[encode] force_addon`) or a recompile with different build tags — never a code change in the pipeline.
 5. **Error Propagation:** All errors flow up to the orchestrator with context (`fmt.Errorf("capture: %w", err)`).
 6. **No Global State:** No package-level variables except constants. No init() functions.
 7. **Explicit Lifecycle:** Every module has `New()` (create), optional `Start()` (begin work), and `Close()` (cleanup).
@@ -610,31 +629,22 @@ The pipeline owns this orchestration; no module drives it alone.
 featherdesk/
 ├── cmd/
 │   └── server/
-│       ├── main.go              # CLI parsing → pipeline.New() → pipeline.Start()
-│       └── client/              # Embedded web client
+│       ├── main.go              # config.Load() → pipeline.New() → pipeline.Start()
+│       └── client/              # Embedded web client (//go:embed all:client)
 │           ├── index.html
-│           ├── main.js          # Entry point
-│           ├── connection.js    # WebSocket management
-│           ├── decoder.js       # VideoDecoder setup
-│           ├── renderer.js      # Canvas rendering
-│           ├── audio.js         # AudioContext + Worklet
-│           ├── input.js         # Keyboard, mouse, wheel
-│           └── stats.js         # FPS/bandwidth display
-├── pkg/                         # Public interfaces (importable by plugins/native clients)
+│           └── compositor.js    # Single bundle today; future modular split deferred
+├── pkg/                         # Public interfaces (importable by future native clients)
 │   ├── capture/
-│   │   └── capture.go          # Capturer, DMABufCapturer interfaces + Frame, FBInfo
+│   │   └── capture.go          # Capturer + zero-copy surface handle abstraction
+│   │                           #   (DMA-BUF / IOSurface / D3D11 texture)
 │   ├── encode/
 │   │   └── encode.go           # Encoder interface + I420Frame + EncoderConfig
 │   ├── hwencode/
-│   │   └── hwencode.go         # HardwareEncoder interface + DMABufParams
-│   ├── audio/
-│   │   └── audio.go            # AudioCapturer interface
-│   ├── input/
-│   │   └── input.go            # InputHandler interface
+│   │   └── hwencode.go         # HardwareEncoder interface + per-OS surface types
 │   ├── protocol/
 │   │   └── protocol.go         # Wire types + marshal/unmarshal (v1, 22-byte header)
-│   └── logger/
-│       └── logger.go           # Logger interface
+│   └── config/
+│       └── config.go           # TOML schema types + Load + Watch
 ├── internal/                    # Private implementations
 │   ├── capture/
 │   │   ├── kms/                # KMS+DRM+EGL Linux capture add-on (build tag: kms_egl)
@@ -651,46 +661,54 @@ featherdesk/
 │   │   ├── mf/                 # MediaFoundation Windows SW+HW add-on (build tags: mf_sw, mf_hw)
 │   │   ├── vulkan/             # Vulkan Video HW add-on (build tag: vulkan_video)
 │   │   └── convert/            # libyuv color conversion (used by every SW encoder add-on)
-│   ├── audio/
-│   │   └── pipewire/         # PipeWire pw-cat capture
-│   ├── input/
-│   │   └── uinput/           # Linux uinput injection
 │   ├── server/
-│   │   ├── server.go         # HTTP/WS server
-│   │   └── client.go         # Per-client state
-│   ├── logger/
-│   │   └── logger.go         # Logging implementation (mutex-safe, structured)
+│   │   ├── server.go           # HTTPS/WSS server (TLS mandatory)
+│   │   ├── client.go           # Per-client state
+│   │   └── metrics.go          # Prometheus /metrics handler (separate port)
+│   ├── config/
+│   │   ├── load.go             # TOML parse + validate
+│   │   └── watch.go            # SIGHUP / Service Control hot reload
 │   └── pipeline/
-│       ├── pipeline.go       # Pipeline struct, Start(), shutdown
-│       ├── frameloop.go      # Main frame loop, pacing, drop logic
-│       ├── probe.go          # System capability probing
-│       └── stats.go          # Rolling-window statistics
-├── specs/                     # This spec directory
+│       ├── pipeline.go         # Pipeline struct, Start(), shutdown
+│       ├── frameloop.go        # Main frame loop, pacing, drop logic
+│       ├── probe.go            # Add-on probe + selection
+│       └── stats.go            # Rolling-window statistics + Prometheus metric registration
+│
+│  (audio/ and input/ subdirs deferred — to be added when those modules are un-paused)
+├── specs/                       # This spec directory
 ├── go.mod
 ├── go.sum
-└── Makefile
+└── Makefile                     # Per-platform targets with build-tag composition
 ```
+
+> `internal/logger/` is **gone** — replaced by stdlib `log/slog`. Every module
+> that needs a logger takes `*slog.Logger` in its constructor.
 
 ---
 
 ## Known Technical Debt (Current Codebase)
 
+> Many of the original TDs referenced files that are being **deleted entirely**
+> as part of the architecture refactor (`x11grab.go`, `screencast.py`,
+> `ffmpeg.go`, `vp8.go`, `vaapi.go`, `internal/logger/`). Those TDs are marked
+> *obsolete* — the issue is resolved by deletion, not refactor.
+
 | ID | Severity | Location | Issue | Resolution |
 |----|----------|----------|-------|------------|
-| TD-01 | High | `kms.go:99-111` | DMA-BUF fd leak on EGL import failure | R-CAP-02 |
-| TD-02 | High | `x11grab.go:113` | Recursive retry without limit (stack overflow risk) | R-CAP-05 |
-| TD-03 | High | `egl.go:22-25` | Static C globals prevent thread safety | R-CAP-04 |
-| TD-04 | High | `ffmpeg.go:240` | ForceKeyframe stores flag but never signals ffmpeg | R-ENC-01 |
-| TD-05 | Medium | `main.go:158` | Hardcoded 2560x1440 for input device | R-INP-07 |
+| TD-01 | High | `kms.go:99-111` | DMA-BUF fd leak on EGL import failure | Fold into `KMS_EGL_LINUX_SPEC.md` known-issues section; fix during kms add-on extraction |
+| TD-02 | ~~High~~ obsolete | `x11grab.go:113` | Recursive retry without limit | `x11grab.go` being deleted (subprocess capture rejected) |
+| TD-03 | High | `egl.go:22-25` | Static C globals prevent thread safety | Fold into `KMS_EGL_LINUX_SPEC.md` known-issues; fix during extraction |
+| TD-04 | ~~High~~ obsolete | `ffmpeg.go:240` | ForceKeyframe stores flag but never signals ffmpeg | `ffmpeg.go` being deleted (subprocess encoders rejected) |
+| TD-05 | Medium | `main.go:158` | Hardcoded 2560x1440 for input device | Deferred — Input module deferred per TECHSTACK |
 | TD-06 | Medium | `compositor.js:22+292` | Duplicate init() function (dead code) | R-CLI-01 |
-| TD-07 | ~~Medium~~ obsolete | `server.go:148+client.js` | Codec type mismatch (H264 constant for VP8 data) — VP8 rejected; mismatch source eliminated by removing VP8 entirely | obsolete |
-| TD-08 | Medium | `audio/capture.go` | Race condition on cmd/stdout fields | R-AUD-01 |
-| TD-09 | Medium | `x11grab.go:165` | Hardcoded developer path `/home/aseem/...` | R-CAP-06 |
+| TD-07 | ~~Medium~~ obsolete | `server.go:148+client.js` | Codec type mismatch (H264 constant for VP8 data) | VP8 rejected; mismatch source eliminated |
+| TD-08 | Medium | `audio/capture.go` | Race condition on cmd/stdout fields | Deferred — Audio module deferred per TECHSTACK |
+| TD-09 | ~~Medium~~ obsolete | `x11grab.go:165` | Hardcoded developer path `/home/aseem/...` | `x11grab.go` being deleted |
 | TD-10 | Medium | `protocol.go` | No version/sequence in wire protocol | Fixed in new protocol spec (v1, 22-byte header) |
-| TD-11 | Medium | `input/protocol.go:23-51` | All Inject errors silently discarded | R-INP-01 |
+| TD-11 | Medium | `input/protocol.go:23-51` | All Inject errors silently discarded | Deferred — Input module deferred per TECHSTACK |
 | TD-12 | Low | `server.go:286-306` | Custom itoa() reimplements strconv | R-SRV-03 |
-| TD-13 | Low | `kms.go:39` | fps parameter accepted but unused | R-CAP-03 (pacing now specified) |
-| TD-14 | Low | `main.go:176` | Unbounded stats slice grows forever | R-PIP-02 (rolling window) |
+| TD-13 | Low | `kms.go:39` | fps parameter accepted but unused | Fold into `KMS_EGL_LINUX_SPEC.md` (orchestrator handles pacing externally) |
+| TD-14 | Low | `main.go:176` | Unbounded stats slice grows forever | R-PIP-02 (rolling window) + Prometheus export |
 
 ### New Issues Found During Design Review
 
@@ -711,9 +729,9 @@ featherdesk/
 |----|----------|----------|-------|------------|
 | TD-23 | High | `server.go:149-178` | Broadcast sends ONE message PER NAL → multi-NAL H.264 yields partial access units; breaks WebCodecs | One message per frame, concatenate NALs (Annex B) |
 | TD-24 | High | `server.go:164-168` | IDR cache stores only the IDR NAL; SPS/PPS (separate messages) lost → undecodable | Cache whole per-frame keyframe message (contains SPS+PPS+IDR) |
-| TD-25 | High | `x11grab.go:120` + `main.go:295` | Video=wall-ms, Audio=wall-ms stamped at consumption; spec claimed monotonic-ns → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture; AudioChunk carries timestamp |
+| TD-25 | High | `main.go:295` (video timestamping in main loop) | Video + Audio stamped at consumption with wall-ms; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; AudioChunk carries timestamp (when audio is un-deferred) |
 | TD-26 | High | `main.go:249-252` | New-client handler forces keyframe + `capturer.Restart()` (respawns capture) → storm for all viewers | Serve cached IDR; conditional keyframe; never restart capture; rate-limit |
-| TD-27 | Med | `main.go:158` | Input device hardcoded 2560×1440 ≠ stream dims → cursor offset | Input dims = Config dims; pipeline derives from capture |
+| TD-27 | Med | `main.go:158` | Input device hardcoded 2560×1440 ≠ stream dims → cursor offset | Deferred — Input module deferred; when un-deferred: input dims = Config dims, pipeline derives from capture |
 | TD-28 | Med | Protocol/round-1 | Length-prefix NAL framing added client AVCC complexity for no browser benefit | Reverted to Annex B per-frame concatenation |
 | TD-29 | Med | Pipeline (round-1 spec) | Frame loop discarded W/H/timestamp; `continue` didn't skip capture; dead frameSeq | EncodedFrame struct; skip-before-capture; server owns sequence |
 | TD-30 | Med | hwencode (round-1 spec) | Duplicate `config` field; non-existent `vaCreateSurfaceFromFD` | Renamed `vaConfig`; use `vaCreateSurfaces`+ExternalBuffers |

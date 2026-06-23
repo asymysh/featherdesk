@@ -1,5 +1,27 @@
 # Module Spec: Audio
 
+> # ⏸️ DEFERRED
+>
+> **Status:** Deferred until video capture+encode is stable across all three OSes
+> (Linux, macOS, Windows).
+>
+> **Why:** Audio is currently a Linux-only PipeWire subprocess implementation.
+> Properly cross-platform audio (WASAPI on Windows, CoreAudio on macOS,
+> PipeWire/ALSA on Linux) needs its own design pass — and the current spec
+> contradicts several confirmed architectural decisions (no subprocess
+> backends, `*slog.Logger` instead of custom Logger). Rather than refactor
+> twice, the module is paused until video work proves the cross-platform
+> pluggable add-on pattern, at which point audio gets the same treatment.
+>
+> **Not core.** This module has been removed from the CENTRAL_SPEC module map.
+> The content below is preserved for reference but should not be treated as
+> current architecture.
+>
+> **Trigger to un-defer:** Video capture+encode add-ons working end-to-end on
+> Linux + macOS + Windows with the bench harness producing comparable numbers.
+
+---
+
 ## Overview
 
 The Audio module captures system audio output and delivers it as raw PCM chunks for streaming to connected clients. It uses PipeWire (via the `pw-cat` command-line tool) for audio capture and PulseAudio (`pactl`) for source discovery.
@@ -160,7 +182,7 @@ Replace fixed 2-second reconnect delay with exponential backoff (1s → 2s → 4
 Move `AudioCapturer` and `AudioConfig` to a public package. Keep PipeWire implementation in `internal/audio/pipewire/`.
 
 ### R-AUD-05: Accept Logger Interface
-Replace concrete `*logger.Logger` dependency with a `Logger` interface for testability.
+Use `*slog.Logger` (stdlib `log/slog`) — no custom logger interface. Tests can pass a `slog.New(slog.NewTextHandler(io.Discard, nil))` for quiet runs or a JSON handler to a buffer for assertions.
 
 ### R-AUD-06: Add Opus Compression (Future)
 For WAN deployments, add optional Opus encoding:

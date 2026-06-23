@@ -21,7 +21,7 @@ type Pipeline struct {
     server    server.Server
     audio     audio.AudioCapturer      // nil if --no-audio
     input     input.InputHandler       // nil if uinput unavailable
-    logger    logger.Logger
+    logger    *slog.Logger
     stats     *Stats
 }
 

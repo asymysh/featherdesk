@@ -258,16 +258,26 @@ Support `?token=<auth_token>` query parameter for authentication (paired with R-
 
 ## Browser Compatibility
 
-| Feature | Required | Support |
-|---------|----------|---------|
-| WebSocket (binary) | Yes | All modern browsers |
-| WebCodecs VideoDecoder | Yes | Chrome 94+, Edge 94+, Firefox 130+ |
-| AudioWorklet | Yes | Chrome 66+, Firefox 76+, Safari 14.1+ |
-| Pointer Lock | Optional | Chrome 37+, Firefox 50+ |
-| Fullscreen API | Optional | All modern browsers |
-| ES Modules | For refactored version | All modern browsers |
+**Supported browsers:** Chrome 107+, Edge (Chromium-based), Safari 14.1+.
 
-**Minimum:** Chrome/Edge 94+ (WebCodecs requirement)
+**Firefox is not supported.** WebCodecs support in Firefox lags meaningfully
+in feature parity (`optimizeForLatency`, hardware decode path) and the
+project explicitly does not test against it. Users on Firefox will see a
+graceful fail with an unsupported-browser notice.
+
+| Feature | Required | Minimum supported version |
+|---------|----------|--------------------------|
+| WebSocket (binary) | Yes | All supported browsers |
+| WebCodecs VideoDecoder | Yes | Chrome 107, Safari 14.1 (latency-optimized config) |
+| Pointer Lock | Optional | Chrome (all), Safari 13.1 |
+| Fullscreen API | Optional | Chrome (all), Safari (all) |
+| ES Modules | For refactored version | Chrome (all), Safari (all) |
+
+**Minimum: Chrome 107.** Earlier versions have a less mature WebCodecs
+implementation that does not honor `optimizeForLatency` end-to-end.
+
+> AudioWorklet would be a future requirement when the deferred audio module is
+> un-paused; until then, the client does not load any audio code path.
 
 ---
 

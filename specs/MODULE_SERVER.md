@@ -79,17 +79,36 @@ type Config struct {
 
 | Path | Method | Handler | Description |
 |------|--------|---------|-------------|
-| `/` | GET | `http.FileServer` | Serves embedded web client (index.html + ES modules) |
-| `/status` | GET | `handleStatus` | JSON status: `{"clients": N, "encoder": "...", "audio": bool}` |
+| `/` | GET | `http.FileServer` | Serves embedded web client (index.html + compositor.js) |
+| `/healthz` | GET | `handleHealth` | `200 {"status":"ok"}` for load balancer probes |
 | `/ws` | GET | `handleWS` | WebSocket upgrade endpoint |
+
+> Operational metrics live on a **separate Prometheus endpoint** (port 9090
+> by default, plain HTTP, no auth) per the `[metrics]` section of
+> [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md). The legacy `/status` JSON
+> endpoint on the main port is being replaced by `/healthz` (binary check)
+> plus the Prometheus endpoint (detailed metrics) — keeps the main TLS
+> server free of unauthenticated observability surface.
 
 ### TLS Configuration
 
-Self-signed ECDSA P-256 certificate generated at startup:
-- Common Name: "viewport-rds"
-- SANs: localhost, 127.0.0.1, 0.0.0.0
-- Valid: 1 year
-- Purpose: Enables WebCodecs API (requires secure context in browsers)
+TLS is **mandatory** — WebCodecs in browsers requires a secure context.
+
+Sources, in order:
+
+1. **`server.tls.cert` + `server.tls.key` both set** in the TOML config →
+   load the PEM chain and key from those paths. Reload on SIGHUP.
+2. **Both empty** (development) → server generates a self-signed ECDSA P-256
+   certificate at startup:
+   - Common Name: `viewport-rds`
+   - SANs: `localhost`, `127.0.0.1`, hostname
+   - Valid: 1 year
+   - Cached on disk under the OS-conventional state directory so restarts
+     reuse the same cert (avoids re-prompting browser users on every
+     restart)
+
+There is no Let's Encrypt integration — front the server with a reverse
+proxy (Caddy, nginx, traefik) for ACME if needed.
 
 ### WebSocket Connection Lifecycle
 
@@ -125,7 +144,7 @@ Self-signed ECDSA P-256 certificate generated at startup:
 type Client struct {
     conn   *websocket.Conn
     send   chan []byte       // Buffered write channel (cap 16)
-    log    *logger.Logger
+    log    *slog.Logger
     onText func([]byte)     // Text message handler
 }
 ```
@@ -197,7 +216,7 @@ Track per-client: frames sent, frames dropped, bytes sent, connection duration, 
 Before shutting down, send a control frame to all clients indicating "server shutting down" so the client can show appropriate UI.
 
 ### R-SRV-06: Origin Validation
-Replace `InsecureSkipVerify` with configurable origin checking. Default to same-host only; allow `--allow-origin=*` for development.
+Replace `InsecureSkipVerify` with configurable origin checking. Default to same-host only; allow override via `server.allow_origin` in the TOML config (see MODULE_CONFIG.md).
 
 ### R-SRV-07: Extract Interface to `pkg/server`
 Move the `Server` interface and `Config` to a public package. Keep WebSocket implementation in `internal/server/`.
@@ -206,7 +225,7 @@ Move the `Server` interface and `Config` to a public package. Keep WebSocket imp
 Implement periodic bandwidth probes between server and client to enable adaptive bitrate in the encoder.
 
 ### R-SRV-09: Health Check Endpoint
-Add `/healthz` endpoint returning 200 with `{"status": "ok", "uptime": "...", "clients": N}` for monitoring/load balancing.
+`/healthz` endpoint returns 200 `{"status":"ok"}` for load balancer probes. Detailed counters (uptime, clients, frames, bytes/sec, drop rates) live on the Prometheus endpoint (separate port — see MODULE_CONFIG `[metrics]`).
 
 ### R-SRV-10: Multi-Controller Support (Future)
 Allow configurable number of controllers (for pair programming). Input events would need a priority/merge strategy.

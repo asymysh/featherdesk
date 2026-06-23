@@ -1,5 +1,25 @@
 # Module Spec: Input
 
+> # ⏸️ DEFERRED
+>
+> **Status:** Deferred until video capture+encode is stable across all three OSes
+> (Linux, macOS, Windows).
+>
+> **Why:** Input is currently a Linux-only uinput implementation. Properly
+> cross-platform input injection (SendInput on Windows, CGEventPost on macOS,
+> uinput/libei on Linux) needs its own design pass. The current spec also
+> contradicts confirmed architectural decisions (`*slog.Logger`, no custom
+> Logger interface).
+>
+> **Not core.** This module has been removed from the CENTRAL_SPEC module map.
+> The content below is preserved for reference but should not be treated as
+> current architecture.
+>
+> **Trigger to un-defer:** Video capture+encode add-ons working end-to-end on
+> Linux + macOS + Windows with the bench harness producing comparable numbers.
+
+---
+
 ## Overview
 
 The Input module handles remote input injection. It receives input events from the browser client (keyboard, mouse, wheel) over WebSocket, translates them from W3C web standards to Linux input event codes, and injects them into the kernel via the uinput subsystem.
