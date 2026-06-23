@@ -72,14 +72,14 @@ WebSocket binary frame
 ```javascript
 // On Config frame:
 decoder.configure({
-    codec: cfg.codec,          // full WebCodecs string from server, e.g. "avc1.42E01E" or "vp8"
+    codec: cfg.codec,          // full WebCodecs string from server, e.g. "avc1.42E01E" (H.264) or "hvc1.*" (HW HEVC)
     optimizeForLatency: true,
     // Annex B in-band SPS/PPS → no `description` needed (avc Annex B mode)
 });
 streamWidth = cfg.width; streamHeight = cfg.height; cursorMode = cfg.cursorMode;
 ```
 
-The client NEVER hardcodes the codec. It comes from `Config.codec`, so H.264 and VP8 are both supported and always match the server.
+The client NEVER hardcodes the codec. It comes from `Config.codec` so the decoder always matches whatever the server chose to encode with (HW HEVC where available, H.264 otherwise).
 
 ### Video Decode
 
@@ -88,15 +88,15 @@ decodeVideo(seq, timestamp, payload):
     → gap detection (skip on first frame / first post-IDR transition):
         if started && seq > lastSeq + 1: ws.send('{"type":"keyframe"}')   // request IDR
     → lastSeq = seq
-    → isKey = detectKeyframe(payload)        // H.264: scan for NAL type 5; VP8: keyframe bit
+    → isKey = detectKeyframe(payload)        // H.264: scan NAL header for type 5 (IDR)
     → chunk = new EncodedVideoChunk({ type: isKey ? "key":"delta", timestamp, data: payload })
     → decoder.decode(chunk)
     → output: drawImage(frame) → frame.close()
 ```
 
-**Keyframe Detection (codec-aware):**
+**Keyframe Detection:**
 - H.264 (Annex B): scan NAL headers for type 5 (IDR). The keyframe access unit contains SPS+PPS+IDR.
-- VP8: `payload[0] & 0x01 === 0` means keyframe.
+- HEVC (when HW available): scan for NAL types 19–21 (IDR_W_RADL / IDR_N_LP / CRA_NUT).
 
 **Fast-join rule:** the client sets `lastSeq` from the FIRST frame received (the cached IDR) and does NOT run gap detection on the transition to the first live frame (avoids a false "gap" → keyframe storm). Gap detection starts from the 2nd live frame.
 
@@ -195,7 +195,7 @@ Updates every 1 second with frame count and byte count deltas.
 The file defines `init()` twice (line 22 and line 292). The second silently shadows the first. Merge into a single initialization function.
 
 ### R-CLI-02 + R-CLI-03: Codec from Config Handshake (RESOLVED)
-The codec mismatch is fixed by the protocol handshake: the server sends a binary `FrameTypeConfig` (type 6) frame FIRST, whose JSON payload carries the full WebCodecs `codec` string (e.g., `avc1.42E01E` or `vp8`), plus `width/height/fps/audio*/cursorMode`. The client configures `VideoDecoder` from that — never hardcoded.
+The codec mismatch is fixed by the protocol handshake: the server sends a binary `FrameTypeConfig` (type 6) frame FIRST, whose JSON payload carries the full WebCodecs `codec` string (e.g., `avc1.42E01E` for H.264 or `hvc1.*` when HW HEVC is in use), plus `width/height/fps/audio*/cursorMode`. The client configures `VideoDecoder` from that — never hardcoded.
 
 > Note: Config is a **binary** frame (type 6) with a JSON payload, NOT a JSON text control message. (Round-1 specs incorrectly described it as a text message — corrected here and in MODULE_PROTOCOL.)
 

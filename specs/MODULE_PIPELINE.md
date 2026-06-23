@@ -85,7 +85,7 @@ func (p *Pipeline) Stats() Stats
 5. Select encode path (exactly two tiers — no ffmpeg-vaapi):
    - If NOT --software AND capturer implements DMABufCapturer AND hwencode.SupportsFormat:
        → HardwareEncoder (zero-copy VA-API); set cursorMode="separate"
-   - Else: software in-process (OpenH264 for H.264, or VP8); cursorMode per config
+   - Else: software in-process (OpenH264 for H.264); cursorMode per config
    - If --hardware was forced but unavailable → fatal error
 6. Derive stream dims from the capturer's actual resolution (NOT hardcoded).
 7. Create server (embedded client FS, session token).
@@ -218,9 +218,9 @@ func (p *Pipeline) forceKeyframe() {
 }
 ```
 
-**`containsKeyframe`**: for H.264, scans NALs for type 5 (IDR); for VP8, checks the keyframe bit of the single frame. **`sleepToInterval(&lastFrameT, interval)`** sleeps until `lastFrameT + interval`, then sets `lastFrameT = now()`. Both are O(1)/cheap.
+**`containsKeyframe`**: for H.264, scans NALs for type 5 (IDR). **`sleepToInterval(&lastFrameT, interval)`** sleeps until `lastFrameT + interval`, then sets `lastFrameT = now()`. Both are O(1)/cheap.
 
-> **Frame-drop semantics differ by backend (important).** The skip-a-capture strategy assumes a **pull-latest** source: KMS/DMA-BUF `NextFrame`/`NextDMABuf` always returns the CURRENT framebuffer, so skipping cleanly drops stale frames. **Pipe-based backends (X11grab / screencast) are FIFO** — not reading does not drop frames at the source; it backs up the OS pipe and you later read a *stale* frame plus added latency. Therefore, for pipe-based capturers, the "skip" must **drain the pipe to the most recent frame** (read-and-discard buffered frames, or rely on a leaky upstream queue — screencast.py already uses `queue leaky=downstream`). The `Capturer` implementation for pipe backends should expose a `DrainLatest()` or have `NextFrame` internally discard all but the newest buffered frame when the pipeline signals it is behind. KMS needs none of this.
+> **Frame-drop semantics: pull-latest source assumed.** The skip-a-capture strategy assumes the capturer is a **pull-latest** source: a call to `NextFrame` / `NextDMABuf` / `NextIOSurface` always returns the CURRENT framebuffer, so skipping cleanly drops stale frames. This is true for KMS+EGL DMA-BUF (Linux), ScreenCaptureKit (macOS), and DXGI Desktop Duplication (Windows) — the supported capture add-ons. Pipe-based subprocess capturers (X11grab, ffmpeg-based) would behave as FIFO buffers and need a `DrainLatest()` extension — those backends were rejected from the architecture, so the pipeline never needs to handle them.
 
 ### Audio Loop (Separate Goroutine)
 

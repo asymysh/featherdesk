@@ -262,11 +262,11 @@ PATH B — Hardware (zero-copy, GPU-resident)  [preferred]:
 PATH A — Software (CPU round-trip)  [fallback / --software]:
     capturer.NextFrame() → RGBA []byte (GPU→CPU: ~24MB at 1440p)
     → converter.Convert() → I420 (CPU, SIMD libyuv)
-    → encoder.Encode() → NALs (CPU; OpenH264 or VP8)
+    → encoder.Encode() → NALs (CPU; OpenH264 — VP8/libavcodec rejected)
     cursorMode = "embedded" (server-side blend) OR "separate"
 ```
 
-**Decision (confirmed):** the legacy ffmpeg-`h264_vaapi` subprocess path (which still did a CPU round-trip via `glReadPixels`→libyuv→stdin→`hwupload`) is REMOVED. Hardware = zero-copy `hwencode` module only; software = in-process OpenH264/VP8. There is no third tier.
+**Decision (confirmed):** the legacy ffmpeg-`h264_vaapi` subprocess path (which still did a CPU round-trip via `glReadPixels`→libyuv→stdin→`hwupload`) is REMOVED. Hardware = zero-copy `hwencode` module only; software = in-process OpenH264 (VP8/libvpx/libavcodec rejected). There is no third tier and no ffmpeg dependency anywhere.
 
 ---
 
@@ -314,8 +314,8 @@ type Encoder interface {
 
 **Contract Rules:**
 - `nil, nil` return means frame was skipped (no error, no output)
-- First frame after `ForceKeyframe()` MUST be a keyframe (H.264: SPS+PPS+IDR; VP8: keyframe)
-- Each `[]byte` element is exactly **one NAL unit, in Annex B form (with the `00 00 00 01` start code)** for H.264; for VP8 the slice has exactly one element (the whole frame).
+- First frame after `ForceKeyframe()` MUST be a keyframe (H.264: SPS+PPS+IDR)
+- Each `[]byte` element is exactly **one NAL unit, in Annex B form (with the `00 00 00 01` start code)** for H.264.
 - The server concatenates the elements verbatim into one per-frame message payload (no re-framing).
 - Returned byte slices are OWNED by the caller (safe to hold across calls)
 
@@ -344,7 +344,7 @@ Header layout (little-endian):
 | VideoH264 | 1 | One access unit: all NALs concatenated, Annex B (keyframe = SPS+PPS+IDR) |
 | Ping | 2 | 8-byte nonce |
 | AudioPCM | 4 | Raw S16LE PCM (Width=SampleRate, Height=Channels) |
-| VideoVP8 | 5 | One VP8 frame |
+| _(reserved)_ | 5 | Formerly VideoVP8 — VP8 codec rejected. Reserved; do not reuse without protocol version bump. |
 | Config | 6 | JSON handshake (codec, dims, fps, audio, cursorMode) — sent first, and on change |
 | CursorUpdate | 11 | Cursor position + optional image (client-side cursor) |
 | InputAck | 14 | Echo of client input seq + server timestamp (RTT) |
@@ -443,7 +443,7 @@ type HardwareEncoder interface {
 ```go
 // The pipeline pairs encoder output with the frame's metadata before broadcasting.
 type EncodedFrame struct {
-    NALs      [][]byte // Annex B NAL units (H.264) or single VP8 frame
+    NALs      [][]byte // Annex B NAL units (H.264)
     Width     uint16
     Height    uint16
     Timestamp uint64   // CLOCK_MONOTONIC ns, carried through from capture
@@ -452,7 +452,8 @@ type EncodedFrame struct {
 
 type Server interface {
     // Broadcast assembles one per-frame message and fans it out.
-    // codecType is FrameTypeVideoH264 or FrameTypeVideoVP8.
+    // codecType is FrameTypeVideoH264 (additional FrameType* values may be
+    // added as new codecs are introduced — VP8 was rejected).
     // The server assigns the video Sequence and detects/uses Keyframe for IDR caching.
     Broadcast(codecType uint8, f EncodedFrame)
     BroadcastAudio(chunk AudioChunk)
@@ -463,7 +464,7 @@ type Server interface {
 **Contract Rules:**
 - The pipeline carries `Width/Height/Timestamp` from the capture step through encode to here (they are NOT recomputed).
 - The server owns the per-type sequence counters; the pipeline never sets them.
-- `Keyframe` lets the server cache the complete keyframe message (SPS+PPS+IDR) without re-parsing — though the server also verifies via NAL/VP8 inspection.
+- `Keyframe` lets the server cache the complete keyframe message (SPS+PPS+IDR) without re-parsing — though the server also verifies via NAL inspection.
 
 ---
 
@@ -636,16 +637,20 @@ featherdesk/
 │       └── logger.go           # Logger interface
 ├── internal/                    # Private implementations
 │   ├── capture/
-│   │   ├── kms/                # KMS+DRM+EGL implementation (Capturer + DMABufCapturer)
-│   │   ├── x11/               # X11grab/screencast implementation (Capturer only)
-│   │   └── cursor/            # Cursor compositing (software) + cursor protocol (hardware)
+│   │   ├── kms/                # KMS+DRM+EGL Linux capture add-on (build tag: kms_egl)
+│   │   ├── nvfbc/              # NvFBC Linux capture add-on (build tag: nvfbc)
+│   │   ├── sck/                # ScreenCaptureKit macOS capture add-on (build tag: sck)
+│   │   └── cursor/             # Cursor compositing (software) + cursor protocol (hardware)
 │   ├── encode/
-│   │   ├── openh264/          # OpenH264 CGo encoder
-│   │   ├── ffmpeg/            # FFmpeg subprocess encoder
-│   │   ├── vp8/              # VP8 libavcodec encoder
-│   │   └── convert/          # libyuv color conversion
-│   ├── hwencode/
-│   │   └── vaapi/            # VA-API zero-copy encoder (HardwareEncoder)
+│   │   ├── openh264/           # OpenH264 SW encoder add-on (build tag: openh264)
+│   │   ├── libva/              # libva Linux HW add-on (build tag: libva)
+│   │   ├── nvenc/              # NVENC HW add-on (build tag: nvenc)
+│   │   ├── amf/                # AMD AMF HW add-on (build tag: amf)
+│   │   ├── qsv/                # Intel oneVPL HW add-on, Windows (build tag: qsv)
+│   │   ├── vt/                 # VideoToolbox macOS SW+HW add-on (build tags: vt_sw, vt_hw)
+│   │   ├── mf/                 # MediaFoundation Windows SW+HW add-on (build tags: mf_sw, mf_hw)
+│   │   ├── vulkan/             # Vulkan Video HW add-on (build tag: vulkan_video)
+│   │   └── convert/            # libyuv color conversion (used by every SW encoder add-on)
 │   ├── audio/
 │   │   └── pipewire/         # PipeWire pw-cat capture
 │   ├── input/
@@ -678,7 +683,7 @@ featherdesk/
 | TD-04 | High | `ffmpeg.go:240` | ForceKeyframe stores flag but never signals ffmpeg | R-ENC-01 |
 | TD-05 | Medium | `main.go:158` | Hardcoded 2560x1440 for input device | R-INP-07 |
 | TD-06 | Medium | `compositor.js:22+292` | Duplicate init() function (dead code) | R-CLI-01 |
-| TD-07 | Medium | `server.go:148+client.js` | Codec type mismatch (H264 constant for VP8 data) | R-SRV-02 + R-PRO-01 (handshake) |
+| TD-07 | ~~Medium~~ obsolete | `server.go:148+client.js` | Codec type mismatch (H264 constant for VP8 data) — VP8 rejected; mismatch source eliminated by removing VP8 entirely | obsolete |
 | TD-08 | Medium | `audio/capture.go` | Race condition on cmd/stdout fields | R-AUD-01 |
 | TD-09 | Medium | `x11grab.go:165` | Hardcoded developer path `/home/aseem/...` | R-CAP-06 |
 | TD-10 | Medium | `protocol.go` | No version/sequence in wire protocol | Fixed in new protocol spec (v1, 22-byte header) |

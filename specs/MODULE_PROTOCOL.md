@@ -19,7 +19,7 @@ const (
     FrameTypePing         uint8 = 2
     FrameTypePong         uint8 = 3  // reserved (client pongs over text channel)
     FrameTypeAudioPCM     uint8 = 4
-    FrameTypeVideoVP8     uint8 = 5
+    // 5 reserved (formerly VideoVP8 — VP8 codec rejected; never reuse without protocol version bump)
     FrameTypeConfig       uint8 = 6  // JSON handshake; resent on capability change
     FrameTypeCursorUpdate uint8 = 11
     FrameTypeInputAck     uint8 = 14
@@ -78,7 +78,7 @@ Offset  Size  Type     Field         Encoding
 | Ping | 2 | S→C | 8-byte nonce (echoed by client Pong over text channel). Optional; WS-level ping also used. | Unused (0) |
 | Pong | 3 | C→S(text) | Reserved — client pongs over text channel | Unused (0) |
 | AudioPCM | 4 | S→C | Raw S16LE interleaved PCM (one capture chunk) | SampleRate, Channels |
-| VideoVP8 | 5 | S→C | One VP8 frame (single self-contained unit) | Frame dimensions (pixels) |
+| _(reserved)_ | 5 | — | Formerly VideoVP8 — VP8 codec rejected. Reserved; do not reuse without protocol version bump. | — |
 | Config | 6 | S→C | JSON handshake (codec, dims, fps, audio, cursorMode). Sent first on connect and again on any capability change (resolution, codec). | Unused (0) |
 | CursorUpdate | 11 | S→C | Cursor position + optional image (client-side cursor) | Unused (0) |
 | InputAck | 14 | S→C | Echoes the client input `seq` (uint32 LE) + server-receive timestamp (uint64 LE) for RTT | Unused (0) |
@@ -135,7 +135,7 @@ The video payload is the **complete access unit** for one frame, with all NAL un
 ```
 - Keyframe messages contain `SPS, PPS, IDR` in order (self-contained, decodable cold).
 - The browser `VideoDecoder` consumes the whole payload as one `EncodedVideoChunk` — it never needs to split NALs, so no length-prefixing is used.
-- The server detects keyframes by scanning for an IDR NAL (type 5) or VP8 keyframe bit to set the `EncodedVideoChunk` key/delta hint via the per-frame message (a dedicated keyframe flag is not on the wire; the client derives it from the bitstream, same as the original design).
+- The server detects keyframes by scanning for an IDR NAL (type 5) to set the `EncodedVideoChunk` key/delta hint via the per-frame message (a dedicated keyframe flag is not on the wire; the client derives it from the bitstream, same as the original design).
 
 ---
 
@@ -168,7 +168,7 @@ On WebSocket connect, the server MUST send a `FrameTypeConfig` (binary frame typ
     "cursorMode": "separate"
 }
 ```
-- `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01E` for H.264 Constrained Baseline L3.0, or `vp8`), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
+- `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01E` for H.264 Constrained Baseline L3.0, or `hvc1.*` for HW HEVC), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
 - `cursorMode` is `"separate"` (client renders cursor from `CursorUpdate` messages) or `"embedded"` (cursor is burned into the video frame).
 - If capabilities change (resolution, codec, cursor mode), the server sends a **new** Config frame; the client reconfigures its decoder and input scaling.
 - Send order on connect: **Config → cached IDR (if any) → live frames.**
@@ -179,7 +179,7 @@ On WebSocket connect, the server MUST send a `FrameTypeConfig` (binary frame typ
 // ConfigPayload is the JSON body of a FrameTypeConfig (type 6) message.
 type ConfigPayload struct {
     Version          int    `json:"version"`
-    Codec            string `json:"codec"`            // full WebCodecs string, e.g. "avc1.42E01E" | "vp8"
+    Codec            string `json:"codec"`            // full WebCodecs string, e.g. "avc1.42E01E" (H.264) or "hvc1.*" (HW HEVC)
     Width            int    `json:"width"`
     Height           int    `json:"height"`
     FPS              int    `json:"fps"`

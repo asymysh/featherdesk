@@ -19,7 +19,9 @@ type Server interface {
     // Broadcast assembles ONE per-frame message (header + concatenated NALs)
     // and fans it out to all clients. The server assigns the video Sequence,
     // and caches the whole message if it is a keyframe (for fast-join).
-    // codecType is FrameTypeVideoH264 or FrameTypeVideoVP8.
+    // codecType is FrameTypeVideoH264 (additional FrameType* values may be
+    // added as new codecs are introduced — VP8 was rejected and its slot
+    // (5) is reserved).
     Broadcast(codecType uint8, f EncodedFrame)
 
     // BroadcastAudio sends one PCM chunk to all clients. Server assigns the
@@ -150,8 +152,8 @@ Exactly one WebSocket binary message per frame. NALs are NEVER split across mess
 
 ### Keyframe Caching Strategy (fixed)
 
-- A keyframe is a complete access unit that already contains `SPS, PPS, IDR` (H.264) or a VP8 keyframe — because all of a frame's NALs are in ONE message, the cache is automatically self-contained and decodable.
-- On `Broadcast`, if `f.Keyframe` (and verified by inspecting NALs for IDR type 5 / VP8 keyframe bit), store the whole `msg` under `idrMu`.
+- A keyframe is a complete access unit that already contains `SPS, PPS, IDR` (H.264) — because all of a frame's NALs are in ONE message, the cache is automatically self-contained and decodable.
+- On `Broadcast`, if `f.Keyframe` (and verified by inspecting NALs for IDR type 5), store the whole `msg` under `idrMu`.
 - On new client connect, the server sends, in order: **Config → cached keyframe msg (if any) → live frames**.
 - If NO keyframe is cached yet (very first client), the server invokes the new-client callback so the pipeline forces a keyframe on the active encoder.
 - If a keyframe IS cached, the server does NOT force a new one — the joiner decodes from the cache. This prevents a keyframe storm when many clients join.
@@ -183,7 +185,7 @@ Implement token-based access control:
 - Optional: separate tokens for controller vs viewer roles
 
 ### R-SRV-02: Fix Codec Type Constant (folded into interface)
-`Broadcast(codecType uint8, f EncodedFrame)` now carries the codec type; the server emits `FrameTypeVideoH264` or `FrameTypeVideoVP8` accordingly. The codec is also advertised in the Config handshake so the client configures the matching decoder.
+`Broadcast(codecType uint8, f EncodedFrame)` now carries the codec type; the server emits `FrameTypeVideoH264` (and future codec frame types as added). The codec is also advertised in the Config handshake so the client configures the matching decoder.
 
 ### R-SRV-03: Remove Custom itoa()
 Replace the hand-rolled `itoa()` function (lines 286-306) with `strconv.Itoa()`.
