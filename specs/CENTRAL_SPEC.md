@@ -115,7 +115,7 @@ for where any platform or add-on document lives — never duplicate specs, alway
 | **Cross-platform compat** | [`ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`](../ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md) | — | — |
 | **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `libva`, `nvenc`, `amf`, `vulkan_video` |
 | **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | `sck` | `vt_sw`, `vt_hw`, `openh264` |
-| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | (TBD — see below) | `openh264`, `mf_sw`, `mf_hw`, `nvenc`, `amf`, `qsv`, `vulkan_video` |
+| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | `dxgi_dd`, `nvfbc_win`, `amf_capture` | `openh264`, `mf_sw`, `mf_hw`, `nvenc`, `amf`, `qsv`, `vulkan_video` |
 
 > **Default binary on every platform contains zero capture backends and zero
 > encoders.** Every backend is an opt-in build-tagged add-on. Users compose the
@@ -179,11 +179,23 @@ for the explanation. SCK is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
 
 ### Windows capture add-on specs
 
-⏸️ **Pending architecture discussion** — see
-[`ADD-ON-SPECS/Windows/capture/README.md`](../ADD-ON-SPECS/Windows/capture/README.md).
+| Add-on | Build tag | Spec | Hardware | Status |
+|--------|-----------|------|---------|--------|
+| DXGI Desktop Duplication | `dxgi_dd` | [`ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md) | Any GPU (WDDM 1.2+, Win 8+) | 📋 Specced |
+| NvFBC for Windows | `nvfbc_win` | [`ADD-ON-SPECS/Windows/capture/NVFBC_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/NVFBC_WINDOWS_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
+| AMD AMF Display Capture | `amf_capture` | [`ADD-ON-SPECS/Windows/capture/AMF_CAPTURE_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/AMF_CAPTURE_WINDOWS_SPEC.md) | AMD Polaris+ (Adrenalin 21.5+) | 📋 Specced |
 
-Likely single candidate: NvFBC for Windows (Sunshine pattern). DXGI Desktop
-Duplication is the default for everything else.
+> **DXGI DD is the recommended default capture add-on** — universal cross-vendor
+> coverage, ~2–4ms latency, produces D3D11 textures that every Windows HW encoder
+> accepts directly. NvFBC and AMF capture are vendor-specific add-ons for lower
+> latency when paired with their matching encoder (NvFBC→NVENC, AMF capture→AMF
+> encode).
+>
+> **No elevation required for any Windows capture add-on.** Compare to Linux where
+> KMS+EGL requires `CAP_SYS_ADMIN`.
+
+See [`ADD-ON-SPECS/Windows/capture/README.md`](../ADD-ON-SPECS/Windows/capture/README.md)
+for the full rationale, recommended combinations, and zero-copy surface path matrix.
 
 ### Windows encoder add-on specs
 

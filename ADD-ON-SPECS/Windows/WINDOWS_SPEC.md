@@ -8,67 +8,64 @@ Windows is a primary target for FeatherDesk. The use case covers both **remote c
 
 ## Capture
 
-### Two Backends: DXGI Desktop Duplication + WGC Fallback
+### Every capture backend is an add-on (pluggable architecture)
 
-This matches exactly what Sunshine uses. DXGI Desktop Duplication is the production-grade Windows capture path.
+The Windows default binary contains **no capture backends**. Every capture path
+is a build-tagged add-on, mirroring the Linux and macOS structure. Users
+compile in exactly the capture method(s) they need.
 
-| API | Status | Notes |
-|-----|--------|-------|
-| **DXGI Desktop Duplication (DDup)** | ✅ Primary | DirectX 11.1+, all Windows 10+ machines. Low latency, GPU-resident frames. |
-| **Windows.Graphics.Capture (WGC)** | ✅ Fallback | Windows 10 1803+. Works without admin. Handles some edge cases DDup misses. |
-| GDI (BitBlt) | ⚠️ Last resort | Software path only. Works on virtual displays (Parsec, RDP). No GPU acceleration. |
-
-### DXGI Desktop Duplication — Primary Path
-
-**What it does:** Captures the composed desktop frame directly from the GPU output, as a `ID3D11Texture2D`. Zero CPU involvement until you explicitly copy to a staging texture.
-
-**Key latency optimizations (from Sunshine source):**
-```cpp
-// Minimize GPU pipeline depth — single most important latency call
-device->SetMaximumFrameLatency(1);
-
-// Set GPU thread priority (fall back from REALTIME on NVIDIA+HAGS due to driver freeze bug)
-D3DKMTSetProcessSchedulingPriorityClass(GetCurrentProcess(), D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH);
+```
+capture/
+├── DXGI_DD_WINDOWS_SPEC.md       ← default recommended add-on, all GPU vendors
+├── NVFBC_WINDOWS_SPEC.md         ← NVIDIA proprietary, lowest-latency on NVIDIA
+├── AMF_CAPTURE_WINDOWS_SPEC.md   ← AMD proprietary, native zero-copy with AMF encoder
+└── README.md                     ← runtime probe order + recommended combinations
 ```
 
-**Zero-copy to hardware encoder:** `ID3D11Texture2D` from DDup → NVENC `NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX` or AMF/QSV D3D11 surface input. Frame never touches CPU RAM.
+### Add-on summary
 
-**Benchmark (this machine: AMD Ryzen 9 5900X, Parsec virtual display, Windows 11):**
+| Add-on | Build tag | Hardware | Spec | When to use |
+|--------|-----------|----------|------|------------|
+| **DXGI Desktop Duplication** | `dxgi_dd` | Any GPU (WDDM 1.2+, Win 8+) | [`capture/DXGI_DD_WINDOWS_SPEC.md`](./capture/DXGI_DD_WINDOWS_SPEC.md) | Universal default — ~2–4ms, no elevation |
+| **NvFBC for Windows** | `nvfbc_win` | NVIDIA proprietary driver | [`capture/NVFBC_WINDOWS_SPEC.md`](./capture/NVFBC_WINDOWS_SPEC.md) | ~50% lower latency than DXGI DD on NVIDIA; pairs with NVENC |
+| **AMD AMF Display Capture** | `amf_capture` | AMD Polaris+ (Adrenalin 21.5+) | [`capture/AMF_CAPTURE_WINDOWS_SPEC.md`](./capture/AMF_CAPTURE_WINDOWS_SPEC.md) | Same AMFContext as `amf` encoder; native zero-copy; Apache 2.0 |
+
+All three produce D3D11-backed surfaces (ID3D11Texture2D), so they're all
+compatible with every Windows HW encoder add-on (MF HW, NVENC, AMF, QSV).
+Vendor-specific add-ons simply integrate more tightly with their matching
+encoder.
+
+### What was rejected
+
+| API | Why rejected |
+|-----|-------------|
+| Windows.Graphics.Capture (WGC) | Only advantage was per-window capture, which is out of scope. Full-desktop WGC is slower than DXGI DD. |
+| GDI BitBlt | ~30–50ms, misses hardware-accelerated content. Benchmarked at 16.7ms p50 on Parsec virtual display — but fails on real DirectX apps. |
+| Magnification API | ~15–30ms, CPU-only. Niche. |
+| DirectShow / MF screen capture | Wrappers around DXGI DD. No benefit. |
+
+### Runtime probe order
+
+```
+1. nvfbc_win compiled in AND NVIDIA GPU present AND probe succeeds?  → use NvFBC
+2. amf_capture compiled in AND AMD GPU present?                       → use AMF Display Capture
+3. dxgi_dd compiled in?                                                → use DXGI DD (universal)
+4. None of the above?                                                  → fatal: no capture
+```
+
+See [`capture/README.md`](./capture/README.md) for recommended add-on
+combinations and detailed rationale.
+
+### Historical benchmark (GDI only — real DXGI DD pending hardware bench)
 
 | Variant | FPS | p50 | p95 | p99 |
 |---------|-----|-----|-----|-----|
 | GDI bitblt_only | 58.0 | 16.7ms | 20.0ms | 32.6ms |
 | GDI bitblt_getdib | 53.9 | 16.9ms | 31.9ms | 35.8ms |
-| DXGI DDup | pending | — | — | — |
 
-> Note: GDI benchmarks run on a **Parsec virtual display adapter** — not representative of real hardware. DXGI Desktop Duplication returns `DXGI_ERROR_UNSUPPORTED` on virtual/software display adapters and on RDP sessions. Real hardware expected: 1–5ms p50.
-
-**Raw CSV:** `bench_out/<session-id>/gdi_bitblt_*.csv`
-
-### WGC Fallback
-
-```csharp
-// Windows.Graphics.Capture — WinRT, C# or Swift
-var picker = new GraphicsCapturePicker();
-var item = await picker.PickSingleItemAsync(); // shows picker UI
-var session = Direct3D11CaptureFramePool.Create(device, format, 2, item.Size);
-session.FrameArrived += (pool, _) => {
-    using var frame = pool.TryGetNextFrame();
-    // frame.Surface is an IDirect3DSurface — interop to ID3D11Texture2D
-};
-session.CreateCaptureSession(item).StartCapture();
-```
-
-WGC can capture individual windows (not just full desktop), handles DRM-protected content differently, and works as a portable app without service-mode restrictions. Use as fallback when DDup returns `DXGI_ERROR_UNSUPPORTED`.
-
-### When to Use Each
-
-```
-Check DXGI_ERROR_UNSUPPORTED on IDXGIOutput1::DuplicateOutput()
-    → if OK:     use DXGI Desktop Duplication
-    → if UNSUP:  fall back to WGC
-    → if WGC fails (older Windows / permissions): fall back to GDI BitBlt
-```
+> Tested on AMD Ryzen 9 5900X, Parsec virtual display, Windows 11. GDI
+> numbers are worst-case baseline only — DXGI DD expected: 1–5ms p50 on
+> real hardware. Full benchmark pass with NVIDIA + AMD GPUs pending.
 
 ---
 
