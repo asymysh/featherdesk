@@ -296,15 +296,22 @@ func main() {
 	log.Println("── Encoder Benchmarks ─────────────────────────────────────")
 
 	// OpenH264 SW benchmarks (per-frame timing)
-	openh264Configs := []struct {
+	// Per-frame SW encoder benchmarks
+	perFrameEncoders := []struct {
+		enc           encode.EncoderBench
 		width, height int
 	}{
-		{1920, 1080},
-		{2560, 1440},
+		{encode.NewOpenH264Encoder(), 1920, 1080},
+		{encode.NewOpenH264Encoder(), 2560, 1440},
+		// x264 persistent subprocess (single ffmpeg process, frames piped in)
+		{encode.NewX264Persistent("ultrafast", 4, 26), 1920, 1080},
+		{encode.NewX264Persistent("ultrafast", 12, 26), 1920, 1080},
+		{encode.NewX264Persistent("ultrafast", 4, 26), 2560, 1440},
+		{encode.NewX264Persistent("ultrafast", 12, 26), 2560, 1440},
 	}
 
-	for _, cfg := range openh264Configs {
-		enc := encode.NewOpenH264Encoder()
+	for _, cfg := range perFrameEncoders {
+		enc := cfg.enc
 		log.Printf("  [%s] %dx%d ...", enc.Name(), cfg.width, cfg.height)
 		result, timings := encode.RunBenchmark(enc, cfg.width, cfg.height, 60, *warmup, *frames)
 
@@ -424,12 +431,30 @@ func main() {
 		{"mf-1080ti-h264", "h264_mf", "h264", "mf-nvidia", []string{"-init_hw_device", "d3d11va:1", "-rate_control", "quality", "-quality", "70"}, 2560, 1440},
 		{"mf-quadro-h264", "h264_mf", "h264", "mf-nvidia", []string{"-init_hw_device", "d3d11va:2", "-rate_control", "quality", "-quality", "70"}, 2560, 1440},
 
-		// ── x264 SW (benchmark reference only — GPL, not shipping) ──
-		{"x264-ultrafast-4t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "4"}, 1920, 1080},
-		{"x264-ultrafast-4t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "4"}, 2560, 1440},
+		// ── SW Encoder Shootout (all at 1080p + 1440p) ──
 
-		// ── VP9 SW ──
+		// x264 (GPL reference — NOT shipping)
+		{"x264-ultrafast-1t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "1"}, 1920, 1080},
+		{"x264-ultrafast-4t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "4"}, 1920, 1080},
+		{"x264-ultrafast-8t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "8"}, 1920, 1080},
+		{"x264-ultrafast-12t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "12"}, 1920, 1080},
+		{"x264-superfast-4t", "libx264", "h264", "software", []string{"-preset", "superfast", "-tune", "zerolatency", "-crf", "26", "-threads", "4"}, 1920, 1080},
+		{"x264-ultrafast-4t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "4"}, 2560, 1440},
+		{"x264-ultrafast-12t", "libx264", "h264", "software", []string{"-preset", "ultrafast", "-tune", "zerolatency", "-crf", "26", "-threads", "12"}, 2560, 1440},
+
+		// x265 HEVC SW (reference — NOT shipping, patent pool)
+		{"x265-ultrafast-4t", "libx265", "hevc", "software", []string{"-preset", "ultrafast", "-crf", "26", "-threads", "4", "-x265-params", "frame-threads=4"}, 1920, 1080},
+		{"x265-ultrafast-12t", "libx265", "hevc", "software", []string{"-preset", "ultrafast", "-crf", "26", "-threads", "12", "-x265-params", "frame-threads=12"}, 1920, 1080},
+
+		// SVT-AV1 (BSD, potential future)
+		{"svtav1-p12-4t", "libsvtav1", "av1", "software", []string{"-preset", "12", "-crf", "30", "-svtav1-params", "lp=4"}, 1920, 1080},
+		{"svtav1-p12-12t", "libsvtav1", "av1", "software", []string{"-preset", "12", "-crf", "30", "-svtav1-params", "lp=12"}, 1920, 1080},
+		{"svtav1-p13-4t", "libsvtav1", "av1", "software", []string{"-preset", "13", "-crf", "30", "-svtav1-params", "lp=4"}, 1920, 1080},
+
+		// VP9 (BSD)
 		{"libvpx-vp9-speed6-4t", "libvpx-vp9", "vp9", "software", []string{"-cpu-used", "6", "-threads", "4", "-row-mt", "1", "-b:v", "5M", "-deadline", "realtime"}, 1920, 1080},
+		{"libvpx-vp9-speed8-4t", "libvpx-vp9", "vp9", "software", []string{"-cpu-used", "8", "-threads", "4", "-row-mt", "1", "-b:v", "5M", "-deadline", "realtime"}, 1920, 1080},
+		{"libvpx-vp9-speed6-12t", "libvpx-vp9", "vp9", "software", []string{"-cpu-used", "6", "-threads", "12", "-row-mt", "1", "-b:v", "5M", "-deadline", "realtime"}, 1920, 1080},
 		{"libvpx-vp9-speed6-4t", "libvpx-vp9", "vp9", "software", []string{"-cpu-used", "6", "-threads", "4", "-row-mt", "1", "-b:v", "5M", "-deadline", "realtime"}, 2560, 1440},
 	}
 
