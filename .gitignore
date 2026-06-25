@@ -6,3 +6,15 @@ coverage.out
 /tmp/
 
 bench.exe
+
+# Benchmark artifacts
+amf_bench.exe
+capture_dxgi.exe
+capture_nvfbc.exe
+dxgi_quick.exe
+headless_bench.exe
+pipeline_bench.exe
+featherdesk_bench.exe
+*.db
+bench_dxgi_*.csv
+openh264-2.4.1-win64.dll

@@ -1,0 +1,92 @@
+{
+  "session_id": "ff849564-8c0d-47b4-b4f2-e2e6ef3a6b72",
+  "session_name": "windows-openh264-v241",
+  "generated_at": "2026-06-25T21:33:58.4471165Z",
+  "platform": "windows",
+  "machine": {
+    "os": "Microsoft Windows 11 Enterprise 10.0.26200",
+    "cpu": "AMD Ryzen 9 5900X 12-Core Processor",
+    "cores": 12,
+    "threads": 24,
+    "ram_total_mb": 32671,
+    "display": "1920x1080@0Hz Parsec Virtual Display Adapter",
+    "gpus": [
+      "Parsec Virtual Display Adapter",
+      "NVIDIA Quadro RTX 4000",
+      "NVIDIA GeForce GTX 1080 Ti",
+      "AMD Radeon RX 6800 XT"
+    ]
+  },
+  "captures": [
+    {
+      "backend": "gdi",
+      "variant": "bitblt_only",
+      "width": 1920,
+      "height": 1080,
+      "fps_actual": 55.79251878115664,
+      "latency_p50_ms": 16.789,
+      "latency_p95_ms": 29.414,
+      "latency_p99_ms": 33.152,
+      "bytes_per_frame": 8294400,
+      "error_count": 0,
+      "available": true
+    },
+    {
+      "backend": "gdi",
+      "variant": "bitblt_getdib",
+      "width": 1920,
+      "height": 1080,
+      "fps_actual": 55.447714884153555,
+      "latency_p50_ms": 16.825,
+      "latency_p95_ms": 31.821,
+      "latency_p99_ms": 32.91,
+      "bytes_per_frame": 8294400,
+      "error_count": 0,
+      "available": true
+    },
+    {
+      "backend": "dxgi",
+      "variant": "duplication_v1",
+      "width": 0,
+      "height": 0,
+      "fps_actual": 0,
+      "latency_p50_ms": 0,
+      "latency_p95_ms": 0,
+      "latency_p99_ms": 0,
+      "bytes_per_frame": 0,
+      "error_count": 0,
+      "available": false,
+      "notes": "DXGI capture implementation pending; virtual display adapter detected — DXGI_ERROR_UNSUPPORTED expected"
+    }
+  ],
+  "encoders": [
+    {
+      "encoder": "openh264",
+      "codec": "h264",
+      "type": "software",
+      "width": 1920,
+      "height": 1080,
+      "fps_actual": 46.0850907434639,
+      "latency_p50_ms": 21.38,
+      "latency_p95_ms": 24.828,
+      "latency_p99_ms": 26.406,
+      "frame_kb_avg": 203.54193522135418,
+      "bitrate_kbps": 76842.99616072791,
+      "available": true
+    },
+    {
+      "encoder": "openh264",
+      "codec": "h264",
+      "type": "software",
+      "width": 2560,
+      "height": 1440,
+      "fps_actual": 25.232215230795912,
+      "latency_p50_ms": 38.787,
+      "latency_p95_ms": 43.407,
+      "latency_p99_ms": 51.231,
+      "frame_kb_avg": 362.55809733072914,
+      "bitrate_kbps": 74941.59520167371,
+      "available": true
+    }
+  ]
+}

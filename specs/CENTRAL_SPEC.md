@@ -43,7 +43,6 @@ on every supported machine.
 |--------|----------|---------------------------|
 | NVENC direct | Linux + Windows | Unlocks NVIDIA-specific features (REF_FRAMES_INVALIDATION) unavailable via VA-API wrapper |
 | AMF on ROCm | Linux | AMD-specific tuning beyond what Mesa VA-API exposes |
-| Vulkan Video | Linux + Windows | Cross-vendor royalty-free path; emerging, not yet mature for production primary |
 | AMF (Windows) | Windows | AMD primary HW path on Windows |
 | Quick Sync (QSV) | Windows | Intel primary HW path on Windows (oneVPL) |
 
@@ -58,9 +57,8 @@ on every supported machine.
 ```
 1. NVENC add-on present?       → use NVENC direct (NVIDIA only, best NVIDIA path)
 2. AMF-ROCm add-on present?    → use AMF (AMD only, opt-in beyond Mesa VA-API)
-3. Vulkan Video add-on present?→ use Vulkan Video (cross-vendor, when mature)
-4. VA-API in default binary    → use VA-API (Intel/AMD always, NVIDIA via wrapper)
-5. OpenH264 SW in default      → universal fallback
+3. VA-API in default binary    → use VA-API (Intel/AMD always, NVIDIA via wrapper)
+4. OpenH264 SW in default      → universal fallback
 ```
 
 This pattern keeps the default binary minimal and dependency-light while letting power
@@ -113,9 +111,9 @@ for where any platform or add-on document lives — never duplicate specs, alway
 | Platform | Spec | Capture add-on(s) | Encoder add-on(s) |
 |----------|------|------------------|-------------------|
 | **Cross-platform compat** | [`ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`](../ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md) | — | — |
-| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `libva`, `nvenc`, `amf`, `vulkan_video` |
+| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `libva`, `nvenc`, `amf` |
 | **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | `sck` | `vt_sw`, `vt_hw`, `openh264` |
-| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | `dxgi_dd`, `nvfbc_win`, `amf_capture` | `openh264`, `mf_sw`, `mf_hw`, `nvenc`, `amf`, `qsv`, `vulkan_video` |
+| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | `dxgi_dd` | `openh264`, `mf_hw`, `nvenc`, `amf`, `qsv` |
 
 > **Default binary on every platform contains zero capture backends and zero
 > encoders.** Every backend is an opt-in build-tagged add-on. Users compose the
@@ -151,7 +149,7 @@ for the full rationale.
 | libva direct | HW | [`Linux/encoders/HW/LIBVA_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
 | NVENC direct | HW | [`Linux/encoders/HW/NVENC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
 | AMF on ROCm | HW | [`Linux/encoders/HW/AMF_ROCM_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
-| Vulkan Video | HW | [`Linux/encoders/HW/VULKAN_VIDEO_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/VULKAN_VIDEO_LINUX_SPEC.md) | Any Vulkan 1.3+ GPU | 📋 Specced |
+
 
 > **Intel on Linux is not a separate add-on** — Intel Quick Sync is exposed exclusively
 > through VA-API. The `libva` add-on covers Intel Sandy Bridge through Arc.
@@ -202,12 +200,12 @@ for the full rationale, recommended combinations, and zero-copy surface path mat
 | Add-on | Path | Spec | Hardware | Status |
 |--------|------|------|---------|--------|
 | OpenH264 CGo | SW | [`Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | 📋 Specced |
-| MediaFoundation SW | SW | [`Windows/encoders/SW/MEDIAFOUNDATION_SW_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/MEDIAFOUNDATION_SW_WINDOWS_SPEC.md) | Any Windows 10+ | 📋 Specced |
+
 | MediaFoundation HW | HW | [`Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | 📋 Specced |
 | NVENC | HW | [`Windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
 | AMF | HW | [`Windows/encoders/HW/AMF_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/AMF_WINDOWS_SPEC.md) | AMD GCN+ | 📋 Specced |
 | QSV (oneVPL) | HW | [`Windows/encoders/HW/QSV_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/QSV_WINDOWS_SPEC.md) | Intel Sandy Bridge+ (covers Arc) | 📋 Specced |
-| Vulkan Video | HW | [`Windows/encoders/HW/VULKAN_VIDEO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/VULKAN_VIDEO_WINDOWS_SPEC.md) | Any Vulkan 1.3+ GPU | 📋 Specced |
+
 
 > **MediaFoundation HW is the recommended cross-vendor default for Windows** —
 > closest equivalent to VA-API on Linux. Ship `mf_hw` for one-binary-covers-everything;
@@ -508,7 +506,7 @@ type Server interface {
  SCK macOS  add-on uses oneVPL (Win)
  NvFBC      libyuv for  MediaFoundation
             RGBA→I420)  VideoToolbox
-                        Vulkan Video
+                        VideoToolbox
 
               pipeline (imports core interfaces + probes compiled-in add-ons)
                 │
@@ -670,8 +668,7 @@ featherdesk/
 │   │   ├── amf/                # AMD AMF HW add-on (build tag: amf)
 │   │   ├── qsv/                # Intel oneVPL HW add-on, Windows (build tag: qsv)
 │   │   ├── vt/                 # VideoToolbox macOS SW+HW add-on (build tags: vt_sw, vt_hw)
-│   │   ├── mf/                 # MediaFoundation Windows SW+HW add-on (build tags: mf_sw, mf_hw)
-│   │   ├── vulkan/             # Vulkan Video HW add-on (build tag: vulkan_video)
+│   │   ├── mf/                 # MediaFoundation Windows HW add-on (build tag: mf_hw)
 │   │   └── convert/            # libyuv color conversion (used by every SW encoder add-on)
 │   ├── server/
 │   │   ├── server.go           # HTTPS/WSS server (TLS mandatory)
