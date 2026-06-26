@@ -32,9 +32,12 @@ Users install ffmpeg independently or we bundle it as a separate binary.
 
 ---
 
-## Performance (Benchmarked)
+## Performance (Benchmarked — Windows reference, macOS native pending)
 
 Measured on AMD Ryzen 9 5900X (12C/24T), Windows 11, synthetic I420 frames.
+The x264 subprocess mechanism is platform-agnostic — the same ffmpeg
+subprocess code runs identically on macOS. macOS native benchmarks pending
+(Apple Silicon may show different thread scaling due to ARM micro-architecture).
 
 ### 1920x1080
 
@@ -130,14 +133,14 @@ No C compilation needed — the bridge is pure Go (os/exec + io.Pipe).
 ffmpeg must be in PATH or at a known location. The bridge searches:
 1. `VIEWPORT_FFMPEG_PATH` environment variable
 2. `ffmpeg` in PATH
-3. `./ffmpeg.exe` next to the binary (bundled deployment)
+3. `./ffmpeg` next to the binary (inside the .app bundle's Resources)
 
 ### Distribution options
 
 | Option | How |
 |--------|-----|
 | User installs ffmpeg | `winget install ffmpeg` / `apt install ffmpeg` / `brew install ffmpeg` |
-| Bundle ffmpeg binary | Ship `ffmpeg.exe` alongside `viewport-rds.exe` in the installer |
+| Bundle ffmpeg binary | Ship `ffmpeg` inside the .app bundle's Resources directory |
 | Docker | `FROM golang:1.26 AS build` + `apt install ffmpeg` in runtime stage |
 
 ---

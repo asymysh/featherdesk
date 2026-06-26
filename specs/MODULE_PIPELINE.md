@@ -83,7 +83,7 @@ func (p *Pipeline) Stats() Stats
    - Else if X11 + ffmpeg: use X11Grab
    - Else: fatal error
 5. Select encode path (exactly two tiers — no ffmpeg-vaapi):
-   - If NOT --software AND capturer implements DMABufCapturer AND hwencode.SupportsFormat:
+   - If [encode] mode != "forced=sw_addon" AND capturer implements DMABufCapturer AND hwencode.SupportsFormat:
        → HardwareEncoder (zero-copy VA-API); set cursorMode="separate"
    - Else: software in-process (OpenH264 for H.264); cursorMode per config
    - If --hardware was forced but unavailable → fatal error
@@ -290,26 +290,61 @@ Order matters: encoder before capturer (encoder may reference captured DMA-BUF),
 
 ## Capability Probing
 
+The pipeline iterates over compiled-in add-ons (registered at startup via
+Go build tags) and asks each one to probe its prerequisites. There is no
+fixed `SystemCapabilities` struct — the set of probes is determined by which
+add-ons were compiled in.
+
 ```go
-type SystemCapabilities struct {
-    HasDRMCard       bool
-    HasRootAccess    bool
-    DRMCardPath      string
-    DRMWidth         int
-    DRMHeight        int
-    DRMRefreshHz     int
-    HasVAAPI         bool
-    VAAPICodecs      []string
-    HasUInput        bool
-    HasPipeWire      bool
-    HasFFmpeg        bool
-    HasMutterScreencast bool
+// Each capture and encoder add-on registers itself at init() time.
+// The registry holds only add-ons whose build tag was active at compile time.
+type AddonRegistry struct {
+    Captures []CaptureAddon
+    Encoders []EncoderAddon
 }
 
-func ProbeCapabilities() *SystemCapabilities
+type CaptureAddon interface {
+    Name() string  // build tag (e.g. "kms_egl", "dxgi_dd")
+    Probe(*slog.Logger) (*ProbeResult, error)
+    New(cfg capture.CaptureConfig) (capture.Capturer, error)
+}
+
+type EncoderAddon interface {
+    Name() string  // build tag (e.g. "nvenc", "openh264", "x264")
+    Kind() string  // "hw" or "sw"
+    Probe(*slog.Logger) (*ProbeResult, error)
+    NewSW(cfg encode.EncoderConfig) (encode.Encoder, error)         // SW add-ons only
+    NewHW(cfg hwencode.HWEncoderConfig) (hwencode.HardwareEncoder, error) // HW add-ons only
+}
+
+type ProbeResult struct {
+    Available    bool
+    Reason       string   // human-readable explanation if !Available
+    Capabilities []string // e.g. ["h264", "hevc"] for an encoder
+    Details      map[string]any // per-add-on probe metadata
+}
+
+func (p *Pipeline) ProbeAddons() map[string]*ProbeResult {
+    results := make(map[string]*ProbeResult)
+    for _, c := range p.registry.Captures {
+        results[c.Name()], _ = c.Probe(p.logger)
+    }
+    for _, e := range p.registry.Encoders {
+        results[e.Name()], _ = e.Probe(p.logger)
+    }
+    return results
+}
 ```
 
-This is called once at startup. Results are logged at INFO level and used for backend selection.
+This is called once at startup. Results are logged at INFO level and used for
+add-on selection. The selection logic respects `[capture] force_addon` and
+`[encode] force_addon` from TOML config; if not forced, it uses the per-OS
+probe order documented in each platform's `capture/README.md` and
+`encoders/README.md`.
+
+There are **no probes for removed/deferred subsystems** (ffmpeg, PipeWire,
+Mutter, uinput) — those were rejected as add-on prerequisites along with
+their associated paths.
 
 ---
 

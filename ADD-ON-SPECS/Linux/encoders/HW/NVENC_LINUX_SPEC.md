@@ -54,7 +54,7 @@ NVENC is in every NVIDIA GPU from **Kepler (GTX 600 series, 2012) onward**.
 | Pascal (GTX 1000) | ✅ | ✅ 10-bit | ❌ | 2 |
 | Volta / Turing (GTX 1600, RTX 2000) | ✅ | ✅ | ❌ | 3 |
 | Ampere (RTX 3000) | ✅ | ✅ | ❌ | 3 |
-| Ada Lovelace (RTX 4000) | ✅ | ✅ | ✅ | 3+ (dual NVENC on 4090) |
+| Ada Lovelace (RTX 40-series — 4070/4080/4090) | ✅ | ✅ | ✅ | 3+ (dual NVENC on 4090) |
 | Blackwell (RTX 5000) | ✅ | ✅ | ✅ | 3+ |
 
 Consumer cards historically capped at 2-3 concurrent sessions. Quadro / Tesla / Data

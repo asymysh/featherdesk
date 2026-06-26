@@ -101,12 +101,23 @@ Everything else is identical.
 
 ---
 
-## Performance Targets
+## Performance
+
+### Measured (real hardware, Ryzen 9 5900X host)
+
+| NVIDIA GPU | Codec | 1080p ms | 1440p ms | FPS @ 1080p |
+|-----------|-------|---------|---------|------------|
+| **GTX 1080 Ti (Pascal)** | H.264 | **4.5ms** | **6.6ms** | 220 |
+| **GTX 1080 Ti (Pascal)** | HEVC | **4.7ms** | **7.4ms** | 211 |
+| **Quadro RTX 4000 (Turing)** | H.264 | **5.4ms** | **7.9ms** | 187 |
+| **Quadro RTX 4000 (Turing)** | HEVC | **5.6ms** | **8.0ms** | 179 |
+
+### Estimated (no measured hardware)
 
 | NVIDIA GPU | 1080p p50 | 1440p p50 | CPU at 60fps |
 |-----------|----------|----------|-------------|
-| GTX 1660 (Turing) | <2ms | <3ms | <1% |
-| RTX 3060 (Ampere) | <1.5ms | <2.5ms | <1% |
+| GTX 1660 (Turing) | ~2ms | ~3ms | <1% |
+| RTX 3060 (Ampere) | ~1.5ms | ~2.5ms | <1% |
 | RTX 4090 (Ada, dual NVENC) | <1ms | <1.5ms | <1% (split sessions) |
 
 Compared to MediaFoundation HW route (NVENC under the hood): ~2–3ms lower latency

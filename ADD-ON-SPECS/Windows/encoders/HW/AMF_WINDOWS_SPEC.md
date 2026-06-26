@@ -126,13 +126,25 @@ DXGI Desktop Duplication → ID3D11Texture2D → AMFSurface → encoder.
 
 ---
 
-## Performance Targets
+## Performance
 
-| AMD GPU | 1080p p50 | 1440p p50 | With PA enabled |
-|---------|----------|----------|-----------------|
-| RX 6600 (RDNA2) | <3ms | <4ms | +1–2ms but smaller frames |
-| RX 6900 XT (RDNA2) | <2ms | <3ms | +1ms |
-| RX 7900 XTX (RDNA3) | <2ms | <2.5ms | +1ms |
+### Measured (real hardware, Ryzen 9 5900X host)
+
+| AMD GPU | Codec | 1080p ms | 1440p ms | FPS @ 1080p |
+|---------|-------|---------|---------|------------|
+| **RX 6800 XT (RDNA2)** | H.264 | **5.9ms** | **9.3ms** | 169 |
+| **RX 6800 XT (RDNA2)** | HEVC | **5.0ms** | **7.5ms** | 199 |
+
+**Interesting finding:** HEVC is faster than H.264 on the RX 6800 XT. AMD's
+VCN3 encoder is HEVC-optimized — the H.264 path goes through a less-optimized
+code path.
+
+### Estimated (no measured hardware — earlier rough projections)
+
+| AMD GPU | 1080p p50 | 1440p p50 |
+|---------|----------|----------|
+| RX 6600 (RDNA2) | ~6ms | ~10ms |
+| RX 7900 XTX (RDNA3) | ~3ms | ~5ms |
 
 Pre-Analysis reduces bandwidth by ~10–20% at the same visual quality for a small
 encode latency cost — often worth it for bandwidth-constrained scenarios.

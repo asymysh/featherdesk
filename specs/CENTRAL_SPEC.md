@@ -289,7 +289,7 @@ PATH B — Hardware (zero-copy, GPU-resident)  [preferred]:
 
          │  on ErrFallbackToSoftware (DMA-BUF import unsupported, GPU reset, etc.)
          ▼
-PATH A — Software (CPU round-trip)  [fallback / --software]:
+PATH A — Software (CPU round-trip)  [fallback / [encode] force_addon = "openh264" or "x264"]:
     capturer.NextFrame() → RGBA []byte (GPU→CPU: ~24MB at 1440p)
     → converter.Convert() → I420 (CPU, SIMD libyuv)
     → encoder.Encode() → NALs (CPU; OpenH264 CGo or x264 subprocess — VP8/libavcodec/in-process-x264 rejected)

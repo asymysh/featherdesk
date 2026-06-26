@@ -1,11 +1,23 @@
-# Module Spec: custom-libva (Direct VA-API CGo Bindings)
+# Linux HW Encoder Add-On: libva (Direct VA-API CGo Bindings)
 
 ## Purpose
 
-This module is a **standalone implementation task** — not a new public interface. It is the concrete implementation of the `hwencode.HardwareEncoder` interface defined in `MODULE_HARDWARE_ENCODE.md`, written directly against `libva` via CGo with no subprocess, no ffmpeg, and no LGPL/GPL dependencies.
+The `libva` add-on is the Linux HW encoder implementation backing the
+`hwencode.HardwareEncoder` interface defined in
+[`specs/MODULE_HARDWARE_ENCODE.md`](../../../../specs/MODULE_HARDWARE_ENCODE.md).
+It binds directly to `libva` via CGo — no subprocess, no ffmpeg, no LGPL/GPL
+dependencies.
+
+VA-API is the universal Linux HW encode abstraction. The same `libva` add-on
+covers Intel Quick Sync (all generations from Sandy Bridge through Arc), AMD
+GCN/RDNA via Mesa, and NVIDIA via the open-source VA-API wrapper.
 
 **Why it is a separate spec from MODULE_HARDWARE_ENCODE:**
-`MODULE_HARDWARE_ENCODE.md` defines what the module does (the interface contract). This document defines *how to build it* — the specific VA-API calls, the SPS/PPS serialization approach, the reference implementations to draw from, and the exact implementation plan.
+`MODULE_HARDWARE_ENCODE.md` defines the abstract `HardwareEncoder` interface
+that all HW encoder add-ons implement. This document defines *how to build the
+libva add-on specifically* — the specific VA-API calls, the SPS/PPS
+serialization approach, the reference implementations to draw from, and the
+implementation plan.
 
 ---
 

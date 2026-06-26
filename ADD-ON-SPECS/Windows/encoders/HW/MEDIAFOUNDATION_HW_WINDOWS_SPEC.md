@@ -150,18 +150,29 @@ This is the canonical zero-copy GPU-resident streaming pipeline on Windows.
 
 ---
 
-## Performance Targets
+## Performance
 
-| GPU | H.264 1080p p50 | HEVC 1080p p50 | CPU at 60fps |
-|-----|----------------|----------------|-------------|
-| NVIDIA RTX 3060 (NVENC via MF) | ~3–5ms | ~3–5ms | <2% |
-| AMD RX 6700 (AMF via MF) | ~4–6ms | ~4–6ms | <2% |
-| Intel Arc A380 (QSV via MF) | ~3–5ms | ~3–5ms | <2% |
-| Intel UHD 630 (QSV via MF) | ~5–8ms | ~5–8ms | <3% |
-| Qualcomm Snapdragon X | ~5–8ms | ~5–8ms | <3% |
+### Measured (real hardware, Ryzen 9 5900X host, MF routing to D3D11VA adapter)
 
-MF adds ~2–4ms overhead vs direct vendor SDK access. For remote desktop the budget
-absorbs this easily; for sub-frame gaming-grade streaming, the vendor add-ons (NVENC,
+| GPU | Routed to | 1080p ms | 1440p ms | FPS @ 1080p |
+|-----|-----------|---------|---------|------------|
+| **RX 6800 XT** | AMD AMF MFT | **6.9ms** | **9.6ms** | 144 |
+| **GTX 1080 Ti** | NVIDIA NVENC MFT | **7.2ms** | **10.3ms** | 138 |
+| **Quadro RTX 4000** | NVIDIA NVENC MFT | **7.7ms** | **10.8ms** | 130 |
+
+### Estimated (no measured hardware)
+
+| GPU | H.264 1080p p50 | HEVC 1080p p50 |
+|-----|----------------|----------------|
+| NVIDIA RTX 3060 (NVENC via MF) | ~5ms | ~5ms |
+| Intel Arc A380 (QSV via MF) | ~5ms | ~5ms |
+| Intel UHD 630 (QSV via MF) | ~7ms | ~7ms |
+| Qualcomm Snapdragon X | ~7ms | ~7ms |
+
+MF adds ~2–4ms overhead vs direct vendor SDK access (measured: NVENC direct
+4.5ms on GTX 1080 Ti vs 7.2ms via MF MFT routing on the same GPU). For remote
+desktop the budget absorbs this easily; for sub-frame gaming-grade streaming,
+the vendor add-ons (NVENC,
 AMF, QSV direct) are still worth installing.
 
 ---

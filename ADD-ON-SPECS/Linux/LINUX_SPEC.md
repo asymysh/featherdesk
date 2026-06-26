@@ -230,9 +230,11 @@ Verified results from `review/kms_capture_software_encode/`:
 
 | Component | Current code | Target (refactor) |
 |-----------|-------------|------------------|
-| Capture | KMS+EGL (working) + X11grab subprocess | KMS+EGL only (no fallback in default binary) |
-| SW encode | VP8 libvpx → **OpenH264 CGo** ✅ | OpenH264 CGo |
-| HW encode | ffmpeg pipe → h264_vaapi (CPU copies) | libva CGo direct (zero-copy, no ffmpeg) |
+| Capture | KMS+EGL (working) + X11grab subprocess | `kms_egl` add-on only (X11grab deleted) |
+| SW encode (default) | VP8 libvpx → **OpenH264 CGo** ✅ | `openh264` add-on (BSD, Cisco) |
+| SW encode (opt-in) | — | `x264` subprocess add-on (GPL-isolated, 2× faster) |
+| HW encode | ffmpeg pipe → h264_vaapi (CPU copies) | `libva` add-on (CGo direct, zero-copy, no ffmpeg) |
+| HW encode (vendor-specific) | — | `nvenc`, `amf_rocm` add-ons |
 | Protocol | 17-byte header | 22-byte header v1 (versioned, sequenced) |
 
 (Audio and input current-vs-target deferred — see Audio + Input section above.)
