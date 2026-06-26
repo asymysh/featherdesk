@@ -29,6 +29,7 @@ const (
     FrameTypeCursorUpdate uint8 = 11 // S→C cursor position + optional image
     FrameTypeClipboard    uint8 = 12 // S→C clipboard push (JSON payload; see MODULE_CLIPBOARD.md)
     FrameTypeInputAck     uint8 = 14 // S→C echoes client input seq + recv timestamp
+    FrameTypeGamepadRumble uint8 = 15 // S→C gamepad rumble (controller index + magnitudes + duration; MODULE_GAMEPAD.md)
     FrameTypeWebcamH264   uint8 = 0x50 // C→S webcam access unit (Annex B H.264; see MODULE_WEBCAM.md)
 )
 
@@ -101,8 +102,13 @@ Offset  Size  Type     Field         Encoding
 | CursorUpdate | 11 | S→C | 22-byte | Cursor position + optional image | Unused (0) |
 | Clipboard | 12 | S→C | 22-byte | JSON clipboard push (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)) | Unused (0) |
 | InputAck | 14 | S→C | 22-byte | Client input `seq` (u32 LE) + server-recv timestamp (u64 LE) | Unused (0) |
+| GamepadRumble | 15 | S→C | 22-byte | 9-byte payload `[Index u8][WeakMag u16][StrongMag u16][DurationMs u32]` (see [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) | Unused (0) |
 | **WebcamH264** | **0x50** | **C→S** | 22-byte | Webcam access unit, Annex B H.264 (see [`MODULE_WEBCAM.md`](./MODULE_WEBCAM.md)) | Frame dims |
-| **Input events** | **0x01-0x4F** | **C→S** | 6-byte | Binary input records (see [`MODULE_INPUT.md`](./MODULE_INPUT.md)) | n/a |
+| **Input events** | **0x01-0x4F** | **C→S** | 6-byte | Binary input records (keyboard 0x10-0x1F, mouse 0x20-0x2F, touch 0x30-0x3F, gamepad 0x40-0x4F; see [`MODULE_INPUT.md`](./MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) | n/a |
+
+> **Input record total size = 6-byte shared header + per-type payload.** The
+> dispatcher Type→length table in [`MODULE_INPUT.md`](./MODULE_INPUT.md) lists
+> exact totals per record (e.g. `KeyEvent` total 9 bytes = 6 header + 3 payload).
 
 > `Resize` is **not** a separate type — a resolution change is a fresh `Config`
 > frame. `KeyframeReq` is **not** a binary type — requested via JSON text.
@@ -147,14 +153,16 @@ and human-readability aids debugging):
 - `keyframe`/`pong`/`stats`/`resize`/`set_*`/`clipboard`/`webcam_*` carry no input `seq`.
 - `resize`, `set_*`, `clipboard` (C→H), `webcam_*` are gated by authorization role
   (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); the server silently drops them from
-  `view` role clients.
+  `view` role clients. `clipboard` (C→H) is additionally gated by
+  `[clipboard] direction`: dropped when `direction = "host_to_client"` or
+  `"disabled"` (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)).
 - Parameter-change messages flow through the `stream.Params` contract (see
   [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)); the server may emit a
   new `FrameTypeConfig` if the codec or color space changed.
 
 ### Resume Path (client → server, before WebSocket upgrade)
 
-The client appends `?resume=<session_token>&last_video_seq=<N>` to the WebSocket URL to attempt resumption. If the server still has the session cached AND the token verifies:
+The client carries the session token in the `Sec-WebSocket-Protocol` subprotocol header as `bearer.<session_token>` and optionally appends `?last_video_seq=<N>` to the URL (a non-credential hint) to attempt resumption. If the server still has the session cached AND the token verifies:
 
 - Server skips the auth handshake.
 - Server sends `Config{resumed: true}` immediately.
@@ -311,7 +319,9 @@ This module is already pure (no dependencies). Move it directly to `pkg/protocol
 | Unit | Deterministic encoding (same input → same bytes) | No |
 | Unit | Buffer reuse safety | No |
 | Unit | Annex B access-unit assembly (SPS+PPS+IDR ordering, start codes) | No |
-| Unit | Client→server JSON control parsing (input seq, keyframe, pong) | No |
+| Unit | Client→server JSON control parsing (keyframe, pong, stats, resize, set_*, clipboard, webcam_*) | No |
+| Unit | Binary input record decode (every Type, truncated/oversized/unknown Type, InputBatch caps) | No |
+| Unit | Webcam frame routing (type 0x50 → webcam receiver, NOT input dispatcher) | No |
 | Benchmark | Marshal throughput (target: <1ns/op) | No |
 | Benchmark | Unmarshal throughput (target: <0.5ns/op) | No |
 | Fuzz | Random bytes → UnmarshalHeader (no panics) | No |

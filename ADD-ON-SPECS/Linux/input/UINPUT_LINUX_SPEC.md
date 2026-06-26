@@ -39,6 +39,8 @@ open("/dev/uinput", O_RDWR|O_CLOEXEC|O_NONBLOCK)
   → ioctl(UI_SET_EVBIT, EV_SYN)
   → ioctl(UI_SET_KEYBIT, KEY_*)          // every key in the HID→KEY map
   → ioctl(UI_SET_KEYBIT, BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA)
+  → ioctl(UI_SET_RELBIT, REL_X)          // REQUIRED for relative mouse (pointer-lock)
+  → ioctl(UI_SET_RELBIT, REL_Y)          // REQUIRED for relative mouse
   → ioctl(UI_SET_RELBIT, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES)
   → ioctl(UI_SET_ABSBIT, ABS_X, ABS_Y)
   → ioctl(UI_DEV_SETUP, uinput_setup{name, id})       // modern setup ioctl
@@ -70,8 +72,23 @@ device creation.
 
 `ABS_X`/`ABS_Y` ranges MUST equal the stream dimensions (the client already sent
 stream-pixel coordinates). On a resolution change the pipeline calls `Resize`,
-which destroys and recreates the device with new `UI_ABS_SETUP` ranges (the
-range cannot be changed on a live device).
+which:
+
+1. **Releases every held key/button** on the about-to-be-destroyed device
+   (`EV_KEY value=0 + SYN_REPORT` for each tracked-down code). Skipping this
+   leaves "stuck modifier" / "stuck mouse button" state in the X11/Wayland
+   session until the user physically presses+releases the key.
+2. Calls `UI_DEV_DESTROY` + close fd.
+3. Re-creates the device with new `UI_ABS_SETUP` ranges (the range cannot be
+   changed on a live device).
+
+The same "release-all" pass runs at `Close()`.
+
+### Scroll sign
+
+The wire format is W3C (positive `Dy` = scroll down). Linux `REL_WHEEL` /
+`REL_WHEEL_HI_RES` use the opposite convention (positive = scroll up). The
+add-on **negates** wire `Dx`/`Dy` before emitting `REL_HWHEEL` / `REL_WHEEL`.
 
 ### High-resolution scroll
 
@@ -84,7 +101,7 @@ detent) to preserve trackpad/pixel-precise scroll magnitude. Falls back to
 ## Build & Distribution
 
 ```bash
-go build -tags "uinput" -o viewport-rds-linux ./cmd/server
+go build -tags "uinput" -o featherdesk ./cmd/server
 ```
 
 No CGo, no external `-l` libraries. The binary needs **write access to
@@ -105,15 +122,18 @@ run as full root.
 // internal/input/uinput/uinput_linux.go  (build tag: uinput)
 
 // Probe returns true if /dev/uinput is openable for writing.
+// Side-effect-free: the FD is closed before return.
 func Probe() bool
 
 // New creates and initializes the virtual device at cfg.Width × cfg.Height.
 func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
 ```
 
-`Probe` attempts `open("/dev/uinput", O_WRONLY|O_NONBLOCK)`; failure (ENOENT /
-EACCES) means the module isn't loaded or permissions are wrong → add-on not
-selected, with a logged hint (`modprobe uinput` / input-group).
+`Probe` attempts `open("/dev/uinput", O_RDWR|O_CLOEXEC|O_NONBLOCK)` — the **same
+mode** the constructor uses, so a probe success implies a setup success. The FD
+is closed before returning. Failure (ENOENT / EACCES) means the module isn't
+loaded or permissions are wrong → add-on not selected, with a logged hint
+(`modprobe uinput` / input-group).
 
 ### Device identity
 
@@ -164,20 +184,52 @@ If absent, defaults apply. Strictly validated only when this add-on is compiled 
 
 ---
 
-## Future Extensions (same add-on)
+## Gamepad Capability
 
-Because uinput is the universal evdev injector, these extend this add-on later
-(not new add-ons), each behind its own capability registration:
+This add-on implements `input.GamepadInjector` in addition to
+`KeyMouseInjector` — uinput is the universal evdev injector and adding a
+gamepad device costs only an extra device-create call. See
+[`../../../../specs/MODULE_GAMEPAD.md`](../../../../specs/MODULE_GAMEPAD.md)
+for the cross-platform contract.
 
-- **Touch** (`TouchInjector`): `ABS_MT_SLOT` / `ABS_MT_TRACKING_ID` /
-  `ABS_MT_POSITION_X/Y` (Protocol B). Currently touch is Windows-only; Linux
-  touch is a future extension here.
-- **Gamepad**: `BTN_A..BTN_MODE`, `ABS_X/Y/RX/RY/Z/RZ`, `ABS_HAT0X/Y`. Deferred
-  with the native-client work.
+One independent uinput device is created **per controller index** so SDL/games
+enumerate them as separate gamepads. Each gamepad device registers:
+
+```
+EV_KEY: BTN_SOUTH (A), BTN_EAST (B), BTN_WEST (X), BTN_NORTH (Y),
+        BTN_TL (LB), BTN_TR (RB), BTN_TL2 (LT-as-button), BTN_TR2 (RT-as-button),
+        BTN_SELECT, BTN_START, BTN_THUMBL, BTN_THUMBR, BTN_MODE (Home)
+EV_ABS: ABS_X, ABS_Y          (left stick, -32768..32767)
+        ABS_RX, ABS_RY        (right stick)
+        ABS_Z, ABS_RZ         (analog triggers, 0..255 after downscale from u16)
+        ABS_HAT0X, ABS_HAT0Y  (D-pad as hat axis, -1/0/+1)
+EV_FF:  FF_RUMBLE             (so the kernel forwards game vibration requests)
+```
+
+Bus: `BUS_VIRTUAL`. VID/PID/Version: `0xFEA1 / 0x0002 / 1` (distinct from the
+keyboard/mouse device). Name: `FeatherDesk Virtual Gamepad N` where N is the
+controller index.
+
+### Rumble forwarding (FF_RUMBLE read loop)
+
+Games send vibration as evdev force-feedback events. The add-on enables
+`FF_RUMBLE` at device-create time, then `read()`s the same uinput fd in a
+goroutine to harvest `EV_UINPUT UI_FF_UPLOAD` / `UI_FF_ERASE` events. When the
+game submits an effect, the add-on extracts the `ff_effect.u.rumble`
+{`strong_magnitude`, `weak_magnitude`} (both `u16`) and effect duration, then
+invokes the registered rumble emitter. The pipeline forwards this to the server
+which sends `FrameTypeGamepadRumble` to the client.
+
+### Touch (future)
+
+Touch is also a future extension here (not a new add-on): same uinput device
+pattern using the MT-Protocol-B codes (`ABS_MT_SLOT` / `ABS_MT_TRACKING_ID` /
+`ABS_MT_POSITION_X/Y`). Not in v1 (touch is Windows-only via `win_touch` for now).
 
 ---
 
 ## Status
 
 📋 Specced — not yet built. Implementation order: device create + abs setup →
-key injection (keymap) → mouse abs/rel/button → hi-res scroll → Resize lifecycle.
+key injection (keymap) → mouse abs/rel/button → hi-res scroll → Resize lifecycle
+→ gamepad device + FF_RUMBLE read loop (when MODULE_GAMEPAD lands).

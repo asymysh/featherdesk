@@ -40,10 +40,27 @@ type Monitor interface {
     Changes() <-chan Content
 
     // Set writes content to the host OS clipboard (client → host direction).
+    // All-or-nothing: on partial failure (e.g. CF_UNICODETEXT succeeds but
+    // CF_HTML fails on Windows), the implementation MUST call EmptyClipboard /
+    // equivalent so the OS clipboard does not end up in a half-set state, then
+    // return the original error.
     Set(c Content) error
 
     Close() error
 }
+
+// NewMonitor constructs a per-OS Monitor. Returns ErrUnsupportedCompositor on
+// Linux running a Wayland compositor without wlr-data-control (GNOME Mutter,
+// KDE KWin), so the server can warn at startup and disable clipboard cleanly
+// instead of failing silently at first copy.
+func NewMonitor(cfg Config) (Monitor, error)
+
+// Probe reports whether the host can support clipboard sync today (correct
+// Wayland compositor, X display reachable, etc.). Server uses this at startup
+// to surface the unsupported state.
+func Probe() error
+
+var ErrUnsupportedCompositor = errors.New("clipboard: Wayland compositor lacks wlr-data-control")
 
 // Content is one clipboard payload. Exactly one of Text/HTML is the primary;
 // HTML may carry a PlainText fallback for non-HTML paste targets.
@@ -55,8 +72,9 @@ type Content struct {
 
 type Format uint8
 const (
-    FormatText Format = iota // text/plain
-    FormatHTML               // text/html (+ Text fallback)
+    FormatUnknown Format = iota // zero value; treated as invalid (sanity guard)
+    FormatText                  // text/plain
+    FormatHTML                  // text/html (+ Text fallback)
 )
 
 // Config controls clipboard behavior. Sourced from [clipboard] TOML section.
@@ -84,14 +102,49 @@ All three are **core code** under build constraints, not add-ons.
 
 | OS | Change detection | Read | Write |
 |----|------------------|------|-------|
-| **Windows** | `AddClipboardFormatListener(hwnd)` → `WM_CLIPBOARDUPDATE` (event-driven, no polling) | `OpenClipboard` + `GetClipboardData(CF_UNICODETEXT / CF_HTML)` | `OpenClipboard` + `EmptyClipboard` + `SetClipboardData` |
+| **Windows** | `AddClipboardFormatListener(hwnd)` → `WM_CLIPBOARDUPDATE` (event-driven) | `OpenClipboard` + `GetClipboardData(CF_UNICODETEXT / CF_HTML)` | `OpenClipboard` + `EmptyClipboard` + `SetClipboardData` |
 | **Linux (X11)** | `XFixesSelectSelectionInput` + `XFixesSelectionNotify` (event-driven) | `XConvertSelection` targets `UTF8_STRING` / `text/html` | own the `CLIPBOARD` selection, serve on request |
-| **Linux (Wayland)** | `wlr-data-control` / `wl-paste --watch` subprocess (compositor-dependent) | data-control offer | data-control source |
+| **Linux (Wayland)** | `wlr-data-control-unstable-v1` protocol — **wlroots-family only** | data-control offer | data-control source |
 | **macOS** | **No notification API** — poll `NSPasteboard.changeCount` every 300 ms | `NSPasteboard.string(forType:)` / `NSPasteboardTypeHTML` | `clearContents` + `setString(forType:)` |
 
 > The macOS polling interval (300 ms) matches what every macOS remote-desktop
 > tool does (Sunshine, Parsec). Polling is cheap (`changeCount` is an integer
 > compare); the actual read only happens when the count changes.
+
+### Wayland support matrix (honest)
+
+The clipboard module is **not universally supported on Wayland**. There is no
+stable `xdg-desktop-portal` clipboard interface today; the only widely-deployed
+clipboard protocol is `wlr-data-control-unstable-v1`, which is wlroots-only.
+
+| Compositor | Supported? | Reason |
+|------------|------------|--------|
+| Sway, Hyprland, river, Wayfire, Cage (wlroots) | ✅ | implements `zwlr_data_control_manager_v1` |
+| GNOME Mutter | ❌ | does not implement `wlr-data-control` |
+| KDE KWin | ❌ | does not implement `wlr-data-control` |
+| X11 (any DE) | ✅ | XFixes path is universal |
+
+On unsupported compositors `NewMonitor` returns `ErrUnsupportedCompositor`;
+the server logs a clear warning at startup and clipboard sync is silently
+disabled (no spurious errors at first copy). A future portal-based path can
+be added when one ships.
+
+### Implementation notes (the hidden costs)
+
+- **Windows.** `AddClipboardFormatListener` requires an `HWND`. The
+  implementation creates a **message-only window** (`HWND_MESSAGE` parent) and
+  runs a `GetMessage`/`TranslateMessage`/`DispatchMessage` pump on the **same
+  OS thread that created the window** — i.e. in a goroutine pinned with
+  `runtime.LockOSThread`. Shutdown posts `WM_QUIT`/`PostQuitMessage` to that
+  thread.
+- **X11.** The Monitor owns a dedicated `XOpenDisplay` connection in its own
+  goroutine. The same connection MUST stay alive to serve `XConvertSelection`
+  requests when this process owns the `CLIPBOARD` selection — if the goroutine
+  dies, every paste in every other X11 app for that selection fails.
+- **Wayland (wlr-data-control).** Use `golang.org/x/exp/...`-compatible Wayland
+  protocol bindings (or generate from XML); `wl-paste --watch` subprocess is
+  intentionally NOT used as a fallback because it relies on the same
+  `wlr-data-control` and offers no additional compositor coverage.
 
 ### Windows `CF_HTML` format quirk
 
@@ -107,8 +160,12 @@ EndFragment:0000000209
 <html><body><!--StartFragment-->…<!--EndFragment--></body></html>
 ```
 
-The core Windows clipboard code MUST parse/serialize this header (compute the
-byte offsets) when reading/writing HTML. A small dedicated serializer handles it.
+**Each offset field is exactly 10 ASCII decimal digits, zero-padded** so the
+header byte-length is fixed and the offsets can be patched in place after the
+fragment is serialized. Implementations using `%d` instead of `%010d` will
+produce a header whose own length changes when offsets grow, corrupting the
+offsets it just wrote. The core Windows clipboard code MUST use a small
+dedicated serializer for this format.
 
 ---
 
@@ -183,6 +240,14 @@ hostile HTML on the clipboard). Use a vetted Go HTML sanitizer
   **rejected** for HTML (HTML truncation produces invalid markup).
 - The cap is enforced on the host side before sending and on receipt before
   writing to the OS clipboard.
+
+### Format filter behavior
+
+`[clipboard] formats` is a subset of the supported formats. If `"html"` is
+**not** in the configured list, HTML payloads are **downgraded to their
+`Text` fallback** before being placed on the OS clipboard or sent on the wire
+(both directions). This lets operators allow plain text only without
+rejecting copies that happen to carry HTML.
 
 ---
 

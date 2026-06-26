@@ -71,7 +71,7 @@ in code. See [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 12 plug-and-play modules. Each module has its own spec
+The system is decomposed into 13 plug-and-play modules. Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
@@ -88,6 +88,7 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 10 | **Clipboard** | [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
 | 11 | **File Transfer** | [`./MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder over a dedicated `/files` connection (core) |
 | 12 | **Webcam** | [`./MODULE_WEBCAM.md`](./MODULE_WEBCAM.md) | Client→host virtual-camera contract + H.264 decode (virtual-camera sinks are add-ons per OS) |
+| 13 | **Gamepad** | [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md) | Browser Gamepad-API redirection contract + rumble (virtual-controller injection is per-OS add-ons; casual-gaming-grade only) |
 
 > **Encoder, capture, input, and webcam implementations are not core modules.**
 > Every encoder (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF,
@@ -254,16 +255,19 @@ for the full rationale, recommended combinations, and headless install flow.
 
 ### Input add-on specs
 
-Implement `input.KeyMouseInjector` / `input.TouchInjector`. The core decodes the
-binary input protocol; the add-on performs OS injection. No input add-on
-compiled in → **view-only** binary. See [`MODULE_INPUT.md`](./MODULE_INPUT.md).
+Implement `input.KeyMouseInjector` / `input.TouchInjector` / `input.GamepadInjector`.
+The core decodes the binary input protocol; the add-on performs OS injection.
+No input add-on compiled in → **view-only** binary. See
+[`MODULE_INPUT.md`](./MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md).
 
-| Add-on | Build tag | OS | Spec | Mechanism | Status |
-|--------|-----------|----|----- |-----------|--------|
-| Interception | `interception` | Windows | [`Windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/INTERCEPTION_WINDOWS_SPEC.md) | Filter driver + SendSAS (Ctrl+Alt+Del); injects below UIPI | 📋 Specced |
-| Win Touch | `win_touch` | Windows | [`Windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/WIN_TOUCH_WINDOWS_SPEC.md) | Touch Injection API; pen→touch (pressure kept) | 📋 Specced |
-| uinput | `uinput` | Linux | [`Linux/input/UINPUT_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/input/UINPUT_LINUX_SPEC.md) | Kernel `/dev/uinput`, X11+Wayland; unified (gamepad/touch-capable) | 📋 Specced |
-| CGEvent | `cgevent` | macOS | [`macOS/input/CGEVENT_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/input/CGEVENT_MACOS_SPEC.md) | `CGEventPost`; needs Accessibility permission | 📋 Specced |
+| Add-on | Build tag | OS | Spec | Capability | Status |
+|--------|-----------|----|----- |------------|--------|
+| Interception | `interception` | Windows | [`Windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/INTERCEPTION_WINDOWS_SPEC.md) | KeyMouse (filter driver + SendSAS, injects below UIPI) | 📋 Specced |
+| Win Touch | `win_touch` | Windows | [`Windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/WIN_TOUCH_WINDOWS_SPEC.md) | Touch (`InjectTouchInput`; pen→touch with pressure) | 📋 Specced |
+| ViGEmBus | `vigem` | Windows | [`Windows/input/VIGEM_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/VIGEM_WINDOWS_SPEC.md) | Gamepad (Xbox 360 virtual controller; signed driver install) | 📋 Specced |
+| uinput | `uinput` | Linux | [`Linux/input/UINPUT_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/input/UINPUT_LINUX_SPEC.md) | KeyMouse + Gamepad (kernel `/dev/uinput`, X11+Wayland) | 📋 Specced |
+| CGEvent | `cgevent` | macOS | [`macOS/input/CGEVENT_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/input/CGEVENT_MACOS_SPEC.md) | KeyMouse (`CGEventPost`; needs Accessibility) | 📋 Specced |
+| GCVirtual | `gcvirtual` | macOS | [`macOS/input/GCVIRTUAL_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/input/GCVIRTUAL_MACOS_SPEC.md) | Gamepad (GCVirtualController, macOS 14+; GameController-framework apps only) | 📋 Specced |
 
 ### Webcam add-on specs
 
@@ -289,6 +293,15 @@ When adding a new vendor-specific encoder:
 ---
 
 ## System Architecture Diagram
+
+> **Note.** The ASCII diagram below is a high-level sketch of the original
+> 5-box architecture (Capture / Encode / Audio / Server / Input). The current
+> module count is 13 — the diagram does NOT reflect Clipboard, File Transfer,
+> Webcam, Gamepad, Stream Params, Auth, or the addon registry. For the
+> authoritative list of modules see the **Module Map** above; for the addon
+> tree see **Platform & Add-On Spec Index**; for the dependency graph see
+> the **Module Dependency Graph** further down. A rewritten diagram is
+> deferred — the prose modules are the source of truth.
 
 ```
                     ┌──────────────────────────────────────────────────────────────┐
@@ -441,7 +454,9 @@ Header layout (little-endian):
 | Config | 6 | JSON handshake (codec, dims, fps, hdr, audio, cursorMode, session_token) — sent first, and on change |
 | VideoHEVC | 7 | One HEVC access unit: all NALs concatenated, Annex B (keyframe = VPS+SPS+PPS+IDR types 19-20) |
 | CursorUpdate | 11 | Cursor position + optional image (client-side cursor) |
+| Clipboard | 12 | JSON clipboard push (host → client; see [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)) |
 | InputAck | 14 | Echo of client input seq + server timestamp (RTT) |
+| GamepadRumble | 15 | 9-byte rumble payload (index + magnitudes + duration; see [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) |
 
 One WebSocket binary message = one frame (one access unit). The server NEVER splits a frame's NALs across messages.
 
@@ -796,8 +811,10 @@ featherdesk/
 │   ├── input/                 # Input injection add-ons (zero-by-default → view-only)
 │   │   ├── interception/      # Windows filter driver + SendSAS (build tag: interception)
 │   │   ├── wintouch/          # Windows Touch Injection (build tag: win_touch)
-│   │   ├── uinput/            # Linux /dev/uinput (build tag: uinput)
-│   │   └── cgevent/           # macOS CGEventPost (build tag: cgevent)
+│   │   ├── vigem/             # Windows ViGEmBus gamepad (build tag: vigem)
+│   │   ├── uinput/            # Linux /dev/uinput (kbd/mouse + gamepad) (build tag: uinput)
+│   │   ├── cgevent/           # macOS CGEventPost (build tag: cgevent)
+│   │   └── gcvirtual/         # macOS GCVirtualController gamepad (build tag: gcvirtual)
 │   ├── clipboard/             # CORE clipboard sync (per-OS files behind build constraints)
 │   │   ├── clipboard.go        # Monitor interface, Content, sanitization
 │   │   ├── clipboard_windows.go # AddClipboardFormatListener + CF_HTML
@@ -850,13 +867,13 @@ featherdesk/
 | TD-02 | ~~High~~ obsolete | `x11grab.go:113` | Recursive retry without limit | `x11grab.go` being deleted (subprocess capture rejected) |
 | TD-03 | High | `egl.go:22-25` | Static C globals prevent thread safety | Fold into `KMS_EGL_LINUX_SPEC.md` known-issues; fix during extraction |
 | TD-04 | ~~High~~ obsolete | `ffmpeg.go:240` | ForceKeyframe stores flag but never signals ffmpeg | `ffmpeg.go` being deleted (subprocess encoders rejected) |
-| TD-05 | Medium | `main.go:158` | Hardcoded 2560x1440 for input device | Deferred — Input module deferred per TECHSTACK |
+| TD-05 | Medium | `main.go:158` | Hardcoded 2560x1440 for input device | Resolved by MODULE_INPUT — Dispatcher.Resize follows stream dims, pipeline derives from capture |
 | TD-06 | Medium | `compositor.js:22+292` | Duplicate init() function (dead code) | R-CLI-01 |
 | TD-07 | ~~Medium~~ obsolete | `server.go:148+client.js` | Codec type mismatch (H264 constant for VP8 data) | VP8 rejected; mismatch source eliminated |
 | TD-08 | Medium | `audio/capture.go` | Race condition on cmd/stdout fields | Deferred — Audio module deferred per TECHSTACK |
 | TD-09 | ~~Medium~~ obsolete | `x11grab.go:165` | Hardcoded developer path `/home/aseem/...` | `x11grab.go` being deleted |
 | TD-10 | Medium | `protocol.go` | No version/sequence in wire protocol | Fixed in new protocol spec (v1, 22-byte header) |
-| TD-11 | Medium | `input/protocol.go:23-51` | All Inject errors silently discarded | Deferred — Input module deferred per TECHSTACK |
+| TD-11 | Medium | `input/protocol.go:23-51` | All Inject errors silently discarded | Resolved by MODULE_INPUT — Dispatcher.Dispatch returns errors; server logs at warn |
 | TD-12 | Low | `server.go:286-306` | Custom itoa() reimplements strconv | R-SRV-03 |
 | TD-13 | Low | `kms.go:39` | fps parameter accepted but unused | Fold into `KMS_EGL_LINUX_SPEC.md` (orchestrator handles pacing externally) |
 | TD-14 | Low | `main.go:176` | Unbounded stats slice grows forever | R-PIP-02 (rolling window) + Prometheus export |
@@ -882,7 +899,7 @@ featherdesk/
 | TD-24 | High | `server.go:164-168` | IDR cache stores only the IDR NAL; SPS/PPS (separate messages) lost → undecodable | Cache whole per-frame keyframe message (contains SPS+PPS+IDR) |
 | TD-25 | High | `main.go:295` (video timestamping in main loop) | Video + Audio stamped at consumption with wall-ms; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; AudioChunk carries timestamp (when audio is un-deferred) |
 | TD-26 | High | `main.go:249-252` | New-client handler forces keyframe + `capturer.Restart()` (respawns capture) → storm for all viewers | Serve cached IDR; conditional keyframe; never restart capture; rate-limit |
-| TD-27 | Med | `main.go:158` | Input device hardcoded 2560×1440 ≠ stream dims → cursor offset | Deferred — Input module deferred; when un-deferred: input dims = Config dims, pipeline derives from capture |
+| TD-27 | Med | `main.go:158` | Input device hardcoded 2560×1440 ≠ stream dims → cursor offset | Resolved by MODULE_INPUT — input dims = stream dims; Dispatcher.Resize on resolution change |
 | TD-28 | Med | Protocol/round-1 | Length-prefix NAL framing added client AVCC complexity for no browser benefit | Reverted to Annex B per-frame concatenation |
 | TD-29 | Med | Pipeline (round-1 spec) | Frame loop discarded W/H/timestamp; `continue` didn't skip capture; dead frameSeq | EncodedFrame struct; skip-before-capture; server owns sequence |
 | TD-30 | Med | hwencode (round-1 spec) | Duplicate `config` field; non-existent `vaCreateSurfaceFromFD` | Renamed `vaConfig`; use `vaCreateSurfaces`+ExternalBuffers |

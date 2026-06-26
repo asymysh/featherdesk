@@ -29,23 +29,68 @@ there is no macOS touch add-on (pen/touch from a client falls back to mouse).
 
 // Key: map HID usage → macOS virtual key code (kVK_*), then:
 CGEventRef e = CGEventCreateKeyboardEvent(NULL, (CGKeyCode)vk, down /*true=down*/);
-// carry modifier flags so shortcuts work:
-CGEventSetFlags(e, currentFlags); // kCGEventFlagMaskShift/Control/Alternate/Command
+CGEventSetFlags(e, currentFlags); // tracked modifier mask, see below
 CGEventPost(kCGHIDEventTap, e);
 CFRelease(e);
 
-// Absolute mouse move (stream pixel → global display point):
-CGPoint p = CGPointMake(globalX, globalY);
-CGEventRef m = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, p, kCGMouseButtonLeft);
+// Absolute mouse move (stream pixel → global display POINT, NOT pixel — see below).
+// While a button is held, post the matching *MouseDragged event so AppKit / Finder
+// register the drag (kCGEventMouseMoved is NOT a drag).
+CGEventType moveType = currentlyDown(button) ? draggedFor(button) : kCGEventMouseMoved;
+CGPoint p = CGPointMake(globalPointX, globalPointY);
+CGEventRef m = CGEventCreateMouseEvent(NULL, moveType, p, currentMouseButton());
+CGEventSetFlags(m, currentFlags); // apply modifiers to MOUSE events too (Cmd-click etc.)
 CGEventPost(kCGHIDEventTap, m); CFRelease(m);
 
-// Relative mouse (pointer lock): post mouseMoved with delta fields set:
-CGEventSetIntegerValueField(m, kCGMouseEventDeltaX, dx);
-CGEventSetIntegerValueField(m, kCGMouseEventDeltaY, dy);
+// Relative mouse (pointer lock): CGEventCreateMouseEvent ALWAYS moves the cursor
+// to its CGPoint argument — the delta fields only inform game-style consumers.
+// Fetch the current location, add the delta, clamp to display bounds.
+CGEventRef snap = CGEventCreate(NULL);
+CGPoint cur = CGEventGetLocation(snap); CFRelease(snap);
+CGPoint next = CGPointMake(clamp(cur.x + dxPoints, 0, screenPointsW - 1),
+                           clamp(cur.y + dyPoints, 0, screenPointsH - 1));
+CGEventRef m = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, next, kCGMouseButtonLeft);
+CGEventSetIntegerValueField(m, kCGMouseEventDeltaX, dxPoints);
+CGEventSetIntegerValueField(m, kCGMouseEventDeltaY, dyPoints);
+CGEventPost(kCGHIDEventTap, m); CFRelease(m);
 
-// Buttons: kCGEventLeftMouseDown/Up, RightMouse*, OtherMouse* (with button number)
-// Scroll: CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2, dy, dx)
+// Buttons: Down/Up types per index (left/right/other), and OtherMouse* needs
+// CGEventSetIntegerValueField(kCGMouseEventButtonNumber, n).
+
+// Scroll. Wire is W3C (positive Dy = scroll DOWN). macOS scroll events are
+// positive = scroll UP. NEGATE before posting.
+CGScrollEventUnit unit = (wireUnit == 0) ? kCGScrollEventUnitPixel : kCGScrollEventUnitLine;
+int32_t macDy = -wireDy, macDx = -wireDx;
+// Page mode (wireUnit==2): translate as 3 lines per page (W3C deltaMode page is rare).
+if (wireUnit == 2) { unit = kCGScrollEventUnitLine; macDy *= 3; macDx *= 3; }
+CGEventRef s = CGEventCreateScrollWheelEvent(NULL, unit, 2, macDy, macDx);
+CGEventPost(kCGHIDEventTap, s); CFRelease(s);
 ```
+
+### Coordinate space: points, not pixels
+
+`CGEventPost` consumes the **global display coordinate space measured in
+points**, NOT pixels. On a Retina Mac the framebuffer is, e.g., 2880x1800
+physical pixels but the global space is 1440x900 points. Using raw pixel
+coordinates lands the cursor at half the intended position on every Retina
+display.
+
+The pipeline must therefore advertise `cfg.Width`/`cfg.Height` in **points** to
+this add-on, and the capture pipeline must agree. Conversion if needed:
+`CGDisplayPixelsWide(displayID)` (pixels) vs `CGDisplayBounds(displayID).size.width`
+(points) gives the per-display backing-scale factor.
+
+### Modifier flag tracking & release-all
+
+Modifier state (`kCGEventFlagMaskShift`/`Control`/`Alternate`/`Command`/`Help`) is
+maintained from the decoded key stream. On every event — **including mouse
+events**, so Cmd-click / Shift-drag / Ctrl-scroll behave correctly — the
+current mask is applied via `CGEventSetFlags`.
+
+On controller disconnect or `Resize`, the dispatcher tells this add-on to
+**release all held keys + buttons**: emit a synthetic up event for each
+tracked-down key and button before tearing down. Without it, autorepeat / lost
+events leave "stuck modifier" state in the OS session.
 
 ### HID-usage → virtual key (kVK_*)
 
@@ -56,16 +101,10 @@ behave correctly.
 
 ### Coordinate mapping
 
-Stream-pixel coordinates map to the global display coordinate space. For the
-single-display target, `globalX = x`, `globalY = y` when the captured display is
-the main display at origin (0,0). `Resize` updates the width/height used for
-clamping. (Multi-monitor is out of scope.)
-
-### Modifier & flag handling
-
-`CGEventCreateKeyboardEvent` alone does not set modifier masks; the add-on
-maintains the live modifier set (which of Shift/Control/Option/Command are held)
-from the decoded key stream and applies it to every event via `CGEventSetFlags`.
+Stream-point coordinates (see "Coordinate space" above) map directly to the
+global display point space. For the single-display target with the captured
+display at origin (0,0): `globalPointX = x`, `globalPointY = y`. `Resize`
+updates the width/height used for clamping. Multi-monitor is out of scope.
 
 ---
 
@@ -95,7 +134,7 @@ Boolean trusted = AXIsProcessTrustedWithOptions(
 ## Build & Distribution
 
 ```bash
-go build -tags "cgevent" -o viewport-rds-macos ./cmd/server
+go build -tags "cgevent" -o featherdesk ./cmd/server
 ```
 
 CGo config:

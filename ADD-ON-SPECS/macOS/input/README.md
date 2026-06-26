@@ -18,13 +18,19 @@ supported injection path. The pluggable structure exists for cross-platform symm
 | Add-on | Build tag | Spec | When to use | Status |
 |--------|-----------|------|------------|--------|
 | **CGEventPost** | `cgevent` | [`./CGEVENT_MACOS_SPEC.md`](./CGEVENT_MACOS_SPEC.md) | Always — keyboard + mouse injection via the Core Graphics event API | 📋 Specced |
+| **GCVirtualController** | `gcvirtual` | [`./GCVIRTUAL_MACOS_SPEC.md`](./GCVIRTUAL_MACOS_SPEC.md) | Browser gamepad redirection (macOS 14+) — virtual controller via the Game Controller framework | 📋 Specced |
 
 ### Recommended combinations
 
-| Deployment | Input add-on | Build command |
-|------------|--------------|---------------|
+| Deployment | Input add-on(s) | Build command |
+|------------|-----------------|---------------|
 | Any interactive Mac | `cgevent` | `go build -tags "sck,vt_hw,cgevent"` |
+| Casual gaming with gamepad (macOS 14+) | `cgevent,gcvirtual` | `go build -tags "sck,vt_hw,cgevent,gcvirtual"` |
 | View-only monitoring (no injection) | *(none)* | `go build -tags "sck,vt_hw"` |
+
+`gcvirtual` only reaches apps using Apple's GameController framework. SDL2-based
+games that read IOKit HID directly do **not** see the virtual controller — this
+is a real limitation, document it in user-facing release notes.
 
 ---
 
@@ -55,9 +61,13 @@ back to mouse emulation. There's also no vendor fragmentation to add backends fo
 With a single input add-on the selection is trivial:
 
 ```
-1. cgevent compiled in AND Accessibility granted?  → register keyboard + mouse
-2. Otherwise                                         → view-only: no input capabilities
+1. cgevent compiled in AND Accessibility granted?    → register keyboard + mouse
+2. gcvirtual compiled in AND macOS 14+?              → register gamepad injection
+3. Neither?                                            → view-only: no input capabilities
 ```
+
+Each add-on is independent — `gcvirtual` doesn't require `cgevent`, though a typical
+gaming build compiles both.
 
 ---
 

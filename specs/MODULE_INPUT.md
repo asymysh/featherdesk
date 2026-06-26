@@ -71,7 +71,7 @@ Offset  Size  Type   Field     Notes
 0x10-0x1F  keyboard
 0x20-0x2F  mouse
 0x30-0x3F  touch / pen
-0x40-0x4F  gamepad (reserved — not supported until native client)
+0x40-0x4F  gamepad (see MODULE_GAMEPAD.md)
 0xF0-0xFF  vendor / experimental
 ```
 
@@ -106,10 +106,23 @@ Offset  Size  Type   Field     Notes
 
 **Scroll — Type `0x23` (11 bytes)**
 ```
-6    2   i16   Dx    horizontal (high-res)
-8    2   i16   Dy    vertical (high-res; sign matches W3C deltaY)
+6    2   i16   Dx    horizontal (high-res); positive = scroll right (W3C deltaX)
+8    2   i16   Dy    vertical   (high-res); positive = scroll down  (W3C deltaY)
 10   1   u8    Unit  0=pixel, 1=line, 2=page (W3C deltaMode)
 ```
+
+> **Wire sign convention is W3C** (positive = down/right). Every host scroll
+> API uses the **opposite** convention (positive = up/left): Windows
+> `WHEEL_DELTA` / Interception `rolling`, Linux `REL_WHEEL` / `REL_WHEEL_HI_RES`,
+> macOS `kCGScrollEventDelta*`. Every add-on MUST negate Dx and Dy before
+> injection. The add-on specs each contain a "Scroll sign" line stating this.
+
+> **Unit translation across OSes:** `Unit=0` (pixel) → use the OS's pixel/
+> high-res path. `Unit=1` (line) → typical translation is `lines * 120` for
+> Windows `WHEEL_DELTA`, `lines` for Linux `REL_WHEEL`, `lines * 10` (px) for
+> macOS line mode. `Unit=2` (page) → translate as **3 lines per page** on
+> every OS for consistency; pages are an obscure W3C deltaMode rarely emitted
+> by browsers.
 
 **TouchContact — Type `0x30` (13 bytes)** — handled only if a `TouchInjector` add-on is present
 ```
@@ -127,6 +140,29 @@ Offset  Size  Type   Field     Notes
 Amortizes per-frame overhead when the client coalesces several samples per
 animation frame (`PointerEvent.getCoalescedEvents()`). Sub-records are
 length-prefixed and self-delimiting; an unknown inner Type is skipped.
+
+### Type → length validation table
+
+The dispatcher rejects any frame whose total length doesn't match the expected
+size for its Type **before any field is read**.
+
+| Type | Total bytes | Notes |
+|------|-------------|-------|
+| `0x01` InputBatch | 8 .. 4096 (cap) | 7-byte minimum (header + Count=0); strict cap to bound work |
+| `0x10` KeyEvent | 9 | exact |
+| `0x20` MouseMoveAbs | 10 | exact |
+| `0x21` MouseMoveRel | 10 | exact |
+| `0x22` MouseButton | 8 | exact |
+| `0x23` Scroll | 11 | exact |
+| `0x30` TouchContact | 13 | exact |
+| `0x40` GamepadState | 23 | exact (see MODULE_GAMEPAD) |
+| `0x41` GamepadConnect | 9 .. 264 | 9 + IdLen ≤ 255 |
+| `0x42` GamepadDisconnect | 7 | exact |
+
+**Caps on InputBatch:** the dispatcher enforces (a) total frame ≤ 4 KiB,
+(b) `Count` ≤ 64, (c) sum of sub-record lengths matches the outer frame.
+Any violation drops the whole frame with a metric increment — never partial
+inject.
 
 ### Forward-compatibility rules
 
@@ -150,8 +186,9 @@ type Event struct {
     Seq  uint32
 
     // Keyboard
-    HidUsage uint16 // USB HID usage ID
-    Down     bool
+    HidUsage   uint16 // USB HID usage ID
+    Down       bool
+    Autorepeat bool   // Flags bit1 — informational; injectors typically ignore
 
     // Mouse
     X, Y     int    // absolute, stream-pixel space
@@ -213,6 +250,20 @@ type TouchInjector interface {
     Close() error
 }
 
+// SecureAttention is an optional capability implemented by Windows input
+// add-ons (interception) for delivering Ctrl+Alt+Del via SendSAS. The
+// dispatcher type-asserts the active KeyMouseInjector for this and routes
+// the locked CAD chord here instead of injecting three KeyEvents. On
+// platforms / add-ons that don't implement it, the chord is dropped with
+// a one-time warning.
+type SecureAttention interface {
+    // SendSAS triggers the Secure Attention Sequence (Ctrl+Alt+Del).
+    // Returns ErrSASUnavailable when the policy / privileges don't permit it.
+    SendSAS() error
+}
+
+var ErrSASUnavailable = errors.New("input: SAS unavailable (policy or privilege)")
+
 // InjectorConfig is passed to an add-on's constructor.
 type InjectorConfig struct {
     Width  int          // initial stream width (absolute-coordinate range)
@@ -233,6 +284,12 @@ type Dispatcher interface {
 
     Close() error
 }
+
+// NewDispatcher builds the routing layer from whichever injectors the
+// pipeline probed. km is required (view-only mode passes a no-op stub
+// or omits the dispatcher entirely); touch + gamepad are optional.
+func NewDispatcher(km KeyMouseInjector, touch TouchInjector, gp GamepadInjector,
+    cfg InjectorConfig) (Dispatcher, error)
 ```
 
 **Capability composition.** On Windows, the `interception` add-on provides a
@@ -265,9 +322,12 @@ Keyboard/Keypad usage IDs** (HID Usage Tables §10), not browser key strings.
   - Windows: HID → scan code (set 1), injected via the Interception driver.
   - macOS: HID → virtual key code, via `CGEventCreateKeyboardEvent`.
 
-The HID usage table is **shared core code** (`pkg/input/hid.go`), so every
-add-on translates from the same neutral source. This is the
-platform-neutral input encoding required by
+The HID usage table is **shared core code** (`internal/input/hid/hid.go`), so
+every add-on translates from the same neutral source. (Both the core dispatcher
+and all add-ons live under `internal/input/...`; the table is a single-direction
+import, no cycle. Public re-export to `pkg/input` is deferred until the native
+client lands and needs to share the table.) This is the platform-neutral input
+encoding required by
 [`FUTURE_NATIVE_CLIENT.md`](./FUTURE_NATIVE_CLIENT.md) — a future native client
 sends the same HID usages.
 
@@ -277,12 +337,44 @@ editing, numpad, lock/system, media keys, international keys.
 
 ---
 
+## Ctrl+Alt+Del Chord Detection (Windows)
+
+Ctrl+Alt+Del cannot be injected as ordinary keys — Windows intercepts the
+hardware combination in winlogon/csrss before any filter driver. The core
+dispatcher detects the chord and routes it to `SecureAttention.SendSAS()`
+on the active `KeyMouseInjector` (only `interception` implements this).
+
+**Algorithm (pinned):**
+
+1. Track modifier state: `LCtrl`, `RCtrl`, `LAlt`, `RAlt` independently.
+   AltGr is `RAlt` and counts as Alt.
+2. When a **Delete key down** record arrives, check:
+   `(LCtrl || RCtrl) && (LAlt || RAlt)`.
+3. If true, this is the SAS chord:
+   a. **Swallow** the Delete down record entirely (do not inject as a key).
+   b. Type-assert the injector for `SecureAttention`. If absent: log
+      `"CAD chord ignored: no SecureAttention capability"` once and drop.
+   c. Call `SendSAS()`. On `ErrSASUnavailable` (policy/privilege), log a clear
+      warning once and drop. **Do not** inject the chord as ordinary keys
+      as a fallback — that would deliver Ctrl+Alt+Del to the foreground app
+      instead of the system, which is misleading.
+   d. Also swallow the subsequent Delete **up** record so the OS's key state
+      tracking stays consistent.
+4. Constituent Ctrl/Alt key events are NOT swallowed — they are injected
+   normally before the Delete arrives so the user's modifiers behave correctly
+   for any non-Delete keystroke in between.
+
+This algorithm is platform-neutral; non-Windows add-ons receive Delete as a
+normal key (their `SecureAttention` is absent, step 3b drops with a log).
+
+---
+
 ## Dispatch Flow
 
 ```
 WebSocket BINARY frame (client → server)
     → byte[1] (Type):
-        0x50            → webcam (handed to protocol/webcam, NOT input)
+        0x50            → webcam.Receiver.HandleFrame (via server.SetWebcamCallback), NOT input
         0x01-0x4F       → input.Dispatcher.Dispatch(frame):
             decode record (zero-alloc, bounds-checked)
             validate: Version==1, len matches Type, ranges in bounds

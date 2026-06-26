@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Client module is the browser-based viewer and controller. It connects to the server via WebSocket (WSS), decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back to the server as JSON text frames.
+The Client module is the browser-based viewer and controller. It connects to the server via WebSocket (WSS), decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back to the server as **binary** WebSocket frames (compact 6-byte-header records — see [`MODULE_INPUT.md`](./MODULE_INPUT.md)). Rare control messages (keyframe req, resize, clipboard, webcam_start/stop, etc.) use **JSON text** frames; everything high-frequency is binary.
 
 ---
 
@@ -21,7 +21,11 @@ The client is a single-page application embedded in the server binary via `go:em
 | `renderer.js` | Canvas rendering |
 | `cursor.js` | Client-side cursor overlay (CursorUpdate) |
 | `audio.js` | AudioContext + Worklet, A/V sync |
-| `input.js` | Keyboard/mouse/wheel capture, seq, InputAck latency |
+| `input.js` | Binary input encode (DataView), HID-usage map, pointer-lock, InputAck latency |
+| `clipboard.js` | clipboardchange / copy / paste interception; host-update apply |
+| `files.js` | Drag-drop upload + Files panel for downloads (separate `/files` WS) |
+| `webcam.js` | getUserMedia + WebCodecs VideoEncoder + binary 0x50 send |
+| `gamepad.js` | rAF poll of getGamepads, diff-send 0x40, connect/disconnect 0x41/0x42, rumble apply |
 | `stats.js` | FPS/bandwidth/latency display |
 
 ---
@@ -66,7 +70,9 @@ WebSocket binary frame
         4  (AudioPCM):  playAudio(timestamp, payload)
         5  (reserved):  ignore (formerly VP8, rejected)
         11 (CursorUpdate): cursor.update(payload)
+        12 (Clipboard): clipboard.applyHostUpdate(payload)
         14 (InputAck): input.recordAck(seq, serverTs)
+        15 (GamepadRumble): gamepad.applyRumble(payload)
         2  (Ping):    send {"type":"pong","nonce":...} over text
 ```
 
@@ -198,7 +204,7 @@ function recordAck(seq /*, serverTs */) {
 - **Control** messages (keyframe, resize, set_*, clipboard, webcam_*) still use
   JSON **text** frames: `ws.send('{"type":"keyframe"}')`.
 
-### Clipboard, File Transfer, Webcam (client side)
+### Clipboard, File Transfer, Webcam, Gamepad (client side)
 
 - **Clipboard** (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)): on Chrome/Edge,
   request `clipboard-read`/`clipboard-write` and use the `clipboardchange` event
@@ -213,6 +219,15 @@ function recordAck(seq /*, serverTs */) {
   `getUserMedia(720p30)` → WebCodecs `VideoEncoder` (H.264 CBP, realtime) →
   binary frames (type 0x50) on the main socket. A camera-sharing indicator + stop
   control are shown.
+- **Gamepad** (see [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)): poll
+  `navigator.getGamepads()` on `requestAnimationFrame`, send binary
+  `GamepadState` (type 0x40) only when the snapshot changes; emit `GamepadConnect`
+  (0x41) / `GamepadDisconnect` (0x42) on the W3C events. Receive
+  `FrameTypeGamepadRumble` (type 15) and forward to
+  `gamepad.vibrationActuator.playEffect("dual-rumble", …)` (Chrome/Edge);
+  fallback to `gamepad.hapticActuators[0].pulse(...)` on Firefox; silently drop
+  on Safari (no haptic API). Honest scope: **casual gaming**; rAF polling caps
+  effective latency at ~16-26 ms.
 
 ### Status Display
 
@@ -265,17 +280,23 @@ Split `compositor.js` into modules:
 client/
 ├── index.html
 ├── main.js          // Entry point, init
-├── connection.js    // WebSocket management
+├── connection.js    // WebSocket management (main /ws)
+├── protocol.js      // 22-byte header parse + binary input encode helpers
 ├── decoder.js       // VideoDecoder setup and frame dispatch
 ├── renderer.js      // Canvas rendering
-├── audio.js         // AudioContext + Worklet
-├── input.js         // Keyboard, mouse, wheel handlers
+├── cursor.js        // Client-side cursor overlay
+├── audio.js         // AudioContext + Worklet [audio deferred]
+├── input.js         // Binary input, HID-usage map, pointer-lock
+├── clipboard.js     // clipboardchange/copy/paste interception
+├── files.js         // Drag-drop + Files panel (separate /files WS)
+├── webcam.js        // getUserMedia + WebCodecs VideoEncoder
+├── gamepad.js       // Gamepad-API poll + rumble apply
 └── stats.js         // FPS/bandwidth display
 ```
 Use ES modules (`import`/`export`) since all target browsers support them.
 
 ### R-CLI-11: Add Connection Token
-Support `?token=<auth_token>` query parameter for authentication (paired with R-SRV-01).
+Carry the session token via the WebSocket `Sec-WebSocket-Protocol` subprotocol (`new WebSocket(url, ["bearer." + sessionToken])`), NOT as a URL query parameter (which leaks to proxy logs / Referer / browser history). See [`MODULE_AUTH.md`](./MODULE_AUTH.md).
 
 ---
 

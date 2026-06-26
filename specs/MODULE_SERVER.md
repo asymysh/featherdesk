@@ -57,11 +57,28 @@ type Server interface {
     SetWebcamCallback(fn func(payload []byte, ptsNanos uint64) error)
 
     // SetClipboardCallback fires for a clipboard JSON text message (C→H).
-    SetClipboardCallback(fn func(format, text, html string) error)
+    SetClipboardCallback(fn func(content clipboard.Content) error)
+
+    // SetFileTransferService hands the file-transfer service to the server so
+    // its /files endpoint can route accepted upgrades into it. nil disables
+    // the /files endpoint (returns 404).
+    SetFileTransferService(svc filetransfer.Service)
+
+    // SetWebcamControlCallback fires for the webcam JSON control messages
+    // webcam_start / webcam_stop / webcam_reconfigure. nil if no webcam add-on.
+    // (Webcam refinement deferred — placeholder.)
+    SetWebcamControlCallback(fn func(action string, width, height, fps int) error)
 
     // SetKeyframeRequestCallback fires when a client requests a keyframe
     // (JSON {"type":"keyframe"}). The server rate-limits before invoking.
     SetKeyframeRequestCallback(fn func())
+
+    // SendGamepadRumble frames + sends a FrameTypeGamepadRumble (type 15) to
+    // the current controller client. Called by the pipeline when the active
+    // gamepad add-on receives a vibration request from the host game (see
+    // MODULE_GAMEPAD.md). No-op if [gamepad] allow_rumble = false or there
+    // is no controller connected.
+    SendGamepadRumble(index uint8, weak, strong uint16, durationMs uint32)
 }
 
 // Config holds server configuration.
@@ -136,23 +153,36 @@ proxy (Caddy, nginx, traefik) for ACME if needed.
 ### WebSocket Connection Lifecycle
 
 ```
-1. Client connects to /ws?role=control|view[&resume=<token>&last_video_seq=N]
-2. Resume path: if resume=<token> present:
+1. Client connects to /ws?role=control|view[&last_video_seq=N]
+   Token in `Sec-WebSocket-Protocol: bearer.<session_token>`. If resuming,
+   the same token is the resume key (no separate `?resume=` URL param).
+2. Resume path: if a valid bearer.<token> is present AND the SessionCache
+   has the token cached:
      a. SessionCache.Get(token) — verify token + check TTL
      b. On success: skip auth, mark client as "resumed", jump to step 7
      c. On failure: close with 4401 (client must re-auth)
 3. Auth path: Authenticator.Authenticate(r) — see MODULE_AUTH.md
+     Token is carried in `Sec-WebSocket-Protocol: bearer.<token>` for browser
+     clients, or `Authorization: Bearer <token>` for native clients.
+     URL query params (`?token=`, `?resume=`) are NOT used (they leak to logs).
      - Mode=none: accept (returns empty Identity)
-     - Mode=token: check ?token=<t> against config
-     - Mode=password: require Authorization: Bearer <session_token> (issued by POST /auth)
-     - Mode=pin: require Authorization: Bearer <session_token> (issued by POST /pair)
+     - Mode=token: validate against config-supplied/auto-generated token
+     - Mode=password: validate session_token issued by POST /auth
+     - Mode=pin: validate session_token issued by POST /pair
+     On success the server echoes `Sec-WebSocket-Protocol` in the upgrade response.
      On failure: reject with HTTP 401 (before WebSocket upgrade)
 4. Check cfg.Server.MaxClients (default 25) → reject with 503 if full
 5. websocket.Accept() (Origin checked per R-SRV-06)
 6. Issue new session token (32-byte random, base64url) → SessionCache.Put(token, sessionState)
-7. role=control? → atomic CAS on controller slot
-     - First wins; others become viewers
-     - If AllowTakeover && current controller is the same authenticated user → CAS replaces
+7. role=control? → atomic CAS on controller slot:
+     - First connection wins; subsequent role=control without `takeover=true`
+       become viewers.
+     - Explicit takeover: `?role=control&takeover=true` is honored only when
+       `AllowTakeover` is true. The displaced controller is closed with
+       `CloseControllerTakeover` (4410) so the client can show a clear "you
+       were taken over by another session" message. The new connection becomes
+       the controller.
+     - Without `takeover=true` the existing controller slot is never replaced.
 8. Store *Client in sync.Map, increment atomic counter
 9. SEND Config frame FIRST: codec, dims, fps, hdr, cursorMode,
    session_token (from step 6), session_ttl_sec, resumed=true/false
@@ -277,7 +307,7 @@ Exactly one WebSocket binary message per frame. NALs are NEVER split across mess
 ## Refactoring Directives
 
 ### R-SRV-01: Authentication (now base feature — implemented via MODULE_AUTH)
-Authentication is mandatory for all non-`none` modes. See [`MODULE_AUTH.md`](./MODULE_AUTH.md) for modes (token / password / pin / oauth-deferred), the Authenticator interface, session token issuance, and the `/auth` + `/pair` + `/logout` HTTP handlers. The server's only job here is calling `cfg.Authenticator.Authenticate(r)` at the WebSocket upgrade and routing to the appropriate session-cache lookup on `?resume=`.
+Authentication is mandatory for all non-`none` modes. See [`MODULE_AUTH.md`](./MODULE_AUTH.md) for modes (token / password / pin / oauth-deferred), the Authenticator interface, session token issuance, and the `/auth` + `/pair` + `/logout` HTTP handlers. The server's only job here is calling `cfg.Authenticator.Authenticate(r)` at the WebSocket upgrade and routing to the appropriate session-cache lookup based on the bearer subprotocol token.
 
 ### R-SRV-02: Fix Codec Type Constant (folded into interface)
 `Broadcast(codecType uint8, f EncodedFrame)` now carries the codec type; the server emits `FrameTypeVideoH264` (and future codec frame types as added). The codec is also advertised in the Config handshake so the client configures the matching decoder.

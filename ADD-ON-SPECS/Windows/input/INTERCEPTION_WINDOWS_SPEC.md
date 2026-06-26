@@ -49,8 +49,9 @@ User-mode code talks to it through `interception.dll`:
 
 InterceptionContext ctx = interception_create_context();
 
-// Pick a device to inject through. Devices 1..10 are keyboards, 11..20 mice.
-// We inject through a virtual/first available device of the right class.
+// Interception exposes 10 keyboard slots (ids 1..10) + 10 mouse slots (11..20).
+// INTERCEPTION_KEYBOARD(0) resolves to slot 1; the slot need not be bound to
+// any real device — injection works either way. The add-on always uses slot 1.
 InterceptionDevice kbd   = INTERCEPTION_KEYBOARD(0);
 InterceptionDevice mouse = INTERCEPTION_MOUSE(0);
 
@@ -67,18 +68,27 @@ ms.flags = INTERCEPTION_MOUSE_MOVE_RELATIVE;   // deltas
 ms.x = dx; ms.y = dy;
 interception_send(ctx, mouse, (InterceptionStroke*)&ms, 1);
 
-// Absolute mouse move (pointer-lock OFF): use MOVE_ABSOLUTE with 0..65535 range:
+// Absolute mouse move (pointer-lock OFF): use MOVE_ABSOLUTE with 0..65535 range.
+// Guard against degenerate dims to avoid divide-by-zero during a Resize race.
+if (width  > 1) ms.x = (int)((int64_t)x * 65535 / (width  - 1));
+if (height > 1) ms.y = (int)((int64_t)y * 65535 / (height - 1));
 ms.flags = INTERCEPTION_MOUSE_MOVE_ABSOLUTE;
-ms.x = x * 65535 / (width  - 1);
-ms.y = y * 65535 / (height - 1);
 
-// Buttons:
+// Buttons (W3C index → Interception state bitmask):
+//   0 (left)    → INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN  (0x01) / _UP (0x02)
+//   1 (middle)  → INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN (0x10) / _UP (0x20)
+//   2 (right)   → INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN  (0x04) / _UP (0x08)
+//   3 (back)    → INTERCEPTION_MOUSE_BUTTON_4_DOWN      (0x40) / _UP (0x80)
+//   4 (forward) → INTERCEPTION_MOUSE_BUTTON_5_DOWN     (0x100) / _UP (0x200)
 ms.flags = 0;
-ms.state = down ? INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN : INTERCEPTION_MOUSE_LEFT_BUTTON_UP;
+ms.state = stateBitFor(button, down);
 
-// Wheel (high-res): state = INTERCEPTION_MOUSE_WHEEL, rolling = delta (multiples of 120)
-ms.state   = INTERCEPTION_MOUSE_WHEEL;          // or _HWHEEL for horizontal
-ms.rolling = wheelDelta;
+// Wheel (multiples of 120 = one detent):
+//   IMPORTANT: NEGATE Dx/Dy from the wire — the wire is W3C (positive = down/right),
+//   Interception's rolling is hardware-style (positive = up/left). See MODULE_INPUT
+//   "Wire sign convention" note.
+ms.state   = INTERCEPTION_MOUSE_WHEEL;   // or _HWHEEL for horizontal
+ms.rolling = -wireDy;                    // for vertical; -wireDx for horizontal
 ```
 
 ### HID-usage → scan code
@@ -95,36 +105,50 @@ keys) set `INTERCEPTION_KEY_E0`.
 
 The Interception driver **cannot** generate SAS — Windows intercepts the real
 hardware Ctrl+Alt+Del in `winlogon`/`csrss` before any filter driver, and refuses
-software-synthesized SAS for security. The add-on therefore detects the
-Ctrl+Alt+Del chord from decoded input and calls `SendSAS`:
+software-synthesized SAS for security. The add-on implements the optional
+`input.SecureAttention` capability; the core dispatcher detects the CAD chord
+(see [`../../../../specs/MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md)
+"Ctrl+Alt+Del Chord Detection") and calls `SendSAS()`:
 
 ```c
-// sas.dll — requires SoftwareSASGeneration policy enabled, and the caller
-// running as a SYSTEM service (session 0) or with the right privilege.
+// sas.dll — requires SoftwareSASGeneration policy enabled AND the caller
+// running as a SYSTEM service (session 0) or with SeTcbPrivilege.
 typedef VOID (WINAPI *SendSAS_t)(BOOL AsUser);
 SendSAS_t pSendSAS = (SendSAS_t)GetProcAddress(LoadLibrary(L"sas.dll"), "SendSAS");
 pSendSAS(FALSE);  // AsUser=FALSE → from a service
 ```
 
+Implementation in Go satisfies the capability:
+
+```go
+// SendSAS implements input.SecureAttention on the interception injector.
+// Returns input.ErrSASUnavailable if the policy or privilege blocks it.
+func (i *injector) SendSAS() error
+```
+
 **Requirements:**
 - The FeatherDesk input component must run as a **Windows Service at SYSTEM**
-  level (session 0) for `SendSAS(FALSE)` to work, OR be granted
-  `SeTcbPrivilege`.
+  level (session 0) for `SendSAS(FALSE)` to work, OR be granted `SeTcbPrivilege`.
 - The Group Policy `SoftwareSASGeneration` (or registry
-  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\SoftwareSASGeneration = 1/2/3`)
-  must permit software SAS. The installer sets this.
-- If SAS cannot be sent (policy disabled), the add-on logs a clear warning and
-  the Ctrl+Alt+Del chord is dropped (it is never injected as ordinary keys).
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\SoftwareSASGeneration`)
+  must be **1 (Services)** or **3 (Both Services and Ease of Access)**. Value
+  **0** disables software SAS entirely; value **2** (Ease of Access only) does
+  NOT enable services and is treated as disabled by this add-on. The installer
+  sets the value to **3** if it is currently 0 or 2.
+- If `SendSAS` cannot run (policy / privilege), the function returns
+  `input.ErrSASUnavailable`; the dispatcher logs a one-time warning and drops
+  the chord. The constituent Ctrl/Alt keys are never injected as a fallback.
 
-The core dispatcher recognizes the L-Ctrl + L-Alt + Delete combination and routes
-it to `SendSAS` instead of three `InjectKey` calls.
+The chord detection algorithm is platform-neutral and lives in the core
+dispatcher (any `(L|R)Ctrl + (L|R)Alt + Delete` combination triggers it); only
+the `SecureAttention` implementation is Windows-specific.
 
 ---
 
 ## Build & Distribution
 
 ```bash
-go build -tags "interception" -o viewport-rds-windows.exe ./cmd/server
+go build -tags "interception" -o featherdesk.exe ./cmd/server
 ```
 
 CGo config:
@@ -158,15 +182,18 @@ The Interception **driver** is a kernel driver and must be installed once
 // internal/input/interception/interception_windows.go  (build tag: interception)
 
 // Probe returns true if interception.dll loads AND the driver is present.
+// Side-effect-free: if a context is allocated to test connectivity, it is
+// destroyed before returning.
 func Probe() bool
 
 // New creates the injector. Fails if the driver is not installed.
 func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
 ```
 
-`Probe` checks `interception_create_context()` returns non-null (driver present).
-If the driver is missing, `New` returns an actionable error telling the operator
-to run the installer.
+`Probe` checks `interception_create_context()` returns non-null (driver present),
+then **immediately calls `interception_destroy_context`** to avoid leaking a
+driver handle on repeated probes. If the driver is missing, `New` returns an
+actionable error telling the operator to run the installer.
 
 ---
 

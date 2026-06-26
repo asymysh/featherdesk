@@ -19,10 +19,13 @@ kiosks) and makes input injection's driver/permission surface opt-in, not always
 |--------|-----------|------|------------|--------|
 | **Interception** | `interception` | [`./INTERCEPTION_WINDOWS_SPEC.md`](./INTERCEPTION_WINDOWS_SPEC.md) | Keyboard + mouse injection, plus Ctrl+Alt+Del via SendSAS — the universal default | 📋 Specced |
 | **Windows Touch Injection** | `win_touch` | [`./WIN_TOUCH_WINDOWS_SPEC.md`](./WIN_TOUCH_WINDOWS_SPEC.md) | Multi-touch / tablet clients — layers the Touch Injection API on top of keyboard/mouse | 📋 Specced |
+| **ViGEmBus (Gamepad)** | `vigem` | [`./VIGEM_WINDOWS_SPEC.md`](./VIGEM_WINDOWS_SPEC.md) | Browser-driven gamepad redirection — Xbox 360 virtual controller via the ViGEmBus driver | 📋 Specced |
 
-`interception` requires a **one-time signed driver install (reboot required)**.
-`win_touch` needs **no driver** — it uses the user32 Touch Injection API
-(`InjectTouchInput`, Windows 8+) and adds no install step.
+- `interception` requires a **one-time signed driver install (reboot required)**.
+- `win_touch` needs **no driver** — it uses the user32 Touch Injection API
+  (`InjectTouchInput`, Windows 8+) and adds no install step.
+- `vigem` requires a **separate one-time signed driver install (reboot required)**.
+  Same UX as `interception` — bundle the installer, prompt on first launch.
 
 ### Recommended combinations
 
@@ -30,10 +33,11 @@ kiosks) and makes input injection's driver/permission surface opt-in, not always
 |------------|-----------------|---------------|
 | Standard remote control (keyboard + mouse) | `interception` | `go build -tags "dxgi_dd,mf_hw,openh264,interception"` |
 | Tablet / touchscreen clients | `interception,win_touch` | `go build -tags "dxgi_dd,mf_hw,openh264,interception,win_touch"` |
+| Casual gaming with gamepad | `interception,vigem` | `go build -tags "dxgi_dd,mf_hw,openh264,interception,vigem"` |
 | View-only monitoring (no injection) | *(none)* | `go build -tags "dxgi_dd,mf_hw,openh264"` |
 
-Start with `interception` for keyboard/mouse; add `win_touch` only when clients
-send touch/tablet events. The two are **complementary, not alternatives**.
+`interception` / `win_touch` / `vigem` are **complementary, not alternatives** — pick the
+combination of capabilities you need.
 
 ---
 
@@ -54,10 +58,12 @@ capabilities it provides:
 ```
 interception compiled in?  → register keyboard + mouse + SendSAS
 win_touch compiled in?     → register touch injection
-neither compiled in?       → view-only: input channel advertises no capabilities
+vigem compiled in?         → register gamepad injection (Xbox 360 emulation) + rumble forwarding
+none compiled in?          → view-only: input channel advertises no capabilities
 ```
 
-Touch events sent to a binary without `win_touch` are dropped; keyboard/mouse still flow through `interception`.
+Records for capabilities the binary doesn't have are silently dropped (touch without
+`win_touch`, gamepad without `vigem`). Other capabilities continue to flow normally.
 
 ---
 

@@ -41,10 +41,8 @@ The host creates the `FeatherDesk/Incoming` and `FeatherDesk/Outgoing`
 subfolders on first use (mode 0700). Both paths are overridable in
 `[filetransfer]` config.
 
-> **Hard boundary.** The server refuses any transfer whose resolved path escapes
-> the configured folder (path-traversal guard: reject `..`, absolute paths,
-> symlinks pointing outside the sandbox). Filenames are sanitized (strip path
-> separators, control chars, reserved Windows names).
+> **Hard boundary.** The server confines every write to the configured Incoming
+> folder. Sandbox enforcement (see "Path-traversal guard" below) is mandatory.
 
 ---
 
@@ -89,18 +87,48 @@ type Config struct {
 
 ## Wire Protocol (dedicated `/files` connection)
 
+### Authentication on the `/files` upgrade
+
+Browsers cannot set arbitrary headers on the `WebSocket()` constructor, so
+`Authorization: Bearer` does not work. The client carries the session token in
+the **`Sec-WebSocket-Protocol`** subprotocol header — a standard pattern (used
+by Kubernetes for `kubectl exec`) — as `bearer.<session_token>`:
+
+```js
+const ws = new WebSocket("wss://host:port/files", ["bearer." + sessionToken]);
+```
+
+Server verifies the token at upgrade, echoes the protocol back, and requires
+the connecting principal to be the current **controller**. Anything else is
+rejected with HTTP 401 before upgrade. The same mechanism is used on `/ws` (see
+[`MODULE_SERVER.md`](./MODULE_SERVER.md) and
+[`MODULE_AUTH.md`](./MODULE_AUTH.md)) — URL `?token=` / `?resume=` query params
+are NOT used (they leak to proxy access logs and Referer headers).
+
+### Wire framing
+
 Binary framing on its own connection, so its type space is independent of the
 media/input protocol. Every message:
 
 ```
 Offset  Size  Field        Notes
-0       2     MsgType      uint16 LE
+0       1     Version      uint8 (currently 1)
+1       1     MsgType      uint8
 2       4     TransferID   uint32 LE (0 for connection-level messages)
 6       4     Seq          uint32 LE (chunk sequence within a transfer)
 10      4     PayloadLen   uint32 LE
-14      4     CRC32        uint32 LE (CRC32C of payload; 0 if PayloadLen==0)
+14      4     CRC32C       uint32 LE (Castagnoli, poly 0x1EDC6F41; 0 if PayloadLen==0)
 18      …     Payload      PayloadLen bytes
 ```
+
+> **CRC32C, not CRC32.** Use the Castagnoli polynomial (`0x1EDC6F41`,
+> hardware-accelerated on x86 via SSE4.2 and on ARMv8). In Go,
+> `hash/crc32.MakeTable(crc32.Castagnoli)` — NOT the default `IEEEPoly` /
+> `crc32.IEEETable`. Mismatch corrupts the protocol.
+
+The 1-byte `Version` lets a future binary wire change (wider `Seq`, different
+chunk size, new compression layer) negotiate via a `HELLO` message at the start
+of the connection without forcing every reader to guess.
 
 ### Message types
 
@@ -127,9 +155,23 @@ H: ACCEPT {transfer_id:7, resume_from_seq:0}
 C: CHUNK seq=0 … CHUNK seq=N  (window-limited; ≤ 32 unacked chunks)
 H: ACK {ack_seq:k}  (cumulative; lets sender advance the window)
 C: COMPLETE {final_sha256:"…"}
-H: verify SHA-256 of received file == final_sha256
-H: COMPLETE (echo) on success, or ERROR on mismatch (file discarded)
+H: verify SHA-256 of received file == final_sha256, then os.Rename(.part → final)
+H: COMPLETE (echo) on success, or ERROR on mismatch (.part discarded)
 ```
+
+**Transfer ID ownership.** The **receiver** assigns `transfer_id` in `ACCEPT`,
+regardless of direction. On uploads the host receives → host assigns; on
+downloads the client receives → client assigns. IDs are unique per `/files`
+connection. This prevents collisions when both directions are active.
+
+**Atomic write.** The receiver writes chunks into `<IncomingDir>/<name>.part`,
+fsyncs, then `os.Rename` to the final name **only after** SHA-256 verifies. On
+SHA-256 mismatch / `CANCEL` / disconnect-without-resume the `.part` is
+`os.Remove`d so partial corrupt files never appear in the user's Downloads.
+
+**Name collisions.** If `<name>` already exists when renaming, the receiver
+appends ` (N)` before the extension (`report (1).pdf`, `report (2).pdf`, …)
+until a free name is found. This mirrors browser download behavior.
 
 Download (host → client) is the same flow with directions reversed; the client
 writes to disk via `showSaveFilePicker` (Chrome/Edge streaming) or Blob + `<a>`
@@ -143,9 +185,13 @@ writes to disk via `showSaveFilePicker` (Chrome/Edge streaming) or Blob + `<a>`
   sends cumulative `ACK` as chunks are written. This bounds memory and lets the
   receiver apply back-pressure without TCP-level stalls bleeding into the
   (separate) video connection.
-- **Resume:** on reconnect, sender issues `RESUME {transfer_id}`; receiver
-  replies `ACCEPT {resume_from_seq:k}` with the last durably-written sequence.
-  Integrity guaranteed by the final SHA-256 check.
+- **Resume (durability rule):** the receiver tracks two distinct watermarks —
+  `lastWrittenSeq` (what's hit the kernel) and `lastFsyncSeq` (what's actually
+  on disk). At every window flush it `fsync`s and updates `lastFsyncSeq`.
+  `ACK` advertises `lastFsyncSeq` (NOT `lastWrittenSeq`), and on `RESUME` the
+  receiver replies `ACCEPT {resume_from_seq: lastFsyncSeq+1}`. Without this rule
+  a crash between write and fsync would let resume skip an unwritten chunk; the
+  SHA-256 check catches it but at the cost of the whole transfer.
 
 ---
 
@@ -189,9 +235,15 @@ correct model (same as Chrome Remote Desktop / AnyDesk).
   this completely.
 - **Throughput:** WebSocket over WSS reaches ~80-95% of raw TCP. On 1 Gbps,
   expect ~100-120 MB/s; the bottleneck is JS processing + disk I/O, not framing.
-- **Rate limiting:** `[filetransfer] rate_limit_bps` optionally throttles transfer
-  so a large upload never starves the video stream's bandwidth on a constrained
-  link.
+- **Rate limiting:** `[filetransfer] rate_limit_bps` is a **single token bucket
+  shared across all in-flight transfers** (not per-transfer). This bounds total
+  bandwidth so video latency stays predictable even with `max_concurrent`
+  simultaneous transfers.
+- **Overflow on `max_concurrent`:** the server **queues** the new transfer (FIFO,
+  bounded queue depth of 64) and emits `PROGRESS {state:"queued"}` to the
+  sender. When a slot frees, the queued transfer is `ACCEPT`ed. The queue is
+  rejected (`ERROR {code:"queue_full"}`) only at the depth cap, which is a
+  hard misuse case.
 - **Compression:** off by default. Most transferred files (zip, jpg, mp4, gz) are
   already compressed. An optional per-transfer `zstd` negotiation can be added
   later for text/log/source payloads; not in v1.
@@ -215,9 +267,25 @@ rate_limit_bps = 0                    # 0 = unlimited; else throttle to protect 
 ## Security Considerations
 
 - **Opt-in default.** `enabled = false`.
-- **Fixed-folder sandbox.** Writes are confined to `incoming_dir`. Path-traversal
-  guard rejects `..`, absolute paths, and symlinks escaping the sandbox.
-  Filenames are sanitized (no separators, control chars, or reserved names).
+- **Fixed-folder sandbox.** Writes are confined to `incoming_dir`. The path-
+  traversal guard is precisely specified (substring matches on `..` are NOT
+  sufficient and produce both false positives and false negatives). The
+  receiver performs **all** of these steps before opening any file:
+  1. Reject the name if it contains a NUL byte, a control character
+     (`\x00-\x1F`), or any of `<>:"/\|?*` (Windows-invalid). Reject trailing
+     `.` or trailing space.
+  2. Reject the name if it matches a Windows reserved name **case-insensitively
+     with any extension**: `CON`, `PRN`, `AUX`, `NUL`, `COM1..COM9`, `LPT1..LPT9`,
+     plus `COM¹/COM²/COM³`, `LPT¹/LPT²/LPT³`. (`CON.txt` is also reserved.)
+  3. `joined = filepath.Clean(filepath.Join(IncomingDir, name))`.
+  4. `rel, err := filepath.Rel(IncomingDir, joined)`; reject if `err != nil`,
+     `rel == ".."`, or `strings.HasPrefix(rel, ".." + string(os.PathSeparator))`,
+     or `filepath.IsAbs(rel)`.
+  5. `os.Lstat(joined)` and every ancestor between `IncomingDir` (exclusive) and
+     `joined` (inclusive). If any is a symlink, reject — a previously planted
+     symlink would otherwise rewrite the prefix on TOCTOU.
+  6. Open with `O_CREATE|O_EXCL` (so a concurrent transfer can't race the
+     existence check) and a restrictive mode (`0600`).
 - **Controller-only.** Only the authenticated controller may transfer files;
   viewers cannot. The `/files` connection re-uses the main session's auth
   (Bearer token / session token), validated at upgrade.

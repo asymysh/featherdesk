@@ -266,6 +266,15 @@ max_concurrent = 4              # simultaneous transfers
 rate_limit_bps = 0              # 0 = unlimited; else throttle to protect video
 
 # ─────────────────────────────────────────────────────────────────────────
+# GAMEPAD (browser-driven gamepad redirection; MODULE_GAMEPAD.md)
+# ─────────────────────────────────────────────────────────────────────────
+
+[gamepad]
+enabled         = false        # opt-in. Requires a gamepad-capable input add-on (vigem, uinput, gcvirtual).
+max_controllers = 4            # 1..4 — XInput cap
+allow_rumble    = true         # forward host game vibration requests to the client
+
+# ─────────────────────────────────────────────────────────────────────────
 # WEBCAM (client→host virtual camera — requires a webcam add-on; MODULE_WEBCAM.md)
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -442,6 +451,15 @@ prompt_accessibility = true   # auto-open the Accessibility pane if not trusted
 max_contacts = 10      # 1..256 simultaneous touch points
 feedback     = "none"  # "none" | "default" | "indirect" — system touch visual
 
+[addon_module_vigem]
+# Windows ViGEmBus virtual gamepad (Xbox 360 emulation).
+driver_check    = true     # verify the ViGEmBus driver is installed at startup
+controller_type = "x360"   # v1: "x360" only (DS4 deferred)
+
+[addon_module_gcvirtual]
+# macOS GCVirtualController (Game Controller framework, macOS 14+).
+layout          = "standard"  # v1: "standard" Standard Gamepad layout only
+
 # ─────────────────────────────────────────────────────────────────────────
 # Webcam add-ons (client→host virtual camera; see MODULE_WEBCAM.md)
 # ─────────────────────────────────────────────────────────────────────────
@@ -509,6 +527,8 @@ extension_id = "ai.featherdesk.camera"
 | `filetransfer.max_concurrent` | 1–16 | startup error |
 | `webcam.fps` | 1–60 | startup error |
 | `webcam.width` / `webcam.height` | ≥ 160 | startup error |
+| `gamepad.max_controllers` | 1–4 | startup error |
+| `gamepad.enabled` requires a gamepad-capable add-on (`vigem`/`uinput`/`gcvirtual`) | else warn, gamepad records dropped | startup warning |
 | `input.enabled` requires an input add-on compiled in | else view-only (warn, not error) | startup warning |
 | Unknown key anywhere | strict mode | startup error |
 
@@ -567,6 +587,7 @@ type Config struct {
     Clipboard    ClipboardSection    `toml:"clipboard"`     // enabled, direction, max_bytes, formats
     FileTransfer FileTransferSection `toml:"filetransfer"`  // enabled, dirs, caps
     Webcam       WebcamSection       `toml:"webcam"`        // enabled, label, geometry, bitrate
+    Gamepad      GamepadSection      `toml:"gamepad"`       // enabled, max_controllers, allow_rumble
     // Audio added when that module is un-deferred.
     // Per-addon sections ([addon_module_*]) are parsed dynamically by each
     // add-on's init config reader -- they do not appear as static struct fields.

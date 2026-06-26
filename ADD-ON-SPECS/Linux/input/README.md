@@ -21,8 +21,10 @@ device-permission surface of input injection explicit per deployment.
 
 One add-on covers everything. `uinput` writes synthetic events into the kernel
 via `/dev/uinput` — below the display server, so behavior is identical on X11
-and Wayland with no compositor cooperation. It handles keyboard + mouse today
-and is the designated host for **future touch and gamepad** injection.
+and Wayland with no compositor cooperation. It handles keyboard + mouse today,
+adds **gamepad** (one extra virtual device + an `FF_RUMBLE` read loop) when
+[`MODULE_GAMEPAD`](../../../specs/MODULE_GAMEPAD.md) is enabled, and is the
+designated host for future touch injection.
 
 ### Recommended combinations
 
@@ -56,6 +58,7 @@ With a single input add-on the selection is trivial:
 
 ```
 1. uinput compiled in AND /dev/uinput writable?  → register keyboard + mouse
+                                                  (+ gamepad when [gamepad] enabled)
 2. Otherwise                                       → view-only: no input capabilities
 ```
 

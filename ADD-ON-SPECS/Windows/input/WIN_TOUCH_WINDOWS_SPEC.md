@@ -70,20 +70,40 @@ come from the same thread that called `InitializeTouchInjection`. The add-on
 pins a dedicated OS thread (`runtime.LockOSThread`) and funnels all touch frames
 to it via a channel.
 
-### Coordinate mapping
+### Coordinate mapping (DPI-aware, virtual screen)
 
-Core delivers stream-pixel coordinates; the add-on converts to **physical screen
-pixels**. With display scaling (125/150%), `GetSystemMetrics(SM_CXSCREEN/CYSCREEN)`
-returns physical pixels and touch injection expects physical pixels, so
-`screenX = streamX * SM_CXSCREEN / streamWidth`. `Resize` updates the stored
-stream dims.
+`InjectTouchInput` expects coordinates in the **virtual-screen physical-pixel
+space** — the union of all monitors' physical pixel grids. Two corrections vs
+the naive read are mandatory:
+
+1. **DPI awareness.** Before the FeatherDesk process makes any UI / metrics
+   calls, it MUST call
+   `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`
+   (or carry the equivalent application manifest). Otherwise
+   `GetSystemMetrics(SM_CXSCREEN)` returns DPI-scaled (logical) pixels and
+   touch lands at the wrong physical position on every HiDPI display.
+2. **Virtual-screen metrics, not SM_CXSCREEN.** On any multi-monitor setup
+   `SM_CXSCREEN` only covers the primary display. Use:
+   ```c
+   int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+   int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+   int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+   int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+   ```
+   The captured monitor's offset within the virtual screen
+   (`MONITORINFO.rcMonitor`) is added to the scaled stream coordinate.
+
+Single-monitor target with the primary display at virtual origin:
+`screenX = streamX * monitorPxW / streamWidth`, with `monitorPxW` taken from
+`GetMonitorInfo` on the captured `HMONITOR` (already per-monitor-V2 aware).
+`Resize` updates the stored stream dims. Multi-monitor is out of scope.
 
 ---
 
 ## Build & Distribution
 
 ```bash
-go build -tags "interception,win_touch" -o viewport-rds-windows.exe ./cmd/server
+go build -tags "interception,win_touch" -o featherdesk.exe ./cmd/server
 ```
 
 Pure `syscall` to `user32.dll` (`InitializeTouchInjection`, `InjectTouchInput`) —
@@ -97,6 +117,10 @@ no CGo, no external dependency, no driver install. Available on Windows 8+.
 // internal/input/wintouch/wintouch_windows.go  (build tag: win_touch)
 
 // Probe returns true if InitializeTouchInjection is available (Windows 8+).
+// Implemented via GetProcAddress on user32.dll — does NOT call
+// InitializeTouchInjection itself (that has the side effect of registering a
+// per-thread injection context, which would conflict with the pinned-thread
+// pattern used at construction).
 func Probe() bool
 
 // New initializes touch injection (max contacts) and starts the pinned thread.

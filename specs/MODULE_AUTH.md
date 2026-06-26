@@ -67,9 +67,17 @@ session_ttl_minutes = 60             # successful auth lifetime before re-auth
   ```
 - If `token_file` is set, token is also written to that path (mode 0600).
   This is how systemd / Docker / k8s pick it up.
-- Client authenticates via the `Authorization: Bearer <token>` header on
-  the WebSocket upgrade request. **NOT** as a URL query parameter -- query
-  params leak into proxy logs, Referer headers, and browser history.
+- Client authenticates by carrying the token in the WebSocket
+  **`Sec-WebSocket-Protocol`** subprotocol header as `bearer.<token>`
+  — set via the second argument to `new WebSocket(url, ["bearer." + token])`.
+  Browsers cannot set arbitrary headers (e.g. `Authorization`) on the
+  `WebSocket()` constructor; this subprotocol pattern is the standard
+  browser-compatible workaround (used by Kubernetes `kubectl exec`, etc.).
+  Server reads `r.Header.Get("Sec-WebSocket-Protocol")`, validates, and echoes
+  the protocol back in the upgrade response.
+- **NOT** as a URL query parameter — query params leak into proxy access logs,
+  Referer headers, and browser history.
+- Native clients (future) can use `Authorization: Bearer <token>` directly.
 - Wrong/missing token → 401 Unauthorized, no WebSocket upgrade.
 
 ### Token rotation
@@ -106,7 +114,10 @@ session_ttl_minutes = 60
   `Authorization: Basic <base64(":password")>` (username field empty).
 - Server verifies via constant-time argon2id comparison.
 - On success, server returns `{"session_token":"...","ttl_sec":3600}`.
-- Client then upgrades to WebSocket with `Authorization: Bearer <session_token>`.
+- Client then upgrades to WebSocket carrying the session token in the
+  `Sec-WebSocket-Protocol` header as `bearer.<session_token>` (browser-
+  compatible — see Mode `token` "Behavior" above). Native clients may use
+  `Authorization: Bearer` instead.
 - Failed attempts are rate-limited (5 attempts per IP per minute);
   exceeding triggers a 60-second IP block.
 - The password is NEVER sent on the WebSocket URL -- only on the HTTPS `/auth` POST.
@@ -245,7 +256,7 @@ The client stores `session_token` (in-memory; not localStorage — avoid
 persistent token leakage). On reconnect within `session_ttl_sec`:
 
 ```
-wss://host:port/ws?resume=<session_token>
+wss://host:port/ws  (with Sec-WebSocket-Protocol: bearer.<session_token>)
 ```
 
 Server-side flow:
@@ -281,9 +292,9 @@ controlled by URL query param:
 
 | URL | Role | Permissions |
 |-----|------|------------|
-| `wss://host/ws?role=control&token=...` | Controller | Send input events, request keyframes |
-| `wss://host/ws?role=view&token=...` | Viewer | Receive video/audio only |
-| `wss://host/ws?token=...` (no role) | Auto: first connection = controller, rest = viewer | — |
+| `wss://host/ws?role=control` + `bearer.<token>` subprotocol | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, `webcam_start/stop`, `/files` connect, gamepad |
+| `wss://host/ws?role=view` + `bearer.<token>` subprotocol | Viewer | Receive video/audio/cursor/clipboard-pushes only |
+| `wss://host/ws` (no role; token via subprotocol) | Auto: first connection = controller, rest = viewer | — |
 
 **One controller per session.** Subsequent `?role=control` connections become
 viewers (the first controller keeps the slot until they disconnect; if
@@ -293,8 +304,8 @@ Per-mode role permissions can be locked down via:
 
 ```toml
 [auth]
-require_auth_for_view = true     # default: false (lets unauth'd viewers connect)
-allow_takeover       = false     # default: true (any authed controller can take over)
+require_auth_for_view = true     # SECURE default (true). Set false only to allow unauth'd viewers.
+allow_takeover       = false     # SECURE default (false). Set true to permit any authed controller to seize.
 ```
 
 ---
@@ -398,7 +409,7 @@ internal/auth/
 
 | Concern | Mitigation |
 |---------|-----------|
-| Token leakage in URL | Token sent via `Authorization: Bearer` header, NEVER in URL query params |
+| Token leakage in URL | Token sent via the WebSocket `Sec-WebSocket-Protocol` subprotocol (`bearer.<token>`) for browsers, or `Authorization: Bearer` for native clients. NEVER as a URL query parameter. |
 | Replay attack on token | Session tokens are scoped to TTL -- once expired, must re-auth |
 | Brute-force password | Argon2id (memory-hard), per-IP rate limit (5/min), 60s block on exceed |
 | Brute-force PIN | 8-digit default (100M space), global max 10 attempts per window, exponential backoff after 3 |
