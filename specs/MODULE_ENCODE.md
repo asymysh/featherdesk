@@ -1,16 +1,23 @@
-# Module Spec: Encode
+# Module Spec: Encode (Software Encoder Interface Contract)
 
 ## Overview
 
-The Encode module is the **software** (CPU, in-process) video encoder. It transforms `I420Frame` input into compressed packets (H.264 or VP8) behind a unified `Encoder` interface. The zero-copy GPU path lives in a separate module ([`MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md)); this module never touches DMA-BUFs or VA-API.
+The Encode module defines the **abstract software encoder interface contract**
+that every SW encoder add-on implements. It owns no encoder implementation
+itself — concrete encoders live in their respective add-on specs:
 
-> Scope note: the legacy ffmpeg-`h264_vaapi` "hardware via subprocess" path is **removed**. Hardware encoding is exclusively the zero-copy `hwencode` module. This module is OpenH264 / libx264 / VP8 only.
+- `internal/encode/openh264/` — Cisco OpenH264 CGo (build tag `openh264`, BSD)
+- `internal/encode/x264/` — x264 via ffmpeg subprocess (build tag `x264`, GPL-isolated)
+- `internal/encode/vt/` — VideoToolbox SW (build tag `vt_sw`, macOS-only)
 
-### NAL Output Contract
+This separation keeps the module spec stable while allowing add-on
+implementations to evolve independently.
 
-- For H.264, `Encode` returns each NAL unit as a separate `[]byte` **in Annex B form (start code `00 00 00 01` retained)**. A keyframe's slice includes SPS, PPS, and the IDR NAL, in that order.
-- For VP8, `Encode` returns exactly one `[]byte` (the whole frame).
-- The server concatenates these verbatim into one per-frame message (it does NOT re-frame or strip start codes).
+> **Hardware encoders** implement a separate contract in
+> [`MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) (zero-copy GPU
+> surface input). Both contracts produce identical `EncodedFrame` output for
+> the pipeline; the dispatch decision lives in
+> [`MODULE_PIPELINE.md`](./MODULE_PIPELINE.md).
 
 ---
 
@@ -19,22 +26,23 @@ The Encode module is the **software** (CPU, in-process) video encoder. It transf
 ```go
 package encode
 
-// Encoder is the contract all video encoder backends must satisfy.
+// Encoder is the contract every software encoder add-on must satisfy.
 type Encoder interface {
-    // Encode takes a YUV I420 frame and returns encoded packets.
-    // Returns nil, nil if the frame was intentionally skipped.
+    // Encode takes a YUV I420 frame and returns encoded H.264 NAL units.
+    // Returns nil, nil if the frame was intentionally skipped (rate control).
     // Returned byte slices are freshly allocated (safe to hold across calls).
     Encode(frame *I420Frame) ([][]byte, error)
 
-    // ForceKeyframe requests that the next encoded frame be an IDR/keyframe.
+    // ForceKeyframe requests that the next encoded frame be an IDR.
     // Thread-safe. May be called from any goroutine.
     ForceKeyframe()
 
-    // Close releases all encoder resources.
+    // Close releases all encoder resources (including subprocesses for
+    // out-of-process add-ons like x264).
     Close() error
 }
 
-// I420Frame holds planar YUV 4:2:0 data.
+// I420Frame holds planar YUV 4:2:0 data — the universal input format.
 type I420Frame struct {
     Y      []byte // Luma plane (width * height bytes)
     U      []byte // Chroma-U plane (width/2 * height/2 bytes)
@@ -44,6 +52,8 @@ type I420Frame struct {
 }
 
 // EncoderConfig holds codec-agnostic encoder parameters.
+// Per-add-on tuning comes from the [addon_module_<tag>] TOML section,
+// not from this struct.
 type EncoderConfig struct {
     Width      int
     Height     int
@@ -53,173 +63,111 @@ type EncoderConfig struct {
 }
 
 // Converter handles RGBA -> I420 color space conversion.
+// Required by the software path because every SW encoder accepts I420.
+// HW encoders bypass this entirely (they consume GPU surface handles).
 type Converter interface {
     // Convert transforms RGBA pixels to I420.
     // Returned *I420Frame is reused on next call (zero-alloc steady state).
     Convert(rgba []byte) *I420Frame
     Close()
 }
-
-// EncoderBackend identifies the SOFTWARE encoder implementation.
-// (Hardware/zero-copy lives in the hwencode module, selected by the pipeline.)
-type EncoderBackend int
-
-const (
-    BackendAuto     EncoderBackend = iota // Pick best software encoder
-    BackendOpenH264                       // CGo OpenH264 (H.264 baseline, lowest latency)
-    BackendFFmpeg                         // FFmpeg subprocess (libx264, software)
-    BackendVP8                            // CGo libvpx via libavcodec
-)
-// NOTE: There is no BackendVAAPI. VA-API is the hwencode module's zero-copy path.
 ```
+
+### NAL Output Contract
+
+Every H.264 encoder returns NALs in **Annex B form** (start code `00 00 00 01`
+retained). A keyframe's slice includes SPS, PPS, and the IDR NAL, in that order.
+The server concatenates these verbatim into one per-frame WebSocket message;
+it does NOT re-frame or strip start codes.
 
 ---
 
-## Internal Architecture
+## Encoder Selection (Pipeline Owns This)
 
-### Backend: OpenH264 (Primary Software Path)
+The Encode module does **not** decide which encoder to use. That dispatch lives
+in [`MODULE_PIPELINE.md`](./MODULE_PIPELINE.md), which:
 
-```
-I420Frame → CGo → WelsCreateSVCEncoder → EncodeFrame → SFrameBSInfo → extractNALs → [][]byte
-```
+1. Reads `[encode]` config (mode = "auto" | "forced", force_addon if forced)
+2. Probes each compiled-in HW encoder add-on (NVENC, AMF, libva, MF HW, QSV, VT HW)
+3. Falls through to compiled-in SW encoder add-ons (x264 > VT SW > OpenH264)
+4. Calls the chosen add-on's constructor with `EncoderConfig`
+5. Passes the resulting `Encoder` to the frame loop
 
-**Encoding Parameters:**
-- Profile: Baseline (maximum decoder compatibility)
-- Entropy: CAVLC
-- Slices: 1 (single-slice for low latency)
-- Reference frames: 1
-- B-frames: 0
-- IDR: On-demand only (no periodic)
-- Threading: Single-threaded (frame-at-a-time model)
-- Rate control: Fixed QP (RC_OFF_MODE) or Bitrate (RC_BITRATE_MODE, max=1.5x target)
+There is **no `EncoderBackend` enum** in this module. Selection is purely
+runtime — the compiled-in set of add-ons determines what's available, and
+the TOML config decides how to choose among them.
 
-**CGo Binding:**
-- Links: `-lopenh264`
-- Memory safety: `runtime.Pinner` pins Go slices during C calls
-- NAL extraction: Pointer arithmetic over `SFrameBSInfo.sLayerInfo[].pBsBuf`
+---
 
-### Backend: FFmpeg Subprocess
+## Color Space Conversion
+
+Every SW encoder accepts I420. Capture add-ons produce BGRA (CPU readback path)
+or GPU surfaces (zero-copy HW path). For the SW path, BGRA must be converted
+to I420 via libyuv:
 
 ```
-I420 planes → stdin pipe (rawvideo) → ffmpeg process → stdout pipe (h264 Annex B) → NAL splitting → [][]byte
-```
-
-**libx264 (software only):**
-- Preset: ultrafast
-- Tune: zerolatency
-- CRF: 26
-- Profile: baseline
-- GOP: 30, no B-frames
-- Output: Annex B H.264 on stdout
-
-(There is no `h264_vaapi` mode here anymore — hardware is the zero-copy `hwencode` module.)
-
-**Process Management:**
-- Separate goroutines for stdin writes (`writeLoop`) and stdout reads (`readNALs`)
-- NAL splitting on `00 00 00 01` start codes
-- Bounded channel (cap 4) for NAL delivery
-- Auto-restart on process death
-
-### Backend: VP8 (CGo via libavcodec)
-
-```
-I420Frame → CGo → avcodec_send_frame → avcodec_receive_packet → AVPacket.data → []byte
-```
-
-**Parameters:**
-- Codec: libvpx
-- Quality: realtime, cpu-used=8 (maximum speed)
-- CRF: 26
-- GOP: 30, no B-frames
-- Threading: 1
-
-### Color Space Conversion (libyuv)
-
-```
-RGBA []byte → C.ABGRToI420() → Y/U/V planes
+RGBA []byte → C.ABGRToI420() → Y/U/V planes (Converter)
 ```
 
 - Links: `-lyuv`
-- Uses SIMD-optimized conversion (SSE2/AVX2/NEON depending on platform)
+- SIMD-optimized (SSE2/AVX2/NEON depending on platform)
 - Pre-allocated output buffers (zero per-frame allocation)
 - Color matrix: BT.601 limited range
 - Note: libyuv's "ABGR" = memory byte order R,G,B,A (matches GL_RGBA output)
 
----
-
-## Encoder Selection Logic (software only)
-
-The pipeline decides hardware-vs-software FIRST. This module is only consulted when the software path is chosen.
-
-```
-switch config.Backend:
-case Auto:      return NewH264Encoder(cfg)   // OpenH264 baseline (best latency/compat)
-case OpenH264:  return NewH264Encoder(cfg)
-case FFmpeg:    return NewFFmpegEncoder(cfg, log) // libx264 ultrafast/zerolatency
-case VP8:       return NewVP8Encoder(cfg)
-```
-
-> The current code selects VP8 as its software default and ffmpeg-vaapi for hardware. Post-refactor: software default = OpenH264 (H.264 baseline); VP8 remains available via `--encoder vp8`. The codec chosen here is advertised to clients in the Config handshake so the decoder matches.
-
-### ProbeVAAPI relocation
-`ProbeVAAPI()` moves to the pipeline's capability probing (it decides hw-vs-sw). This module no longer references VA-API.
+The Converter is **shared across all SW encoder add-ons** — it lives in
+`internal/encode/convert/` and is built unconditionally when any SW encoder
+build tag is enabled.
 
 ---
 
-## Refactoring Directives
+## Per-Add-On Implementation Pointers
 
-### R-ENC-01: Fix FFmpeg ForceKeyframe
-The current `ForceKeyframe()` stores an atomic flag but never communicates it to the ffmpeg process. Implement one of:
-- Send `SIGUSR1` to ffmpeg (custom patch required)
-- Close and reopen stdin pipe to force a new GOP
-- Use `-force_key_frames` with a control socket
-- **Recommended:** Kill and restart ffmpeg with a keyframe flush
+Each SW encoder add-on owns its own spec. The Encode module spec is the
+interface contract above; the implementation details, performance numbers,
+licensing, build tags, and CGo / subprocess details all live in the add-on
+specs.
 
-### R-ENC-02: Extract Interface to `pkg/encode`
-Move `Encoder`, `I420Frame`, `EncoderConfig`, and `Converter` to a public package. Keep implementations in `internal/encode/openh264/`, `internal/encode/ffmpeg/`, etc.
-
-### R-ENC-03: Add Backpressure to FFmpeg NAL Channel
-Replace the `default:` drop case in `readNALs` with a blocking send + timeout. Log dropped NALs as a metric for monitoring.
-
-### R-ENC-04: Graceful FFmpeg Shutdown
-Replace `os.Kill` (SIGKILL) with `SIGTERM` + wait with timeout, falling back to SIGKILL. This allows ffmpeg to flush its output buffer.
-
-### R-ENC-05: (moved) VA-API probing lives in the pipeline
-VA-API probing has moved to the pipeline's capability probe (`ProbeCapabilities`), which runs once at startup and caches the result. This module no longer probes VA-API. (Hardware capability detection details: see MODULE_HARDWARE_ENCODE R-HWE-05.)
-
-### R-ENC-06: Add Encoder Metrics
-Expose per-frame encode timing, output size, keyframe frequency, and drop count via a `Stats()` method or metrics interface.
-
-### R-ENC-07: Separate Converter from Encoder Package
-Move `Converter` to its own sub-package (`internal/encode/convert/`) to clarify the boundary between color conversion and encoding.
-
-### R-ENC-08: Thread-Safe Converter Option
-Add a `NewPooledConverter` that maintains per-goroutine buffers, or document that `Converter` is single-goroutine only.
+| Add-on | Build tag | License | Linux | macOS | Windows |
+|--------|-----------|---------|-------|-------|---------|
+| OpenH264 CGo | `openh264` | BSD-2 (Cisco) | [`ADD-ON-SPECS/Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | [`ADD-ON-SPECS/macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | [`ADD-ON-SPECS/Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) |
+| x264 subprocess | `x264` | GPL-2 (isolated) | [`ADD-ON-SPECS/Linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | [`ADD-ON-SPECS/macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | [`ADD-ON-SPECS/Windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) |
+| VideoToolbox SW | `vt_sw` | Apple system | — | [`ADD-ON-SPECS/macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | — |
 
 ---
 
-## Testing Strategy
+## What This Module Does NOT Do
 
-| Level | What | Hardware Required |
-|-------|------|-------------------|
-| Unit | EncoderConfig validation, I420Frame plane sizes | No |
-| Unit | Converter output correctness (BT.601 values) | No (needs libyuv) |
-| Unit | Converter buffer reuse guarantee | No (needs libyuv) |
-| Unit | OpenH264 create/close, NAL production, IDR detection | No (needs libopenh264) |
-| Unit | FFmpeg argument building, NAL start-code splitting | No |
-| Integration | FFmpeg software (libx264) encode (30 frames) | No (needs ffmpeg) |
-| Benchmark | Converter 1080p throughput | No (needs libyuv) |
-| Benchmark | OpenH264 320x240 encode throughput | No (needs libopenh264) |
+To avoid leaking implementation details into the interface contract, the
+Encode module deliberately excludes:
+
+- **No backend enum.** Selection is by compiled build tags + runtime config.
+- **No subprocess management.** The x264 add-on owns its ffmpeg subprocess
+  lifecycle internally; the pipeline sees only the `Encoder` interface.
+- **No codec parameters beyond `EncoderConfig`.** Per-add-on tuning (x264
+  preset, OpenH264 slice count, VT realtime flag) lives in
+  `[addon_module_<tag>]` TOML sections.
+- **No NAL parsing.** Encoders return Annex B slices; the server's keyframe
+  detection (scanning for type 5 IDR NAL) lives in MODULE_SERVER.
+- **No rate control switching.** Each add-on implements its own RC mode
+  selection from `EncoderConfig.BitrateBps` (0 = QP mode) and its own
+  TOML section.
 
 ---
 
-## Performance Targets
+## Implementation Status
 
-| Metric | OpenH264 | FFmpeg SW (libx264) | VP8 |
-|--------|----------|---------------------|-----|
-| Encode latency (1080p) | <8ms | <12ms | <10ms |
-| CPU usage (60fps) | ~25% 1 core | ~40% 1 core | ~30% 1 core |
-| Output quality (SSIM) | 0.92+ | 0.94+ | 0.91+ |
-| Startup time | <10ms | <200ms | <10ms |
+| Add-on | Status |
+|--------|--------|
+| OpenH264 CGo | ✅ Working in current code; refactor moves to `internal/encode/openh264/` under `openh264` build tag |
+| x264 subprocess | ✅ Benchmarked via ffmpeg pipe (3.3ms @ 1080p on Ryzen 9 5900X); implementation pending |
+| VideoToolbox SW | 📋 Specced; macOS native benchmarks pending |
 
-(Hardware/zero-copy latency targets are in MODULE_HARDWARE_ENCODE: <3ms @1080p, <5% CPU.)
+The old `internal/encode/{ffmpeg,vp8,vaapi}.go` files (FFmpeg subprocess
+encoder, libvpx VP8 via libavcodec, VA-API probe stub) are **rejected** and
+will be removed as part of the implementation refactor. They served the
+pre-pluggable architecture and are superseded by:
+
+- FFmpeg subprocess (in-process libavcodec) → replaced by `x264` subprocess add-on
+- VP8 → rejected codec (no demand, libavcodec dependency)
+- VA-API probe → moved into `libva` HW encoder add-on

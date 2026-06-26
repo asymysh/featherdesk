@@ -19,50 +19,53 @@
 
 ---
 
-## Pluggable Architecture (Default + Add-Ons)
+## Pluggable Architecture (Zero-by-Default)
 
-FeatherDesk is a **pluggable, add-on based project**. The core binary ships with the
-encoders/capturers needed to cover the vast majority of hardware. Vendor-specific or
-emerging-tech paths are shipped as **optional add-on binaries** that the core probes for
-at runtime.
+FeatherDesk is a **fully pluggable, add-on based project**. The default binary
+on every platform ships with **zero encoders and zero capture backends**. Every
+backend — software, hardware, or capture — is an opt-in Go build-tagged add-on.
 
-### Ship-by-default (in the core binary)
+Users compose the binary they need by combining the capture add-on(s) and
+encoder add-on(s) for their target deployment. The same source tree produces
+binaries for wildly different environments (commercial BSD-only deployments,
+home installs with GPL x264, NVIDIA-only servers, AMD workstations, headless
+Windows VMs) without `#ifdef` spaghetti or runtime configuration overhead.
 
-| Platform | Default capture | Default HW encode | Default SW encode |
-|----------|----------------|-------------------|-------------------|
-| Linux | KMS/DRM+EGL → X11grab fallback | **VA-API** (Intel/AMD/NVIDIA via wrapper) | **OpenH264 CGo** |
-| Windows | DXGI Desktop Duplication → WGC fallback | (TBD — see Windows spec) | OpenH264 CGo |
-| macOS | ScreenCaptureKit | **VideoToolbox** (HW + SW) | VideoToolbox SW |
+### Why zero-by-default
 
-The default set ships **on every binary** of FeatherDesk. Single download, works
-on every supported machine.
+- **Smallest possible default binary** — no unwanted dependencies, no
+  unused codecs in the wire format
+- **Explicit licensing per binary variant** — the binary linked against
+  GPL x264 is clearly distinct from the BSD-only OpenH264 binary
+- **Deployment flexibility** — single source tree, many target variants
+- **Simpler probing** — only compiled-in add-ons get probed at runtime
 
-### Add-on binaries (optional, vendor-specific)
+### Build matrix
 
-| Add-on | Platform | Reason for separate binary |
-|--------|----------|---------------------------|
-| NVENC direct | Linux + Windows | Unlocks NVIDIA-specific features (REF_FRAMES_INVALIDATION) unavailable via VA-API wrapper |
-| AMF on ROCm | Linux | AMD-specific tuning beyond what Mesa VA-API exposes |
-| AMF (Windows) | Windows | AMD primary HW path on Windows |
-| Quick Sync (QSV) | Windows | Intel primary HW path on Windows (oneVPL) |
+Users compose via build tags. Examples:
 
-**How add-ons work:**
-- Each add-on is a separate compiled binary or Go build-tagged variant
-- Naming convention: `viewport-rds-{platform}-{vendor}` (e.g. `viewport-rds-linux-nvenc`)
-- Same `Encoder` interface, same protocol, same client
-- Pipeline probes available encoders at startup, picks best
-- User can ship just the default binary OR the default + any subset of add-ons
+| Deployment | Build command |
+|------------|--------------|
+| Commercial Windows, generic | `go build -tags "dxgi_dd,openh264,mf_hw" ./cmd/server` |
+| Home Windows, NVIDIA | `go build -tags "dxgi_dd,x264,nvenc" ./cmd/server` |
+| Commercial Linux, AMD | `go build -tags "kms_egl,openh264,libva,amf_rocm" ./cmd/server` |
+| Apple Silicon Mac | `go build -tags "sck,vt_hw" ./cmd/server` |
 
-**Priority order at runtime probe (Linux example):**
-```
-1. NVENC add-on present?       → use NVENC direct (NVIDIA only, best NVIDIA path)
-2. AMF-ROCm add-on present?    → use AMF (AMD only, opt-in beyond Mesa VA-API)
-3. VA-API in default binary    → use VA-API (Intel/AMD always, NVIDIA via wrapper)
-4. OpenH264 SW in default      → universal fallback
-```
+See each platform's `encoders/README.md` and `capture/README.md` for
+recommended combinations.
 
-This pattern keeps the default binary minimal and dependency-light while letting power
-users opt into vendor-specific performance gains.
+### Runtime probe and selection
+
+When multiple add-ons are compiled in, the pipeline picks at runtime based
+on:
+
+1. `[capture] force_addon` / `[encode] force_addon` in TOML (forces a specific add-on)
+2. Probe order (HEVC HW > H.264 HW > x264 SW > VT SW > OpenH264 SW)
+3. Hardware presence (NVENC only fires if NVIDIA GPU present, etc.)
+4. `ErrFallbackToSoftware` from HW encoder triggers SW fallback for the session
+
+Per-add-on tuning lives in `[addon_module_<build_tag>]` TOML sections, not
+in code. See [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
 
 ---
 
