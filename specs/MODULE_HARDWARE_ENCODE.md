@@ -182,7 +182,7 @@ licensing, build tags, and CGo specifics all live in the add-on specs.
 |--------|--------|
 | NVENC (Windows) | ✅ Benchmarked: GTX 1080 Ti 4.5ms @ 1080p, Quadro RTX 4000 5.4ms |
 | AMF (Windows) | ✅ Benchmarked: RX 6800 XT 5.9ms H.264 / 5.0ms HEVC @ 1080p |
-| MF HW (Windows) | ✅ Benchmarked: 6.3-7.8ms @ 1080p depending on GPU |
+| MF HW (Windows) | ✅ Benchmarked: 6.9-7.7ms @ 1080p depending on GPU |
 | libva (Linux) | 📋 Specced; CGo bindings pending |
 | NVENC (Linux) | 📋 Specced; CGo bindings pending |
 | AMF (Linux ROCm) | 📋 Specced; CGo bindings pending |

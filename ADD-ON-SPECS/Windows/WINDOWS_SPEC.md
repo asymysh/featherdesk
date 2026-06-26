@@ -165,9 +165,9 @@ DXGI:               UNAVAILABLE (Parsec virtual display, expected)
 
 | Requirement | Details |
 |-------------|---------|
-| Minimum Windows | **Windows 10 1803** (WGC minimum; DXGI works on Windows 8+) |
+| Minimum Windows | **Windows 8 + WDDM 1.2** (DXGI DD minimum). Windows 10/11 all supported. |
 | DirectX | **DirectX 11.1+** for DXGI Desktop Duplication |
-| DXGI on RDP | ❌ DXGI DDup returns `DXGI_ERROR_UNSUPPORTED` in RDP sessions → fall back to WGC/GDI |
-| DXGI on virtual adapters | ❌ Same — Parsec, VMware, VirtualBox display adapters block DDup |
-| Admin rights | Not required for capture or encoding. DXGI DDup works as standard user. |
+| DXGI on RDP | ⚠️ DXGI DDup returns `DXGI_ERROR_UNSUPPORTED` in RDP sessions → DXGI DD add-on auto-installs IddCx virtual display driver to bypass (see [`capture/DXGI_DD_WINDOWS_SPEC.md`](./capture/DXGI_DD_WINDOWS_SPEC.md#headless-support-integrated-iddcx-virtual-display)) |
+| DXGI on virtual adapters | ⚠️ Same — Parsec, VMware, VirtualBox display adapters block DDup. IddCx VDD bypass applies the same way. |
+| Admin rights | Not required for normal capture. **One-time UAC** required for IddCx VDD install on first headless launch. |
 | Driver | Any GPU driver from the last 5 years supports DDup |

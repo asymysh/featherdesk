@@ -17,50 +17,32 @@ type Pipeline struct {
     capturer  capture.Capturer
     encoder   encode.Encoder
     hwEncoder hwencode.HardwareEncoder // nil if software path
-    converter encode.Converter         // nil if hardware path
+    converter encode.Converter         // nil if hardware path (HW encoders consume FBInfo directly)
     server    server.Server
-    audio     audio.AudioCapturer      // nil if --no-audio
-    input     input.InputHandler       // nil if uinput unavailable
     logger    *slog.Logger
     stats     *Stats
+    // (audio + input deferred — see MODULE_AUDIO / MODULE_INPUT deferred banners)
 }
 
-// PipelineConfig holds all user-facing configuration.
-type PipelineConfig struct {
-    // Server
-    Port int
-    Bind string
+// New creates a Pipeline from a parsed TOML configuration. Does NOT start anything.
+// The TOML config struct is defined in specs/MODULE_CONFIG.md — pipeline does not
+// own configuration parsing.
+func New(cfg *config.Config, logger *slog.Logger) (*Pipeline, error)
 
-    // Capture
-    FPS            int
-    CaptureBackend capture.CaptureBackend
-
-    // Encode
-    EncodeBackend  encode.EncoderBackend
-    HardwareEncode bool // Force hardware path
-    SoftwareEncode bool // Force software path
-    QP             int
-    BitrateBps     int
-
-    // Audio
-    NoAudio bool
-
-    // Logging
-    Verbose bool
-    Quiet   bool
-    LogFile string
-}
-
-// New creates a Pipeline from configuration. Does NOT start anything.
-func New(cfg PipelineConfig) (*Pipeline, error)
-
-// Start probes capabilities, initializes all modules, and begins streaming.
-// Blocks until ctx is cancelled. Returns after graceful shutdown completes.
+// Start probes compiled-in add-ons, initializes the chosen capture + encoder
+// add-ons, and begins streaming. Blocks until ctx is cancelled. Returns after
+// graceful shutdown completes.
 func (p *Pipeline) Start(ctx context.Context) error
 
 // Stats returns a snapshot of pipeline performance metrics.
 func (p *Pipeline) Stats() Stats
 ```
+
+There is **no `PipelineConfig` struct with CLI-flag-style fields**. All
+configuration is driven by the TOML schema documented in
+[`MODULE_CONFIG.md`](./MODULE_CONFIG.md). The pipeline reads top-level
+`[encode]`, `[capture]`, `[server]` sections plus per-add-on
+`[addon_module_<tag>]` sections for tuning the chosen add-on.
 
 ---
 
@@ -69,24 +51,25 @@ func (p *Pipeline) Stats() Stats
 ### Startup Sequence
 
 ```
-1. Parse config (already done by caller)
-2. Create logger (file/stderr, level from verbose/quiet)
-3. Probe system capabilities:
-   a. KMS/DRM root access?
-   b. VA-API hardware encode available?
-   c. /dev/uinput accessible?
-   d. PipeWire (pw-cat) in PATH?
-   e. ffmpeg in PATH?
-4. Select capture backend:
-   - If KMS available AND (hardware OR auto): use KMS
-   - Else if Mutter screencast available: use Screencast
-   - Else if X11 + ffmpeg: use X11Grab
-   - Else: fatal error
-5. Select encode path (exactly two tiers — no ffmpeg-vaapi):
-   - If [encode] mode != "forced=sw_addon" AND capturer implements DMABufCapturer AND hwencode.SupportsFormat:
-       → HardwareEncoder (zero-copy VA-API); set cursorMode="separate"
-   - Else: software in-process (OpenH264 for H.264); cursorMode per config
-   - If --hardware was forced but unavailable → fatal error
+1. Caller (cmd/server/main.go) loads TOML via config.Load(--config path)
+2. Caller creates *slog.Logger per [log] section (text in TTY, JSON otherwise)
+3. pipeline.New(cfg, logger) builds the Pipeline:
+   a. Probe each compiled-in capture add-on (registered at init() per build tag):
+      - Linux:   nvfbc → kms_egl
+      - macOS:   sck
+      - Windows: dxgi_dd (with optional IddCx VDD auto-install if no display)
+   b. Probe each compiled-in encoder add-on:
+      - HW: nvenc → amf/amf_rocm → libva → mf_hw → qsv → vt_hw
+      - SW: x264 (if ffmpeg present) → vt_sw → openh264
+   c. Honor [capture] force_addon / [encode] force_addon overrides:
+      - If forced and add-on not compiled in: startup error
+      - If forced and probe fails: startup error
+      - If auto: pick first available per the order above
+4. Match capture surface format to encoder input:
+   - HW encoder + DMABufCapturer with compatible FBInfo → zero-copy path
+   - SW encoder + any Capturer → CPU readback + I420 conversion path
+5. If hardware path errors with ErrFallbackToSoftware mid-session: degrade
+   to software path permanently for the rest of the session
 6. Derive stream dims from the capturer's actual resolution (NOT hardcoded).
 7. Create server (embedded client FS, session token).
 8. Create input device sized to the SAME stream dims (best-effort; warn if unavailable).
@@ -181,20 +164,26 @@ func (p *Pipeline) captureEncode() (EncodedFrame, bool, error) {
 func (p *Pipeline) runHardwareFrame() (EncodedFrame, bool, error) {
     dmaCap := p.capturer.(capture.DMABufCapturer)
     fb, err := dmaCap.NextDMABuf()
-    if err != nil { return EncodedFrame{}, false, err }
+    if err != nil {
+        if errors.Is(err, hwencode.ErrFallbackToSoftware) {
+            p.degradeToSoftware()
+            return EncodedFrame{}, false, nil
+        }
+        return EncodedFrame{}, false, err
+    }
     if fb == nil { return EncodedFrame{}, false, nil } // no new frame
-    defer unix.Close(fb.DMAFD)
 
-    nals, err := p.hwEncoder.EncodeDMABuf(hwencode.DMABufParams{
-        FD: fb.DMAFD, Width: int(fb.Width), Height: int(fb.Height),
-        Stride: int(fb.Stride), Format: fb.Format, Modifier: fb.Modifier,
-    })
-    if err != nil { return EncodedFrame{}, false, err }
-    if len(nals) == 0 { return EncodedFrame{}, false, nil } // skip frame
-    return EncodedFrame{
-        NALs: nals, Width: uint16(fb.Width), Height: uint16(fb.Height),
-        Timestamp: fb.Timestamp, Keyframe: containsKeyframe(nals, p.codecType()),
-    }, true, nil
+    // HW encoder takes ownership of the FBInfo handle and releases it after encode.
+    encoded, err := p.hwEncoder.EncodeSurface(fb)
+    if err != nil {
+        if errors.Is(err, hwencode.ErrFallbackToSoftware) {
+            p.degradeToSoftware()
+            return EncodedFrame{}, false, nil
+        }
+        return EncodedFrame{}, false, err
+    }
+    if encoded == nil { return EncodedFrame{}, false, nil } // skip frame
+    return *encoded, true, nil
 }
 
 func (p *Pipeline) runSoftwareFrame() (EncodedFrame, bool, error) {

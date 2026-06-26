@@ -283,7 +283,7 @@ When adding a new vendor-specific encoder:
 ```
 PATH B — Hardware (zero-copy, GPU-resident)  [preferred]:
     capturer.NextDMABuf() → FBInfo{fd, format, modifier, timestamp}
-    → hwEncoder.EncodeDMABuf() → NALs (GPU→CPU: ~30KB compressed only)
+    → hwEncoder.EncodeSurface(fbInfo) → EncodedFrame (GPU→CPU: ~30KB compressed only)
     Use when: VA-API zero-copy available AND capturer implements DMABufCapturer
     cursorMode = "separate" (client-side cursor)
 
@@ -312,10 +312,10 @@ type Capturer interface {
 }
 
 type Frame struct {
-    Data      []byte  // RGBA pixel buffer (width * height * 4)
-    Width     uint32
-    Height    uint32
-    Timestamp uint64  // nanosecond timestamp
+    Data      []byte  // BGRA pixel buffer (width * height * 4)
+    Width     int     // pixels
+    Height    int     // pixels
+    Timestamp uint64  // CLOCK_MONOTONIC nanoseconds
 }
 ```
 
@@ -373,7 +373,8 @@ Header layout (little-endian):
 |------|-------|---------|
 | VideoH264 | 1 | One access unit: all NALs concatenated, Annex B (keyframe = SPS+PPS+IDR) |
 | Ping | 2 | 8-byte nonce |
-| AudioPCM | 4 | Raw S16LE PCM (Width=SampleRate, Height=Channels) |
+| _(reserved)_ | 3 | Reserved for client Pong (currently routed via JSON text channel instead) |
+| AudioPCM | 4 | Raw S16LE PCM (Width=SampleRate, Height=Channels) — deferred (audio module paused) |
 | _(reserved)_ | 5 | Formerly VideoVP8 — VP8 codec rejected. Reserved; do not reuse without protocol version bump. |
 | Config | 6 | JSON handshake (codec, dims, fps, audio, cursorMode) — sent first, and on change |
 | CursorUpdate | 11 | Cursor position + optional image (client-side cursor) |
@@ -426,45 +427,69 @@ type AudioChunk struct {
 ### Contract 6: Capture -> Hardware Encode (Zero-Copy Path)
 
 ```go
-// Extended Capturer for hardware encode — exports DMA-BUF without CPU readback
+// DMABufCapturer is the cross-platform zero-copy contract. Capture add-ons that
+// can produce GPU surfaces (KMS+EGL DMA-BUF, NvFBC CUDA buffer, SCK IOSurface,
+// DXGI DD ID3D11Texture2D) implement this in addition to Capturer.
+//
+// "DMABuf" in the name is historical (the Linux DMA-BUF was the first concrete
+// implementation). On macOS the handle is an IOSurface; on Windows a D3D11
+// texture. The HW encoder add-on type-switches on the populated field of FBInfo
+// to determine which platform-specific path to take.
 type DMABufCapturer interface {
     Capturer
 
-    // NextDMABuf returns framebuffer metadata with a DMA-BUF fd.
-    // No pixels are read from GPU. Caller MUST close the returned fd.
+    // NextDMABuf returns a GPU-resident surface handle.
+    // Caller transfers ownership to a HardwareEncoder; the encoder releases
+    // the underlying handle after EncodeSurface completes.
     NextDMABuf() (*FBInfo, error)
 }
 
+// FBInfo is the platform-specific surface handle. Only the field for the
+// current OS is populated. HW encoder add-ons read the appropriate field.
 type FBInfo struct {
-    DMAFD     int    // File descriptor (caller owns, must close)
-    Width     uint32
-    Height    uint32
-    Stride    uint32
-    Format    uint32 // DRM fourcc (e.g., DRM_FORMAT_XRGB8888)
-    Modifier  uint64 // Tiling/compression modifier
-    Timestamp uint64 // CLOCK_MONOTONIC ns, stamped at capture (REQUIRED for A/V sync)
+    // Generic fields (always set)
+    Width, Height int
+    Timestamp     uint64 // CLOCK_MONOTONIC ns, stamped at capture
+
+    // Linux fields (set when platform == "linux")
+    DMAFD    int    // File descriptor (caller transfers ownership)
+    Stride   int
+    Format   uint32 // DRM fourcc (e.g., DRM_FORMAT_XRGB8888)
+    Modifier uint64 // Tiling/compression modifier
+
+    // macOS field (set when platform == "darwin")
+    IOSurface uintptr // CVPixelBufferRef (CMSampleBuffer-backed)
+
+    // Windows field (set when platform == "windows")
+    D3DTexture uintptr // ID3D11Texture2D*
 }
 
-// Hardware encoder consumes DMA-BUF directly
+// HardwareEncoder is the contract every HW encoder add-on satisfies.
+// See specs/MODULE_HARDWARE_ENCODE.md for the full contract.
 type HardwareEncoder interface {
-    Encoder
+    // EncodeSurface takes a GPU-resident surface handle and returns encoded
+    // H.264/HEVC NALs. The encoder releases the underlying handle when done.
+    // Returns ErrFallbackToSoftware if the handle cannot be imported.
+    EncodeSurface(handle *FBInfo) (*EncodedFrame, error)
 
-    // EncodeDMABuf encodes from GPU memory without CPU pixel copy.
-    // fd is NOT consumed — caller retains ownership.
-    EncodeDMABuf(params DMABufParams) ([][]byte, error)
+    // ForceKeyframe requests that the next encoded frame be an IDR.
+    ForceKeyframe()
 
-    // SupportsFormat returns true if this format can be encoded
-    // without a GPU-side conversion pass.
-    SupportsFormat(format uint32, modifier uint64) bool
+    // Codec returns the WebCodecs codec string for the Config handshake
+    // (e.g. "avc1.42E01E" for H.264 Constrained Baseline 3.0).
+    Codec() string
+
+    // Close releases all encoder resources.
+    Close() error
 }
 ```
 
-**Data Flow:** `capturer.NextDMABuf()` -> `hwEncoder.EncodeDMABuf(params)` -> pipeline wraps as `EncodedFrame` -> `server.Broadcast(codecType, EncodedFrame)`
+**Data Flow:** `capturer.NextDMABuf()` -> `hwEncoder.EncodeSurface(handle)` -> returns `*EncodedFrame` -> `server.Broadcast(codecType, *encodedFrame)`
 
 **Contract Rules:**
-- `FBInfo.DMAFD` is OWNED by caller — must be closed after `EncodeDMABuf` returns (it is synchronous; libva dups the fd internally on import)
-- If hardware encode returns `ErrFallbackToSoftware`, pipeline degrades permanently to software path
-- `SupportsFormat` is called once at startup to validate the pipeline is viable
+- `FBInfo` ownership is transferred from the capture add-on to the HW encoder add-on. The HW encoder releases the underlying platform handle after `EncodeSurface` returns.
+- If hardware encode returns `ErrFallbackToSoftware`, pipeline degrades permanently to software path for the rest of the session.
+- Codec advertisement: the HW encoder advertises its codec via `Codec()`; the pipeline matches against browser handshake preferences.
 
 ---
 

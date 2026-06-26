@@ -263,7 +263,13 @@ allow_frame_reordering = false    # false = lower latency (no B-frames)
 
 [addon_module_vt_sw]
 # VideoToolbox software fallback. Uses Apple's tuned H.264 SW encoder.
-# Same keys as vt_hw — kernel decides HW vs SW based on what GPU is available.
+# All keys are the same as [addon_module_vt_hw] — the parser treats vt_sw
+# and vt_hw as schema-aliases. (Listed here for strict-validator clarity.)
+realtime         = true
+profile          = "h264_baseline" # "h264_baseline" | "h264_main" | "h264_high"
+rate_control     = "qp"
+qp               = 26
+allow_frame_reordering = false
 
 # ─────────────────────────────────────────────────────────────────────────
 # Capture add-ons
