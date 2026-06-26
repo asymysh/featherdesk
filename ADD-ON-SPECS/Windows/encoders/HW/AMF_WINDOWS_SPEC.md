@@ -195,3 +195,20 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
+
+| Param change | AMF API | Hot? |
+|--------------|---------|------|
+| `FPS` | `SetProperty(AMF_VIDEO_ENCODER_FRAMERATE, AMFRate{num,den})` | yes |
+| `BitrateBps` | `SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, b)` | yes |
+| `QP` | `SetProperty(AMF_VIDEO_ENCODER_QP_I/QP_P, qp)` | yes |
+| `KeyframeInterval` | `SetProperty(AMF_VIDEO_ENCODER_IDR_PERIOD, ki)` | yes |
+| `Width`, `Height` | `Terminate` + `ReInit` (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 -- `AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires session-start negotiation (returns `stream.ErrRequiresRestart`) | no |
+| `NetworkRTTMs`, `PacketLossPct` | Feeds `HQVBR_QVBR` quality boost | yes |

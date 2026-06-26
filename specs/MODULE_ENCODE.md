@@ -51,15 +51,27 @@ type I420Frame struct {
     Height int
 }
 
-// EncoderConfig holds codec-agnostic encoder parameters.
-// Per-add-on tuning comes from the [addon_module_<tag>] TOML section,
-// not from this struct.
+// EncoderConfig holds the encoder's INITIAL configuration. Once running,
+// dynamic parameters (width, height, fps, bitrate, qp, HDR) flow through
+// the stream.Params contract and the ConfigurableEncoder interface (see
+// MODULE_STREAM_PARAMS.md).
+//
+// Per-add-on STATIC tuning (preset, threads, profile) comes from the
+// [addon_module_<tag>] TOML section. This struct holds only the initial
+// dynamic values needed for first-frame encoding.
 type EncoderConfig struct {
-    Width      int
-    Height     int
-    FPS        int
-    BitrateBps int // 0 = use QP mode
-    QP         int // Quantization parameter (lower = better quality)
+    InitialParams stream.Params  // initial Width/Height/FPS/BitrateBps/QP/HDR/etc.
+}
+
+// ConfigurableEncoder lets the pipeline change stream parameters at runtime
+// without restarting the encoder. Add-ons that don't implement this
+// interface are torn down + recreated whenever parameters change.
+type ConfigurableEncoder interface {
+    Encoder
+    // UpdateStreamParams applies new parameters to the running encoder.
+    // Returns stream.ErrRequiresRestart if the requested change cannot
+    // be applied mid-stream (caller will tear down and recreate).
+    UpdateStreamParams(p stream.Params) error
 }
 
 // Converter handles RGBA -> I420 color space conversion.

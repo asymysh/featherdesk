@@ -73,15 +73,19 @@ type HardwareEncoder interface {
     Close() error
 }
 
-// HWEncoderConfig holds codec-agnostic HW encoder parameters.
-// Per-add-on tuning comes from [addon_module_<tag>] TOML sections.
+// HWEncoderConfig holds the encoder's INITIAL configuration. Once running,
+// dynamic parameters flow through the stream.Params contract and the
+// ConfigurableHardwareEncoder interface (see MODULE_STREAM_PARAMS.md).
 type HWEncoderConfig struct {
-    Width      int
-    Height     int
-    FPS        int
-    BitrateBps int // 0 = use QP mode
-    QP         int // 0-51 for H.264, codec-dependent ranges otherwise
-    CodecHint  string // "h264" | "hevc" | "av1" — add-on picks the best match
+    InitialParams stream.Params  // initial Width/Height/FPS/BitrateBps/QP/HDR/etc.
+    CodecHint     string         // "h264" | "hevc" | "av1" — add-on picks the best match
+}
+
+// ConfigurableHardwareEncoder lets the pipeline change stream parameters
+// at runtime. HW encoders that don't implement this are torn down + recreated.
+type ConfigurableHardwareEncoder interface {
+    HardwareEncoder
+    UpdateStreamParams(p stream.Params) error
 }
 
 // ErrFallbackToSoftware is returned when the HW encoder cannot proceed

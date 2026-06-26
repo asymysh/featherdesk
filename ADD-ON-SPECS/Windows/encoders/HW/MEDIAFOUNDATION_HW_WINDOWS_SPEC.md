@@ -221,3 +221,19 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). MediaFoundation has mixed hot-reconfiguration support -- bitrate and quality are hot via `ICodecAPI` property store; resolution and profile require full MFT re-init.
+
+| Param change | MF API | Hot? |
+|--------------|--------|------|
+| `FPS` | `MF_MT_FRAME_RATE` on output media type -- requires `ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM)` + reinit (returns `stream.ErrRequiresRestart`) | no |
+| `BitrateBps` | `ICodecAPI::SetValue(CODECAPI_AVEncCommonMeanBitRate, b)` | yes |
+| `QP` | `ICodecAPI::SetValue(CODECAPI_AVEncCommonQuality, q)` | yes |
+| `KeyframeInterval` | `ICodecAPI::SetValue(CODECAPI_AVEncMPVGOPSize, ki)` -- behavior varies per GPU vendor MFT | vendor-dependent |
+| `Width`, `Height` | Full `IMFTransform` teardown + recreation (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 MFT subtype -- requires HEVC-capable MFT + D3D11 10-bit surfaces; full reinit (returns `stream.ErrRequiresRestart`) | no |

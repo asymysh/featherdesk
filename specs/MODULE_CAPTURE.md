@@ -81,14 +81,23 @@ type DMABufCapturer interface {
     NextDMABuf() (*FBInfo, error)
 }
 
-// CaptureConfig holds capture parameters shared across all add-ons.
-// Per-add-on tuning (DRM card path, IOSurface format, DXGI adapter index)
-// comes from [addon_module_<tag>] TOML sections.
+// CaptureConfig holds the capturer's INITIAL configuration. Once running,
+// dynamic parameters (Width, Height, FPS, HDR) flow through stream.Params
+// and ConfigurableCapturer (see MODULE_STREAM_PARAMS.md).
+//
+// Per-add-on STATIC tuning (DRM card path, IOSurface format, DXGI adapter
+// index) comes from the [addon_module_<tag>] TOML section.
 type CaptureConfig struct {
-    Width  int // 0 = use native display resolution
-    Height int // 0 = use native display resolution
-    FPS    int // Target capture rate (server may pace below this)
-    Logger *slog.Logger
+    InitialParams stream.Params  // initial Width/Height/FPS/HDR/BitDepth
+    Logger        *slog.Logger
+}
+
+// ConfigurableCapturer lets the pipeline change capture parameters at
+// runtime (resolution, HDR mode). Add-ons that don't implement this are
+// torn down + recreated whenever capture parameters change.
+type ConfigurableCapturer interface {
+    Capturer
+    UpdateStreamParams(p stream.Params) error
 }
 ```
 

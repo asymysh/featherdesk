@@ -120,24 +120,102 @@ path    = "/metrics"
 
 [capture]
 # Mode controls how the runtime picks among compiled-in capture add-ons.
-#   auto    = probe in default order (see MODULE_CAPABILITIES.md when written)
+#   auto    = probe in default order
 #   forced  = use force_addon only, fail at startup if unavailable
 mode         = "auto"
-force_addon  = ""                 # e.g. "kms_egl", "nvfbc", "sck" (restart required)
+force_addon  = ""                 # e.g. "kms_egl", "nvfbc", "sck", "dxgi_dd" (restart required)
 
 [encode]
 # Mode controls how the runtime picks among compiled-in encoder add-ons.
 #   auto    = HW HEVC → HW H.264 → SW H.264 probe order
 #   forced  = use force_addon only, fail at startup if unavailable
 mode         = "auto"
-force_addon  = ""                 # e.g. "libva", "nvenc", "vt_hw", "openh264"
-fps          = 60
-# Rate control: if bitrate_bps > 0 use bitrate target; else use fixed QP.
-bitrate_bps  = 0
-qp           = 23                 # H.264 range 0–51, lower = higher quality
+force_addon  = ""                 # e.g. "libva", "nvenc", "vt_hw", "openh264", "x264"
 
 [encode.cursor]
 mode = "separate"                 # "separate" (client renders) | "embedded" (server blends)
+
+# ─────────────────────────────────────────────────────────────────────────
+# STREAM PARAMETERS (initial defaults — runtime values may diverge)
+# See specs/MODULE_STREAM_PARAMS.md for the full contract.
+# ─────────────────────────────────────────────────────────────────────────
+
+[stream]
+# Initial resolution, frame rate, quality, color depth.
+# These are the STARTING values; the pipeline may change them at runtime
+# based on client window resize requests, network feedback (bandwidth
+# adaptation), or admin actions.
+width       = 0                  # 0 = use display native resolution
+height      = 0                  # 0 = use display native
+fps         = 60                 # target capture+encode rate
+
+# Quality mode (mutually exclusive):
+#   bitrate_bps > 0 → bandwidth-target mode (variable QP)
+#   bitrate_bps = 0 → constant-QP mode using qp
+bitrate_bps = 0
+qp          = 26                 # 0..51 for H.264 (lower = higher quality)
+
+# Keyframe behavior: 0 = on-demand only (client requests via JSON text)
+keyframe_interval = 0
+
+# Color depth / HDR
+# Setting hdr = true forces bit_depth = 10, color_space = "bt2020", and
+# switches encoder selection to HEVC Main10 (rejects H.264-only encoders).
+bit_depth   = 8                  # 8 or 10
+hdr         = false
+color_space = "bt709"            # "bt709" (SDR) | "bt2020" (HDR)
+
+[stream.adaptive]
+# Bandwidth adaptation policy. Pipeline measures network telemetry every
+# 500ms and adjusts bitrate based on packet loss + RTT.
+enabled               = true
+min_bitrate_bps       = 1_000_000    # 1 Mbps floor
+max_bitrate_bps       = 25_000_000   # 25 Mbps ceiling
+loss_threshold_pct    = 5.0          # trigger bitrate reduction
+recovery_threshold_pct = 1.0         # allow bitrate increase
+adjustment_factor     = 0.7          # multiply on degradation
+recovery_factor       = 1.1          # multiply on recovery
+
+# ─────────────────────────────────────────────────────────────────────────
+# AUTHENTICATION (see specs/MODULE_AUTH.md for full details)
+# ─────────────────────────────────────────────────────────────────────────
+
+[auth]
+# Mode: "none" (dev only) | "token" | "password" | "pin" | "oauth" (deferred)
+mode = "none"
+
+# Token mode
+token              = ""              # explicit token; "" = auto-generate at startup
+token_file         = ""              # write generated token here for ops tooling
+session_ttl_minutes = 60             # successful auth lifetime
+
+# Password mode (requires "viewport-rds hash-password" to generate)
+password_hash      = ""              # argon2id hash
+
+# PIN mode (first-launch pairing)
+pairing_window_minutes = 5
+paired_devices_file    = ""          # e.g. "/var/lib/viewport-rds/paired.json"
+
+# Authorization
+require_auth_for_view = false        # set true to require auth even for viewer role
+allow_takeover        = true         # set false to lock the controller slot
+
+# OAuth (deferred — interface defined, no implementation in v1)
+# oauth_provider     = "google" | "github" | "azure" | "okta"
+# oauth_client_id    = ""
+# oauth_client_secret = ""
+# oauth_redirect_url = ""
+# oauth_allowed_emails = []
+
+# ─────────────────────────────────────────────────────────────────────────
+# RECONNECTION (session resume across network blips)
+# ─────────────────────────────────────────────────────────────────────────
+
+[reconnect]
+enabled               = true
+cache_ttl_seconds     = 300          # how long server holds session state after disconnect
+max_concurrent_sessions = 25         # cap on active sessions
+require_same_auth     = true         # don't allow resume with different credentials
 
 # ═════════════════════════════════════════════════════════════════════════
 # ADD-ON MODULE CONFIGS
@@ -154,10 +232,16 @@ mode = "separate"                 # "separate" (client renders) | "embedded" (se
 #   - Sections for add-ons that ARE compiled in undergo strict validation —
 #     unknown keys fail parsing.
 #   - The active encoder reads ONLY its own [addon_module_*] section. The
-#     main [encode] section provides codec-agnostic settings (fps, qp,
-#     bitrate, cursor mode); the add-on section provides backend-specific
-#     tuning.
+#     main [encode] section provides selection (mode, force_addon, cursor);
+#     dynamic per-frame parameters (width, height, fps, qp, bitrate, hdr)
+#     live in [stream] and are passed via stream.Params; the add-on section
+#     provides BUILD-TIME tuning that doesn't change at runtime.
 #   - If an add-on section is absent, the add-on uses its built-in defaults.
+#
+# What lives where:
+#   [stream]              — dynamic, runtime-mutable (width, fps, bitrate, qp, hdr)
+#   [encode]              — codec-agnostic selection (mode, force_addon, cursor)
+#   [addon_module_*]      — build-time tuning specific to one add-on
 #
 # ─────────────────────────────────────────────────────────────────────────
 # SW H.264 add-ons
@@ -168,28 +252,17 @@ mode = "separate"                 # "separate" (client renders) | "embedded" (se
 threads      = 0                  # 0 = auto (min(cpu_count, 4) — saturates at 4)
                                   # Range: 1–16. Above 4 has diminishing returns.
 slice_mode   = "fixed"            # "single" (1 slice) | "fixed" (N slices = N threads)
-profile      = "baseline"         # "baseline" | "main" | "high" — Constrained Baseline default for compat
-rate_control = "qp"               # "qp" | "bitrate"
-                                  #   qp     -> uses main [encode] qp
-                                  #   bitrate-> uses main [encode] bitrate_bps with cap multiplier
-bitrate_max_multiplier = 1.5      # When rate_control = bitrate, max_bitrate = bitrate_bps * this
+profile      = "baseline"         # "baseline" | "main" | "high" — Constrained Baseline default
 
 [addon_module_x264]
 # libx264 via ffmpeg subprocess — GPL isolated. For home / personal / OSS.
 # Requires ffmpeg in PATH or bundled.
-ffmpeg_path  = ""                 # "" = auto-discover in this order:
-                                  #   1. $VIEWPORT_FFMPEG_PATH env var (if set)
-                                  #   2. ffmpeg / ffmpeg.exe in PATH
-                                  #   3. ./ffmpeg / ./ffmpeg.exe next to the binary (bundled deploy)
-                                  # Set explicitly to an absolute path to skip auto-discovery.
-threads      = 0                  # 0 = auto (cpu_count, capped at 12 for diminishing returns)
-                                  # Range: 1–32.  Sweet spot is 8 on most CPUs.
+ffmpeg_path  = ""                 # "" = auto-discover (see X264_SUBPROCESS spec)
+threads      = 0                  # 0 = auto (cpu_count, capped at 12). Sweet spot is 8.
 preset       = "ultrafast"        # "ultrafast" | "superfast" | "veryfast" | "faster" | "fast" | "medium"
                                   # ultrafast is mandatory for sub-5ms encode.
 tune         = "zerolatency"      # Hardcoded; "zerolatency" required for streaming.
-crf          = 26                 # 0–51 (lower = higher quality). 26 = balanced for screen content.
-profile      = "baseline"         # "baseline" | "main" | "high"
-                                  # ultrafast preset forces "baseline" regardless.
+profile      = "baseline"         # "baseline" | "main" | "high" — ultrafast forces baseline
 
 # ─────────────────────────────────────────────────────────────────────────
 # HW encoder add-ons (Linux)
@@ -198,38 +271,28 @@ profile      = "baseline"         # "baseline" | "main" | "high"
 [addon_module_libva]
 # Intel / AMD via Mesa, NVIDIA via vaapi wrapper.
 render_node      = "/dev/dri/renderD128"
-profile          = "h264_main"    # "h264_baseline" | "h264_main" | "h264_high" | "hevc_main"
+profile          = "h264_main"    # "h264_baseline" | "h264_main" | "h264_high" | "hevc_main" | "hevc_main10"
 low_power        = true           # Use EncSliceLP entry point on Intel (faster on Gen 9+)
-rate_control     = "cqp"          # "cqp" | "cbr" | "vbr"
-qp               = 26
-async_depth      = 1              # 1 = synchronous, higher = pipelined (latency vs throughput tradeoff)
+async_depth      = 1              # 1 = synchronous, higher = pipelined
 
 [addon_module_nvenc]
 # NVIDIA NVENC direct SDK binding. Linux + Windows.
 gpu              = 0              # NVENC GPU index (0 = first NVIDIA GPU)
 preset           = "p1"           # p1 (fastest) -- p7 (slowest/best). p1 for streaming.
 tune             = "ull"          # "ull" (ultra-low-latency) | "ll" | "hq"
-rate_control     = "cqp"          # "cqp" | "cbr" | "vbr"
-qp               = 26
 profile          = "high"         # "baseline" | "main" | "high" — high recommended for screen content
-multipass        = "disabled"     # "disabled" | "qres" | "fullres" — disabled for low latency
+multipass        = "disabled"     # "disabled" | "qres" | "fullres"
 
 [addon_module_amf]
 # AMD AMF SDK on Windows. (Linux uses [addon_module_amf_rocm] — same keys, different build tag.)
 usage            = "lowlatency"   # "transcoding" | "ultralowlatency" | "lowlatency" | "webcam"
 quality          = "speed"        # "speed" | "balanced" | "quality"
-rate_control     = "cqp"          # "cqp" | "cbr" | "vbr"
-qp_i             = 26
-qp_p             = 26
 profile          = "high"         # "baseline" | "main" | "high"
 
 [addon_module_amf_rocm]
 # AMD AMF SDK on Linux via ROCm runtime. Same keys as [addon_module_amf].
 usage            = "lowlatency"
 quality          = "speed"
-rate_control     = "cqp"
-qp_i             = 26
-qp_p             = 26
 profile          = "high"
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -239,15 +302,12 @@ profile          = "high"
 [addon_module_mf_hw]
 # MediaFoundation cross-vendor MFT routing. Picks GPU via D3D11VA device.
 adapter_index    = -1             # -1 = system default (Windows picks). 0+ = specific d3d11va adapter.
-rate_control     = "quality"      # "quality" | "cbr" | "pc_vbr" | "u_vbr" | "ld_vbr"
-quality          = 70             # 0-100 when rate_control = quality. Higher = better quality.
+rate_control_mode = "quality"     # "quality" | "cbr" | "pc_vbr" | "u_vbr" | "ld_vbr"
 
 [addon_module_qsv]
 # Intel oneVPL / QSV. Windows only (Linux uses libva).
 adapter_index    = 0
 target_usage     = 7              # 1 (quality) -- 7 (speed). 7 for streaming.
-rate_control     = "icq"          # "icq" | "cqp" | "cbr" | "vbr"
-icq_quality      = 26
 
 # ─────────────────────────────────────────────────────────────────────────
 # macOS encoder add-ons
@@ -256,9 +316,7 @@ icq_quality      = 26
 [addon_module_vt_hw]
 # VideoToolbox hardware. Apple Media Engine on Apple Silicon, VCE on Intel+AMD.
 realtime         = true           # kVTCompressionPropertyKey_RealTime
-profile          = "h264_baseline" # "h264_baseline" | "h264_main" | "h264_high" | "hevc_main"
-rate_control     = "qp"           # "qp" | "average_bitrate"
-qp               = 26
+profile          = "h264_baseline" # "h264_baseline" | "h264_main" | "h264_high" | "hevc_main" | "hevc_main10"
 allow_frame_reordering = false    # false = lower latency (no B-frames)
 
 [addon_module_vt_sw]
@@ -266,9 +324,7 @@ allow_frame_reordering = false    # false = lower latency (no B-frames)
 # All keys are the same as [addon_module_vt_hw] — the parser treats vt_sw
 # and vt_hw as schema-aliases. (Listed here for strict-validator clarity.)
 realtime         = true
-profile          = "h264_baseline" # "h264_baseline" | "h264_main" | "h264_high"
-rate_control     = "qp"
-qp               = 26
+profile          = "h264_baseline"
 allow_frame_reordering = false
 
 # ─────────────────────────────────────────────────────────────────────────

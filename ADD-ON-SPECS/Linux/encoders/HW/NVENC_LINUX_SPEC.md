@@ -301,3 +301,21 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). NVENC supports fully-hot reconfiguration via `nvEncReconfigureEncoder` for everything except resolution changes that cross the IDR boundary.
+
+| Param change | NVENC API | Hot? |
+|--------------|-----------|------|
+| `FPS` | `NV_ENC_RECONFIGURE_PARAMS.reInitEncodeParams.frameRateNum/Den` + `nvEncReconfigureEncoder` | yes |
+| `BitrateBps` | `rcParams.averageBitRate` + `nvEncReconfigureEncoder` | yes |
+| `QP` | `rcParams.constQP` (requires `rateControlMode == NV_ENC_PARAMS_RC_CONSTQP`) + `nvEncReconfigureEncoder` | yes |
+| `KeyframeInterval` | `rcParams.gopLength` + `nvEncReconfigureEncoder` | yes |
+| `Width`, `Height` | `nvEncReconfigureEncoder` with `forceIDR=1, resetEncoder=1` -- hot for downscale, requires re-init for upscale past initial `maxEncodeWidth/Height` | mostly |
+| `BitDepth=10` / `HDR=true` | Requires HEVC codec (`NV_ENC_CODEC_HEVC_GUID`) + `NV_ENC_PROFILE_HEVC_MAIN10_GUID`; pipeline negotiates codec at session start, NOT mid-stream -- returns `stream.ErrRequiresRestart` if toggled later | no |
+| `NetworkRTTMs`, `PacketLossPct` | feeds `rcParams.lowDelayKeyFrameScale` + intra-refresh wave width | yes |
+
+**Sizing hint:** allocate `maxEncodeWidth/Height` to the largest display dimension at session creation to keep resolution-downscale hot.

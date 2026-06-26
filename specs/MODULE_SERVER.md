@@ -61,11 +61,14 @@ type Server interface {
 
 // Config holds server configuration.
 type Config struct {
-    Port     int    // HTTPS port (default: 30084)
-    Bind     string // Bind address (default: "0.0.0.0")
-    Token    string // Session auth token (empty = generate random at startup)
-    Log      *slog.Logger
-    ClientFS fs.FS  // Embedded web client filesystem
+    Port           int    // HTTPS port (default: 30084)
+    Bind           string // Bind address (default: "0.0.0.0")
+    Log            *slog.Logger
+    ClientFS       fs.FS              // Embedded web client filesystem
+    Authenticator  auth.Authenticator // see MODULE_AUTH.md — gates WebSocket upgrade + /pair
+    SessionCache   SessionCache       // for reconnect (see "Resume Path" below)
+    AllowTakeover  bool               // controller takeover policy
+    StreamMgr      stream.Manager     // applies client-driven parameter changes
 }
 ```
 
@@ -81,7 +84,10 @@ type Config struct {
 |------|--------|---------|-------------|
 | `/` | GET | `http.FileServer` | Serves embedded web client (index.html + compositor.js) |
 | `/healthz` | GET | `handleHealth` | `200 {"status":"ok"}` for load balancer probes |
-| `/ws` | GET | `handleWS` | WebSocket upgrade endpoint |
+| `/ws` | GET | `handleWS` | WebSocket upgrade endpoint (gated by `auth.Authenticator`) |
+| `/auth` | POST | `handleAuth` | Login endpoint for password/token modes (returns session token) |
+| `/pair` | POST | `handlePair` | PIN-based pairing (Sunshine-style first-launch flow) — see [`MODULE_AUTH.md`](./MODULE_AUTH.md) |
+| `/logout` | POST | `handleLogout` | Revoke a session token immediately |
 
 > Operational metrics live on a **separate Prometheus endpoint** (port 9090
 > by default, plain HTTP, no auth) per the `[metrics]` section of
@@ -113,30 +119,71 @@ proxy (Caddy, nginx, traefik) for ACME if needed.
 ### WebSocket Connection Lifecycle
 
 ```
-1. Client connects to /ws?role=control|view&token=<t>
-2. Validate token (R-SRV-01) → reject 401 if invalid
-3. Check maxClients (25) → reject with 503 if full
-4. websocket.Accept() (Origin checked per R-SRV-06)
-5. role=control? → atomic CAS on controller slot (first wins; others become viewers)
-6. Store *Client in sync.Map, increment atomic counter
-7. SEND Config frame FIRST (codec, dims, fps, audio, cursorMode) ← decoder setup
-8. Send cached keyframe message if available (Config → keyframe → live)
-9. If NO keyframe cached: invoke onNewClient → pipeline forces keyframe on active encoder
-   If keyframe cached: do NOT force (avoid storm)
-10. Block in ReadLoop():
+1. Client connects to /ws?role=control|view[&resume=<token>&last_video_seq=N]
+2. Resume path: if resume=<token> present:
+     a. SessionCache.Get(token) — verify token + check TTL
+     b. On success: skip auth, mark client as "resumed", jump to step 7
+     c. On failure: close with 4401 (client must re-auth)
+3. Auth path: Authenticator.Authenticate(r) — see MODULE_AUTH.md
+     - Mode=none: accept
+     - Mode=token: check ?token=<t> against config
+     - Mode=password: require Authorization: Bearer <session_token> issued by /auth
+     - Mode=pin: require Authorization: Bearer <session_token> issued by /pair
+     On failure: reject 401
+4. Check maxClients (25) → reject with 503 if full
+5. websocket.Accept() (Origin checked per R-SRV-06)
+6. Issue new session token (uuid v4) → SessionCache.Put(token, sessionState, ttl)
+7. role=control? → atomic CAS on controller slot
+     - First wins; others become viewers
+     - If AllowTakeover && current controller is the same authenticated user → CAS replaces
+8. Store *Client in sync.Map, increment atomic counter
+9. SEND Config frame FIRST: codec, dims, fps, hdr, cursorMode,
+   session_token (from step 6), session_ttl_sec, resumed=true/false
+10. Send cached keyframe message if available (Config → keyframe → live)
+11. If NO keyframe cached: invoke onNewClient → pipeline forces keyframe on active encoder
+    If keyframe cached: do NOT force (avoid storm)
+12. Block in ReadLoop():
     - JSON text → dispatch:
-        input events → onInput callback (controller only)
+        input events       → onInput callback (controller only)
+        resize/set_*       → stream.Manager (controller only; viewers ignored)
         {"type":"keyframe"} → rate-limited keyframe-request callback
-        {"type":"pong"} → record RTT
-        {"type":"stats"} → record client telemetry
+        {"type":"pong"}    → record RTT
+        {"type":"stats"}   → record client telemetry
     - Binary messages from client → protocol violation, ignore/log
-11. On disconnect:
+13. On disconnect:
     - Remove from sync.Map; decrement counter
     - Release controller slot (if was controller)
+    - Update SessionCache entry: keep state cached for reconnect.cache_ttl_seconds
     - conn.CloseNow()
 ```
 
 **Never** restart the capturer on connect (the original `capturer.Restart()` is removed — it disrupted all viewers).
+
+### Session Cache (Reconnect)
+
+```go
+// SessionCache stores ephemeral per-session state across short disconnects.
+// Implementation lives in internal/server; interface in pkg/server.
+type SessionCache interface {
+    // Put stores session state under the given token with the configured TTL.
+    Put(token string, st SessionState)
+    // Get fetches state and refreshes TTL on hit; returns ok=false on miss/expiry.
+    Get(token string) (st SessionState, ok bool)
+    // Delete revokes a token (e.g., /logout).
+    Delete(token string)
+}
+
+type SessionState struct {
+    UserID      string         // identifier from auth (empty for token mode)
+    Role        string         // "control" | "view"
+    CreatedAt   time.Time
+    ExpiresAt   time.Time      // refreshed on each WebSocket connect
+    LastVideoSeq uint32        // for client-driven catch-up (currently informational)
+    LastParams  stream.Params  // snapshot of resolution/bitrate/HDR at disconnect
+}
+```
+
+TTL comes from `[reconnect] cache_ttl_seconds` (default 300s). The cache is in-memory only — restarting the binary invalidates all sessions. See [`MODULE_AUTH.md`](./MODULE_AUTH.md) and [`MODULE_CONFIG.md`](./MODULE_CONFIG.md).
 
 ### Client State
 
@@ -196,12 +243,8 @@ Exactly one WebSocket binary message per frame. NALs are NEVER split across mess
 
 ## Refactoring Directives
 
-### R-SRV-01: Add Authentication
-Implement token-based access control:
-- Server generates a random session token at startup (printed to stdout)
-- Clients must provide token as `?token=...` query parameter on WebSocket upgrade
-- Reject unauthorized connections with 401
-- Optional: separate tokens for controller vs viewer roles
+### R-SRV-01: Authentication (now base feature — implemented via MODULE_AUTH)
+Authentication is mandatory for all non-`none` modes. See [`MODULE_AUTH.md`](./MODULE_AUTH.md) for modes (token / password / pin / oauth-deferred), the Authenticator interface, session token issuance, and the `/auth` + `/pair` + `/logout` HTTP handlers. The server's only job here is calling `cfg.Authenticator.Authenticate(r)` at the WebSocket upgrade and routing to the appropriate session-cache lookup on `?resume=`.
 
 ### R-SRV-02: Fix Codec Type Constant (folded into interface)
 `Broadcast(codecType uint8, f EncodedFrame)` now carries the codec type; the server emits `FrameTypeVideoH264` (and future codec frame types as added). The codec is also advertised in the Config handshake so the client configures the matching decoder.
@@ -221,8 +264,8 @@ Replace `InsecureSkipVerify` with configurable origin checking. Default to same-
 ### R-SRV-07: Extract Interface to `pkg/server`
 Move the `Server` interface and `Config` to a public package. Keep WebSocket implementation in `internal/server/`.
 
-### R-SRV-08: Add Bandwidth Estimation
-Implement periodic bandwidth probes between server and client to enable adaptive bitrate in the encoder.
+### R-SRV-08: Bandwidth Estimation (now base feature — flows into stream.Manager)
+The server measures RTT (via WS ping/pong, every 10s) and packet-loss proxy (via the `{"type":"stats"}` JSON message: `dropped` counter delta). It feeds these signals to `stream.Manager` every 500ms; the Manager applies the adaptive policy from `[stream.adaptive]` and pushes updated `stream.Params` to the encoder + capturer via the `Configurable*` interfaces. See [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md).
 
 ### R-SRV-09: Health Check Endpoint
 `/healthz` endpoint returns 200 `{"status":"ok"}` for load balancer probes. Detailed counters (uptime, clients, frames, bytes/sec, drop rates) live on the Prometheus endpoint (separate port — see MODULE_CONFIG `[metrics]`).

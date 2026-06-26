@@ -189,3 +189,19 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). Intel oneVPL (QSV) supports `MFXVideoENCODE_Reset` for hot reconfiguration of some parameters, but resolution and profile changes require full session teardown.
+
+| Param change | oneVPL/QSV API | Hot? |
+|--------------|---------------|------|
+| `FPS` | `mfxVideoParam.mfx.FrameInfo.FrameRateExtN/D` + `MFXVideoENCODE_Reset` | yes |
+| `BitrateBps` | `mfxVideoParam.mfx.TargetKbps` + `MFXVideoENCODE_Reset` | yes |
+| `QP` | `mfxVideoParam.mfx.QPI/QPP/QPB` (CQP) or `mfxExtCodingOption.ICQQuality` (ICQ) + `MFXVideoENCODE_Reset` | yes |
+| `KeyframeInterval` | `mfxVideoParam.mfx.GopPicSize` + `MFXVideoENCODE_Reset` | yes |
+| `Width`, `Height` | `MFXVideoENCODE_Close` + re-alloc surfaces + `MFXVideoENCODE_Init` (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 profile via `MFX_PROFILE_HEVC_MAIN10`; requires full session recreation (returns `stream.ErrRequiresRestart`) | no |

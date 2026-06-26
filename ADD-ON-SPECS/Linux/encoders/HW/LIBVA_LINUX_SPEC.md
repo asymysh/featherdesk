@@ -386,3 +386,19 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). VA-API supports limited hot reconfiguration -- rate control parameters can change between frames, but resolution and profile changes require full context teardown.
+
+| Param change | VA-API mechanism | Hot? |
+|--------------|-----------------|------|
+| `FPS` | Adjust frame timing in `VAEncMiscParameterFrameRate` + `vaRenderPicture` | yes |
+| `BitrateBps` | `VAEncMiscParameterRateControl.bits_per_second` via `vaRenderPicture` per-frame | yes |
+| `QP` | `VAEncPictureParameterBufferH264.pic_init_qp` per-frame (CQP mode) | yes |
+| `KeyframeInterval` | `VAEncSequenceParameterBufferH264.intra_period` -- requires `vaCreateContext` reinit (returns `stream.ErrRequiresRestart`) | no |
+| `Width`, `Height` | `vaDestroyContext` + `vaCreateContext` + `vaCreateSurfaces` (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 profile -- `VAProfileHEVCMain10`; requires full context recreation and HEVC codec selection at session start | no |

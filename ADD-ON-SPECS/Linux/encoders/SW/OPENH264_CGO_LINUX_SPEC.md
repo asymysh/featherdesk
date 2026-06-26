@@ -201,3 +201,18 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). All updates flow through `UpdateStreamParams(p stream.Params)`.
+
+| Param change | OpenH264 API | Hot? |
+|--------------|--------------|------|
+| `FPS` | `ISVCEncoder::SetOption(ENCODER_OPTION_FRAME_RATE, &fps)` | yes |
+| `BitrateBps` | `ISVCEncoder::SetOption(ENCODER_OPTION_BITRATE, &b)` | yes |
+| `QP` | `ISVCEncoder::SetOption(ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, &param)` | yes |
+| `KeyframeInterval` | `param.uiIntraPeriod` via `ENCODER_OPTION_SVC_ENCODE_PARAM_EXT` | yes |
+| `Width`, `Height` | requires teardown + `Initialize` (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` (OpenH264 is 8-bit only -- pipeline switches to HEVC encoder) | n/a |

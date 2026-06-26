@@ -167,3 +167,18 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+---
+
+## Stream Params Translation
+
+Identical to the Linux `nvenc` add-on -- NVENC's API is OS-portable through `nvEncodeAPI.h`. See [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md) and [`../../../Linux/encoders/HW/NVENC_LINUX_SPEC.md`](../../../Linux/encoders/HW/NVENC_LINUX_SPEC.md#stream-params-translation).
+
+| Param change | NVENC API | Hot? |
+|--------------|-----------|------|
+| `FPS` | `nvEncReconfigureEncoder` (`frameRateNum/Den`) | yes |
+| `BitrateBps` | `nvEncReconfigureEncoder` (`averageBitRate`) | yes |
+| `QP` | `nvEncReconfigureEncoder` (`constQP`) | yes |
+| `KeyframeInterval` | `nvEncReconfigureEncoder` (`gopLength`) | yes |
+| `Width`, `Height` | hot if within initial `maxEncodeWidth/Height`, else re-init | mostly |
+| `BitDepth=10` / `HDR=true` | requires HEVC Main10 GUID at session start | no |

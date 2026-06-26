@@ -447,3 +447,19 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableCapturer` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). DXGI Desktop Duplication captures at native resolution; the pipeline handles scaling.
+
+| Param change | Mechanism | Hot? |
+|--------------|-----------|------|
+| `Width`, `Height` | Output is native -- pipeline scales via D3D11 blit (GPU) or libyuv (CPU fallback). No capturer change needed. | n/a (pipeline) |
+| `FPS` | `IDXGIOutputDuplication::AcquireNextFrame` timeout controls poll rate. Pipeline paces. | n/a (pipeline) |
+| `BitDepth=10` / `HDR=true` | `DXGI_FORMAT_R10G10B10A2_UNORM` -- requires HDR enabled in Windows Display Settings; capturer reports 10-bit in `Frame.BitDepth` | n/a (read-only) |
+| `ColorSpace` | `DXGI_OUTDUPL_DESC.ColorSpace` -- reported per frame | n/a (read-only) |
+
+**IddCx headless note:** When running on IddCx virtual display (headless mode), HDR is not available -- IddCx VDD only supports 8-bit BGRA. The capturer reports `BitDepth=8` and the pipeline skips HDR negotiation.

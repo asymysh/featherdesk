@@ -284,3 +284,17 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableCapturer` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). SCK supports hot reconfiguration via `updateConfiguration:`.
+
+| Param change | SCK API | Hot? |
+|--------------|---------|------|
+| `Width`, `Height` | `SCStreamConfiguration.width/height` + `[stream updateConfiguration:completionHandler:]` | yes |
+| `FPS` | `SCStreamConfiguration.minimumFrameInterval` + `updateConfiguration:` | yes |
+| `BitDepth=10` / `HDR=true` | `SCStreamConfiguration.pixelFormat = kCVPixelFormatType_64RGBALeAccurate` + `updateConfiguration:` (requires macOS 14+) | yes |
+| `ColorSpace` | Set automatically based on display; `CGColorSpaceCreateWithName` from `CMSampleBuffer` attachment | n/a (read-only) |

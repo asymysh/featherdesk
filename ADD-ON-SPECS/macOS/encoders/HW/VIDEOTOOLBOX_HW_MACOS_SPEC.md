@@ -237,3 +237,22 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). VideoToolbox has partial hot-reconfiguration support -- some properties can be set mid-session, but profile/resolution changes require full session invalidation + recreation.
+
+| Param change | VideoToolbox API | Hot? |
+|--------------|-----------------|------|
+| `FPS` | `kVTCompressionPropertyKey_ExpectedFrameRate` via `VTSessionSetProperty` | yes |
+| `BitrateBps` | `kVTCompressionPropertyKey_AverageBitRate` via `VTSessionSetProperty` | yes |
+| `QP` | `kVTCompressionPropertyKey_Quality` via `VTSessionSetProperty` | yes |
+| `KeyframeInterval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` via `VTSessionSetProperty` | yes |
+| `Width`, `Height` | `VTCompressionSessionInvalidate` + recreate session (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | `kVTProfileLevel_HEVC_Main10_AutoLevel` -- requires HEVC codec + session recreation (returns `stream.ErrRequiresRestart`) | no |
+| `NetworkRTTMs`, `PacketLossPct` | Used to adjust `kVTCompressionPropertyKey_AverageBitRate` headroom | yes |
+
+**macOS 26 note:** Use C function pointer `outputCallback` at `VTCompressionSessionCreate` -- per-frame closure is broken on macOS 26.

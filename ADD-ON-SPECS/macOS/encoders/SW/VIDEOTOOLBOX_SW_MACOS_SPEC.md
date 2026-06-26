@@ -190,3 +190,19 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableEncoder` (note: SW encoder interface, not HW) (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). Identical VideoToolbox property API as `vt_hw`; see [`../HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md#stream-params-translation).
+
+| Param change | VideoToolbox API | Hot? |
+|--------------|-----------------|------|
+| `FPS` | `kVTCompressionPropertyKey_ExpectedFrameRate` | yes |
+| `BitrateBps` | `kVTCompressionPropertyKey_AverageBitRate` | yes |
+| `QP` | `kVTCompressionPropertyKey_Quality` | yes |
+| `KeyframeInterval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` | yes |
+| `Width`, `Height` | session recreation (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` -- VT SW encoder is H.264 only (no HEVC SW on VideoToolbox); pipeline switches to `vt_hw` | n/a |

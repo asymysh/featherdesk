@@ -259,3 +259,17 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableCapturer` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). NvFBC captures at native resolution; the pipeline handles scaling.
+
+| Param change | Mechanism | Hot? |
+|--------------|-----------|------|
+| `Width`, `Height` | Output is native -- pipeline scales. No capturer change needed. | n/a (pipeline) |
+| `FPS` | Pipeline pacing. NvFBC grabs are synchronous (`NvFBCFrameGrab`). | n/a (pipeline) |
+| `BitDepth=10` / `HDR=true` | NvFBC supports 10-bit pixel format via `NVFBC_FRAME_GRAB_FLAGS_NOWAIT` + `NVFBC_BUFFER_FORMAT_BGRA_HDR` (Quadro/Tesla only) | requires re-init |
+| `ColorSpace` | Reported per frame; pipeline annotates encoder | n/a (read-only) |

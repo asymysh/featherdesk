@@ -280,3 +280,17 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableCapturer` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). KMS+EGL captures at native display resolution; the pipeline handles scaling.
+
+| Param change | Mechanism | Hot? |
+|--------------|-----------|------|
+| `Width`, `Height` | Output is native display resolution -- pipeline scales via GL blit or libyuv. No capturer change needed. | n/a (pipeline) |
+| `FPS` | Pipeline pacing (capture is event-driven via `drmModePageFlip` / `drmHandleEvent`). No capturer change needed. | n/a (pipeline) |
+| `BitDepth=10` / `HDR=true` | Request `DRM_FORMAT_XRGB2101010` framebuffer via `drmModeAddFB2` (driver-dependent; falls back to XRGB8888 if unsupported) | requires re-init |
+| `ColorSpace` | Reported per surface metadata from `drmModeGetProperty`; pipeline annotates encoder | n/a (read-only) |

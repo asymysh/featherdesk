@@ -98,10 +98,27 @@ The client never sends binary frames. All client-origin messages are JSON text:
 {"type": "keyframe"}                      // request an IDR (e.g., after detecting a gap)
 {"type": "pong", "nonce": 12345}          // reply to a server Ping
 {"type": "stats", "decodeMs": 3.2, "dropped": 0}  // optional client telemetry
+{"type": "resize", "width": 1280, "height": 720}    // dynamic resolution change
+{"type": "set_bitrate", "kbps": 8000}                // dynamic bitrate adjustment (control role only)
+{"type": "set_fps", "fps": 30}                       // dynamic frame rate (control role only)
+{"type": "set_hdr", "hdr": true}                     // toggle HDR pipeline (forces codec switch)
 ```
 
 - `seq` is a per-connection monotonic counter on input events; the server echoes it in `InputAck` for latency measurement.
-- Non-input control messages (`keyframe`, `pong`, `stats`) carry no `seq`.
+- Non-input control messages (`keyframe`, `pong`, `stats`, `resize`, `set_*`) carry no `seq`.
+- `resize`, `set_bitrate`, `set_fps`, `set_hdr` are gated by authorization role (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); the server silently drops them from `view` role clients.
+- Parameter-change messages flow through the `stream.Params` contract (see [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)); the server may emit a new `FrameTypeConfig` in response if the codec or color space changed.
+
+### Resume Path (client → server, before WebSocket upgrade)
+
+The client appends `?resume=<session_token>&last_video_seq=<N>` to the WebSocket URL to attempt resumption. If the server still has the session cached AND the token verifies:
+
+- Server skips the auth handshake.
+- Server sends `Config{resumed: true}` immediately.
+- Server replays the most recent cached IDR (binary frame).
+- Server resumes live stream from the next encoder frame.
+
+If the token is unknown / expired / fails verification the server closes the WebSocket with a 4401 close code and the client falls back to a fresh authenticated handshake. See [`MODULE_AUTH.md`](./MODULE_AUTH.md) + [`MODULE_SERVER.md`](./MODULE_SERVER.md).
 
 ### Sequence Number Semantics (server → client)
 
@@ -162,15 +179,24 @@ On WebSocket connect, the server MUST send a `FrameTypeConfig` (binary frame typ
     "width": 1920,
     "height": 1080,
     "fps": 60,
+    "hdr": false,
+    "color_space": "bt709",
     "audio": true,
     "audioSampleRate": 48000,
     "audioChannels": 2,
-    "cursorMode": "separate"
+    "cursorMode": "separate",
+    "session_token": "Yhgz...43chars...AbCd",
+    "session_ttl_sec": 3600,
+    "resumed": false
 }
 ```
-- `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01E` for H.264 Constrained Baseline L3.0, or `hvc1.*` for HW HEVC), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
+- `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01E` for H.264 Constrained Baseline L3.0, or `hvc1.2.4.L93.B0` for HEVC Main10 HDR), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
+- `hdr` and `color_space` advertise the HDR mode (see [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)).
 - `cursorMode` is `"separate"` (client renders cursor from `CursorUpdate` messages) or `"embedded"` (cursor is burned into the video frame).
-- If capabilities change (resolution, codec, cursor mode), the server sends a **new** Config frame; the client reconfigures its decoder and input scaling.
+- `session_token` is issued after successful auth (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); client stores it (in-memory) for reconnection.
+- `session_ttl_sec` is the server-side cache lifetime for this session's state.
+- `resumed = true` on Config frames sent in response to a successful resume — client skips full decoder re-init and just waits for the replayed IDR.
+- If capabilities change (resolution, codec, cursor mode, HDR), the server sends a **new** Config frame; the client reconfigures its decoder and input scaling.
 - Send order on connect: **Config → cached IDR (if any) → live frames.**
 
 ### Shared Payload Types (Go)
@@ -179,14 +205,19 @@ On WebSocket connect, the server MUST send a `FrameTypeConfig` (binary frame typ
 // ConfigPayload is the JSON body of a FrameTypeConfig (type 6) message.
 type ConfigPayload struct {
     Version          int    `json:"version"`
-    Codec            string `json:"codec"`            // full WebCodecs string, e.g. "avc1.42E01E" (H.264) or "hvc1.*" (HW HEVC)
+    Codec            string `json:"codec"`            // full WebCodecs string
     Width            int    `json:"width"`
     Height           int    `json:"height"`
     FPS              int    `json:"fps"`
+    HDR              bool   `json:"hdr"`
+    ColorSpace       string `json:"color_space"`      // "bt709" | "bt2020"
     Audio            bool   `json:"audio"`
     AudioSampleRate  int    `json:"audioSampleRate"`
     AudioChannels    int    `json:"audioChannels"`
     CursorMode       string `json:"cursorMode"`       // "separate" | "embedded"
+    SessionToken     string `json:"session_token"`    // for reconnection
+    SessionTTLSec    int    `json:"session_ttl_sec"`
+    Resumed          bool   `json:"resumed"`          // true on successful resume
 }
 
 // CursorUpdate is the payload of a FrameTypeCursorUpdate (type 11) message.

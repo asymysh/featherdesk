@@ -275,3 +275,22 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary`;` unknown
 keys in this section will cause startup to fail.
 
+
+
+---
+
+## Stream Params Translation
+
+This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
+
+| Param change | AMF API | Hot? |
+|--------------|---------|------|
+| `FPS` | `SetProperty(AMF_VIDEO_ENCODER_FRAMERATE, AMFRate{num,den})` | yes |
+| `BitrateBps` | `SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, b)` | yes |
+| `QP` | `SetProperty(AMF_VIDEO_ENCODER_QP_I/QP_P, qp)` | yes |
+| `KeyframeInterval` | `SetProperty(AMF_VIDEO_ENCODER_IDR_PERIOD, ki)` | yes |
+| `Width`, `Height` | `Terminate` + `ReInit` with new `AMF_VIDEO_ENCODER_FRAMESIZE` (returns `stream.ErrRequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 only -- `AMF_VIDEO_ENCODER_HEVC_PROFILE = AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires codec negotiation at session start, not mid-stream (returns `stream.ErrRequiresRestart`) | no |
+| `NetworkRTTMs`, `PacketLossPct` | Used by `RATE_CONTROL_HQVBR_QVBR` quality boost when headroom available | yes |
+
+**ROCm note:** On Linux/ROCm, the same AMF VCE component is used. The `amf_rocm` build tag ensures the ROCm/HIP runtime is linked for GPU buffer management, but the encoder parameter API is identical to the Windows AMF add-on.
