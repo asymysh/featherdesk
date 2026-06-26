@@ -51,6 +51,42 @@ Every section has a strict schema. Any unknown key fails parsing with a
 clear error pointing at the offending line. This catches typos that would
 otherwise silently fall back to defaults.
 
+**Exception: add-on module sections.**
+
+Sections matching `[addon_module_<name>]` are validated only when the
+matching add-on is compiled into the binary (i.e. `<name>` matches an
+active Go build tag).
+
+- Add-on section present + add-on compiled in → strict validation (unknown keys fail)
+- Add-on section present + add-on NOT compiled in → silently ignored
+- Add-on section absent + add-on compiled in → add-on uses built-in defaults
+- Add-on section absent + add-on NOT compiled in → no effect
+
+This lets one config file serve any compiled variant of the binary
+without having to maintain per-variant configs.
+
+### Section naming convention
+
+```
+[addon_module_<build_tag>]
+```
+
+Where `<build_tag>` is the **exact** Go build tag used to compile the
+add-on. Examples:
+
+| Build tag | TOML section |
+|-----------|-------------|
+| `openh264` | `[addon_module_openh264]` |
+| `x264` | `[addon_module_x264]` |
+| `nvenc` | `[addon_module_nvenc]` |
+| `amf` | `[addon_module_amf]` |
+| `mf_hw` | `[addon_module_mf_hw]` |
+| `libva` | `[addon_module_libva]` |
+| `vt_hw` | `[addon_module_vt_hw]` |
+| `dxgi_dd` | `[addon_module_dxgi_dd]` |
+| `kms_egl` | `[addon_module_kms_egl]` |
+| `sck` | `[addon_module_sck]` |
+
 ---
 
 ## Schema
@@ -102,6 +138,145 @@ qp           = 23                 # H.264 range 0–51, lower = higher quality
 
 [encode.cursor]
 mode = "separate"                 # "separate" (client renders) | "embedded" (server blends)
+
+# ═════════════════════════════════════════════════════════════════════════
+# ADD-ON MODULE CONFIGS
+# ═════════════════════════════════════════════════════════════════════════
+#
+# Each compiled-in add-on may have its own [addon_module_<name>] section.
+# Section name MUST match the build tag exactly (e.g. `-tags openh264`
+# pairs with `[addon_module_openh264]`).
+#
+# Rules:
+#   - Sections for add-ons NOT compiled into the binary are SILENTLY IGNORED
+#     (not strict-rejected). This lets a single config file work for any
+#     binary variant.
+#   - Sections for add-ons that ARE compiled in undergo strict validation —
+#     unknown keys fail parsing.
+#   - The active encoder reads ONLY its own [addon_module_*] section. The
+#     main [encode] section provides codec-agnostic settings (fps, qp,
+#     bitrate, cursor mode); the add-on section provides backend-specific
+#     tuning.
+#   - If an add-on section is absent, the add-on uses its built-in defaults.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# SW H.264 add-ons
+# ─────────────────────────────────────────────────────────────────────────
+
+[addon_module_openh264]
+# Cisco OpenH264 — BSD licensed, CGo in-process. For commercial deployments.
+threads      = 0                  # 0 = auto (min(cpu_count, 4) — saturates at 4)
+                                  # Range: 1–16. Above 4 has diminishing returns.
+slice_mode   = "fixed"            # "single" (1 slice) | "fixed" (N slices = N threads)
+profile      = "baseline"         # "baseline" | "main" | "high" — Constrained Baseline default for compat
+rate_control = "qp"               # "qp" | "bitrate"
+                                  #   qp     -> uses main [encode] qp
+                                  #   bitrate-> uses main [encode] bitrate_bps with cap multiplier
+bitrate_max_multiplier = 1.5      # When rate_control = bitrate, max_bitrate = bitrate_bps * this
+
+[addon_module_x264]
+# libx264 via ffmpeg subprocess — GPL isolated. For home / personal / OSS.
+# Requires ffmpeg in PATH or bundled.
+ffmpeg_path  = ""                 # "" = search PATH, ./ffmpeg, then VIEWPORT_FFMPEG_PATH env
+threads      = 0                  # 0 = auto (cpu_count, capped at 12 for diminishing returns)
+                                  # Range: 1–32.  Sweet spot is 8 on most CPUs.
+preset       = "ultrafast"        # "ultrafast" | "superfast" | "veryfast" | "faster" | "fast" | "medium"
+                                  # ultrafast is mandatory for sub-5ms encode.
+tune         = "zerolatency"      # Hardcoded; "zerolatency" required for streaming.
+crf          = 26                 # 0–51 (lower = higher quality). 26 = balanced for screen content.
+profile      = "baseline"         # "baseline" | "main" | "high"
+                                  # ultrafast preset forces "baseline" regardless.
+
+# ─────────────────────────────────────────────────────────────────────────
+# HW encoder add-ons (Linux)
+# ─────────────────────────────────────────────────────────────────────────
+
+[addon_module_libva]
+# Intel / AMD via Mesa, NVIDIA via vaapi wrapper.
+render_node      = "/dev/dri/renderD128"
+profile          = "h264_main"    # "h264_baseline" | "h264_main" | "h264_high" | "hevc_main"
+low_power        = true           # Use EncSliceLP entry point on Intel (faster on Gen 9+)
+rate_control     = "cqp"          # "cqp" | "cbr" | "vbr"
+qp               = 26
+async_depth      = 1              # 1 = synchronous, higher = pipelined (latency vs throughput tradeoff)
+
+[addon_module_nvenc]
+# NVIDIA NVENC direct SDK binding. Linux + Windows.
+gpu              = 0              # NVENC GPU index (0 = first NVIDIA GPU)
+preset           = "p1"           # p1 (fastest) -- p7 (slowest/best). p1 for streaming.
+tune             = "ull"          # "ull" (ultra-low-latency) | "ll" | "hq"
+rate_control     = "cqp"          # "cqp" | "cbr" | "vbr"
+qp               = 26
+profile          = "high"         # "baseline" | "main" | "high" — high recommended for screen content
+multipass        = "disabled"     # "disabled" | "qres" | "fullres" — disabled for low latency
+
+[addon_module_amf]
+# AMD AMF SDK. Linux (ROCm) + Windows.
+usage            = "lowlatency"   # "transcoding" | "ultralowlatency" | "lowlatency" | "webcam"
+quality          = "speed"        # "speed" | "balanced" | "quality"
+rate_control     = "cqp"          # "cqp" | "cbr" | "vbr"
+qp_i             = 26
+qp_p             = 26
+profile          = "high"         # "baseline" | "main" | "high"
+
+# ─────────────────────────────────────────────────────────────────────────
+# HW encoder add-ons (Windows)
+# ─────────────────────────────────────────────────────────────────────────
+
+[addon_module_mf_hw]
+# MediaFoundation cross-vendor MFT routing. Picks GPU via D3D11VA device.
+adapter_index    = -1             # -1 = system default (Windows picks). 0+ = specific d3d11va adapter.
+rate_control     = "quality"      # "quality" | "cbr" | "pc_vbr" | "u_vbr" | "ld_vbr"
+quality          = 70             # 0-100 when rate_control = quality. Higher = better quality.
+
+[addon_module_qsv]
+# Intel oneVPL / QSV. Windows only (Linux uses libva).
+adapter_index    = 0
+target_usage     = 7              # 1 (quality) -- 7 (speed). 7 for streaming.
+rate_control     = "icq"          # "icq" | "cqp" | "cbr" | "vbr"
+icq_quality      = 26
+
+# ─────────────────────────────────────────────────────────────────────────
+# macOS encoder add-ons
+# ─────────────────────────────────────────────────────────────────────────
+
+[addon_module_vt_hw]
+# VideoToolbox hardware. Apple Media Engine on Apple Silicon, VCE on Intel+AMD.
+realtime         = true           # kVTCompressionPropertyKey_RealTime
+profile          = "h264_baseline" # "h264_baseline" | "h264_main" | "h264_high" | "hevc_main"
+rate_control     = "qp"           # "qp" | "average_bitrate"
+qp               = 26
+allow_frame_reordering = false    # false = lower latency (no B-frames)
+
+[addon_module_vt_sw]
+# VideoToolbox software fallback. Uses Apple's tuned H.264 SW encoder.
+# Same keys as vt_hw — kernel decides HW vs SW based on what GPU is available.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Capture add-ons
+# ─────────────────────────────────────────────────────────────────────────
+
+[addon_module_kms_egl]
+# Linux KMS+EGL DMA-BUF capture.
+drm_card         = ""             # "" = auto-discover. e.g. "/dev/dri/card0"
+cursor_plane     = true           # Capture cursor plane separately for client-side compositing
+
+[addon_module_dxgi_dd]
+# Windows DXGI Desktop Duplication.
+adapter_index    = -1             # -1 = adapter with active display. 0+ = specific DXGI adapter.
+output_index     = 0              # Which display to capture (0 = primary).
+# Headless: when no output exists, auto-install IddCx virtual display driver.
+auto_install_vdd = true
+virtual_display_width  = 1920
+virtual_display_height = 1080
+virtual_display_hz     = 60
+
+[addon_module_sck]
+# macOS ScreenCaptureKit.
+display_id       = 0              # 0 = main display, or NSScreen index
+show_cursor      = false          # false = cursor sent separately as CursorUpdate
+
+# ═════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────────────────────────────────────────────────────────
 # Deferred sections — not yet enforced. Reserved for when audio + input
