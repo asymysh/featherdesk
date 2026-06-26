@@ -12,7 +12,7 @@ static ISVCEncoder *g_enc = NULL;
 static SFrameBSInfo g_bsInfo;
 static SSourcePicture g_pic;
 
-int oh264_init(int w, int h, int fps, int qp) {
+int oh264_init(int w, int h, int fps, int qp, int threads) {
     int rv = WelsCreateSVCEncoder(&g_enc);
     if (rv != 0 || !g_enc) return -1;
 
@@ -39,9 +39,9 @@ int oh264_init(int w, int h, int fps, int qp) {
     paramExt.iTargetBitrate = 5000000;
     paramExt.iRCMode = RC_OFF_MODE;
     paramExt.iNumRefFrame = 1;
-    paramExt.iMultipleThreadIdc = 4;  // 4 threads
-    paramExt.sSpatialLayers[0].sSliceArgument.uiSliceMode = 1; // SM_FIXEDSLCNUM_SLICE
-    paramExt.sSpatialLayers[0].sSliceArgument.uiSliceNum = 4;  // 4 slices = 4 threads
+    paramExt.iMultipleThreadIdc = threads;
+    paramExt.sSpatialLayers[0].sSliceArgument.uiSliceMode = (threads > 1) ? 1 : 0; // SM_FIXEDSLCNUM_SLICE or SM_SINGLE_SLICE
+    paramExt.sSpatialLayers[0].sSliceArgument.uiSliceNum = threads;
     paramExt.sSpatialLayers[0].iVideoWidth = w;
     paramExt.sSpatialLayers[0].iVideoHeight = h;
     paramExt.sSpatialLayers[0].fFrameRate = (float)fps;
@@ -114,20 +114,25 @@ import (
 
 type OpenH264Encoder struct {
 	width, height int
+	threads       int
 }
 
 func NewOpenH264Encoder() *OpenH264Encoder {
-	return &OpenH264Encoder{}
+	return &OpenH264Encoder{threads: 4}
 }
 
-func (e *OpenH264Encoder) Name() string { return "openh264" }
+func NewOpenH264EncoderThreads(threads int) *OpenH264Encoder {
+	return &OpenH264Encoder{threads: threads}
+}
+
+func (e *OpenH264Encoder) Name() string { return fmt.Sprintf("openh264-%dt", e.threads) }
 func (e *OpenH264Encoder) Codec() string { return "h264" }
 func (e *OpenH264Encoder) Type() string { return "software" }
 
 func (e *OpenH264Encoder) Init(width, height, fps int) error {
 	e.width = width
 	e.height = height
-	rv := C.oh264_init(C.int(width), C.int(height), C.int(fps), C.int(26))
+	rv := C.oh264_init(C.int(width), C.int(height), C.int(fps), C.int(26), C.int(e.threads))
 	if rv != 0 {
 		return fmt.Errorf("OpenH264 init failed: %d", rv)
 	}

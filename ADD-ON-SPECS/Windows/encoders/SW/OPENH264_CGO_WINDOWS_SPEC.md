@@ -92,18 +92,46 @@ CGo `#cgo` directives differ for finding the OpenH264 library at link time.
 
 ## Performance (Benchmarked)
 
-Measured on this Windows machine during the benchmark session:
+Measured on AMD Ryzen 9 5900X (12C/24T), Windows 11, Cisco OpenH264 v2.4.1.
 
-| Encoder config | Resolution | FPS | p50 | Notes |
-|---------------|-----------|-----|-----|-------|
-| OpenH264 (estimated from Linux + macOS data, same code) | 1080p | ~225 | ~4–8ms | Range covers Ryzen 9 5900X to Ryzen 5 3600 |
-| Reference: libx264 ultrafast (ffmpeg subprocess) | 1080p | 226 | 4.3ms | What OpenH264 is competing against — GPL-2 |
-| Reference: libx264 veryfast (ffmpeg subprocess) | 1080p | 169 | 5.7ms | GPL-2 |
-| Reference: MF SW (`h264_mf`) | 1080p | 201 | ~5ms | Built into Windows |
+### OpenH264 thread scaling — 1920x1080
 
-OpenH264 is comparable to libx264 ultrafast and slightly faster than MediaFoundation
-SW on x86. The advantages — no GPL, no ffmpeg subprocess, cross-platform same code —
-make it the right SW default.
+| Threads/Slices | P50 | FPS | Notes |
+|---------------|-----|-----|-------|
+| 1 | 23.4ms | 42 | Single-threaded baseline |
+| 2 | 13.1ms | 77 | 1.8x scaling |
+| **4** | **7.9ms** | **125** | **Sweet spot — best perf/thread** |
+| 8 | 7.5ms | 131 | Barely faster than 4T |
+| 12 | 7.4ms | 138 | Saturated — slice parallelism ceiling |
+
+### OpenH264 vs x264 — side by side
+
+| Threads | OpenH264 (BSD) ms | OpenH264 FPS | x264 (GPL) ms | x264 FPS | x264 speedup |
+|---------|-------------------|-------------|---------------|---------|-------------|
+| 1 | 23.4 | 42 | 10.6 | 94 | 2.2x |
+| 2 | 13.1 | 77 | 5.6 | 179 | 2.3x |
+| 4 | 7.9 | 125 | 4.3 | 234 | 1.9x |
+| 8 | 7.5 | 131 | 3.5 | 285 | 2.2x |
+| 12 | 7.4 | 138 | 3.3 | 302 | 2.2x |
+
+### 2560x1440
+
+| Config | P50 | FPS |
+|--------|-----|-----|
+| OpenH264 4T | 13.7ms | 73 |
+| OpenH264 12T | 13.4ms | 74 |
+
+**x264 is consistently 2x faster.** OpenH264's advantage is purely licensing:
+BSD + Cisco royalty coverage = no GPL, no patent fees, fully proprietary binary.
+
+### Target use case
+
+| Scenario | Recommended encoder |
+|----------|-------------------|
+| Commercial / enterprise deployment | **OpenH264** (BSD, no GPL risk) |
+| Home / personal / open-source project | **x264** (GPL, 2x faster) |
+| Cross-platform consistency | **OpenH264** (identical code on all OSes) |
+| Maximum SW performance | **x264** (3.3ms vs 7.4ms at 12T) |
 
 ---
 
