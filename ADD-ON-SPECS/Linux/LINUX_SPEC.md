@@ -113,13 +113,13 @@ runtime probe order, and rationale.
 
 2. H.264 hardware (VAProfileH264Baseline)
      → Intel Sandy Bridge+, AMD GCN+, NVIDIA via wrapper
-     → Config codec string: "avc1.42E01E"
+     → Config codec string: "avc1.42E01F"
      → Status: 📋 Specced — MODULE_CUSTOM_LIBVA.md
 
 3. H.264 software (OpenH264 CGo)
      → No GPU present, or GPU has no VA-API encode support
      → Works on every machine including no-GPU ARM/x86 (Graviton etc.)
-     → Config codec string: "avc1.42E01E"
+     → Config codec string: "avc1.42E01F"
      → Status: ✅ Working — current default
 ```
 
@@ -135,7 +135,6 @@ Advance, Velos Media). If HEVC hardware is unavailable, fall straight to H.264.
 | Intel Tiger Lake / Xe / Arc (2020+) | `iHD` | ✅ | ✅ 10-bit | ✅ Arc+ |
 | AMD GCN / RX 400+ (2016+) | Mesa | ✅ | ✅ | ❌ |
 | AMD RDNA2 / RX 6000+ (2020+) | Mesa | ✅ | ✅ 10-bit | ❌ (decode only) |
-| AMD RDNA3+ / RX 7000+ (2023+) | Mesa | ✅ | ✅ 10-bit | ✅ |
 | AMD RDNA3 / RX 7000+ (2022+) | Mesa | ✅ | ✅ 10-bit | ✅ |
 | NVIDIA *(via nvidia-vaapi-driver)* | unofficial | ✅ | ✅ | ❌ |
 | No GPU / CPU-only | — | ❌ | ❌ | ❌ → OpenH264 SW |

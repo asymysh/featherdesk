@@ -138,7 +138,7 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 
 | Option | How |
 |--------|-----|
-| User installs ffmpeg | `winget install ffmpeg` / `apt install ffmpeg` / `brew install ffmpeg` |
+| User installs ffmpeg | `apt install ffmpeg` (Debian/Ubuntu) / `dnf install ffmpeg` (Fedora) |
 | Bundle ffmpeg binary | Ship `ffmpeg` alongside `viewport-rds` in the installer |
 | Docker | `FROM golang:1.26 AS build` + `apt install ffmpeg` in runtime stage |
 

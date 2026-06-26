@@ -181,7 +181,7 @@ On WebSocket connect, the server MUST send a `FrameTypeConfig` (binary frame typ
 ```json
 {
     "version": 1,
-    "codec": "avc1.42E01E",
+    "codec": "avc1.42E01F",
     "width": 1920,
     "height": 1080,
     "fps": 60,
@@ -196,7 +196,7 @@ On WebSocket connect, the server MUST send a `FrameTypeConfig` (binary frame typ
     "resumed": false
 }
 ```
-- `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01E` for H.264 Constrained Baseline L3.0, or `hvc1.2.4.L93.B0` for HEVC Main10 HDR), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
+- `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01F` for H.264 Constrained Baseline L3.1, or `hvc1.2.4.L93.B0` for HEVC Main10 HDR), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
 - `hdr` and `color_space` advertise the HDR mode (see [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)).
 - `cursorMode` is `"separate"` (client renders cursor from `CursorUpdate` messages) or `"embedded"` (cursor is burned into the video frame).
 - `session_token` is issued by the server after successful auth (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); client stores it (in-memory only) for reconnection.

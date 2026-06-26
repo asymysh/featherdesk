@@ -489,7 +489,7 @@ type HardwareEncoder interface {
     ForceKeyframe()
 
     // Codec returns the WebCodecs codec string for the Config handshake
-    // (e.g. "avc1.42E01E" for H.264 Constrained Baseline 3.0).
+    // (e.g. "avc1.42E01F" for H.264 Constrained Baseline 3.1).
     Codec() string
 
     // Close releases all encoder resources.
@@ -510,12 +510,17 @@ type HardwareEncoder interface {
 
 ```go
 // The pipeline pairs encoder output with the frame's metadata before broadcasting.
+// EncodedFrame lives in pkg/stream/ -- shared by SW and HW paths.
 type EncodedFrame struct {
-    NALs      [][]byte // Annex B NAL units (H.264)
+    Data      []byte // Contiguous Annex B bitstream (start codes retained).
+                     // NOT split into per-NAL slices -- avoids decompose/recompose
+                     // copy overhead. The server prepends the 22-byte header and
+                     // sends Data directly (single memcpy into WS frame).
     Width     uint16
     Height    uint16
-    Timestamp uint64   // CLOCK_MONOTONIC ns, carried through from capture
-    Keyframe  bool     // true if this access unit is a keyframe (derived by encoder/pipeline)
+    Timestamp uint64 // CLOCK_MONOTONIC ns, carried through from capture
+    Keyframe  bool   // true if this access unit is a keyframe
+    CodecType uint8  // FrameTypeVideoH264 or FrameTypeVideoHEVC
 }
 
 type Server interface {
@@ -538,38 +543,40 @@ type Server interface {
 ## Module Dependency Graph
 
 ```
-              log/slog (stdlib, no deps)
-                │
-    ┌───────────┼───────────────────────────────────┐
-    │           │           │             │          │
-    ▼           ▼           ▼             ▼          ▼
- capture     encode     hwencode      server      config
-    │           │           │             │
-    │           │           │             ▼
-    ▼           ▼           ▼          protocol
- (per OS,   (per OS,    (per OS,
-  add-on)    add-on)     add-on)
- libdrm     openh264    libva (Linux)
- EGL/GBM    libyuv      NVENC SDK
- (KMS+EGL)  (every SW   AMF SDK
- SCK macOS  add-on uses oneVPL (Win)
- NvFBC      libyuv for  MediaFoundation
-            RGBA→I420)  VideoToolbox
-                        VideoToolbox
+                pkg/stream (shared types: Params, EncodedFrame, error sentinels)
+                    │
+    ┌───────────────┼───────────────────────────────────────┐
+    │               │               │               │      │
+    ▼               ▼               ▼               ▼      ▼
+ capture         encode          hwencode        server   config
+    │            │    │          │    │             │
+    │            │    └──────────┘    │             ├── protocol
+    │            │     (hwencode      │             ├── auth
+    │            │      imports       │             └── stream
+    │            │      capture       │
+    │            └── capture           │
+    │            (Converter takes     │
+    │             *capture.Frame)     │
+    ▼                                 ▼
+ (per OS,                          (per OS,
+  add-on)                           add-on)
 
-              pipeline (imports core interfaces + probes compiled-in add-ons)
+              pipeline (imports ALL core interfaces + probes compiled-in add-ons)
                 │
-    ┌───────────┼───────────┼───────────┐
-    ▼           ▼           ▼           ▼
- capture    encode/hw    server      config
+    ┌───────────┼───────────┼───────────┼───────────┐
+    ▼           ▼           ▼           ▼           ▼
+ capture    encode      hwencode     server      config
 ```
 
-> Notes:
-> - Each compiled-in add-on contributes its own native-library deps via CGo
->   (e.g. enabling `libva` build tag pulls in libva-dev at link time).
-> - No `ffmpeg`, no `libavcodec`, no `libvpx` — all rejected.
-> - No custom `logger` module — every module takes `*slog.Logger` directly.
-> - Audio + Input not shown — deferred from the core dependency graph.
+> Import edges documented:
+> - `encode -> capture` (Converter takes `*capture.Frame`)
+> - `hwencode -> capture` (`SurfaceHandle = capture.FBInfo`)
+> - `encode, hwencode, capture -> stream` (Params, error sentinels)
+> - `server -> {protocol, auth, stream}` (types + auth gate)
+> - No cycles. `stream` is the shared leaf. `pipeline` is the sole orchestrator.
+> - Audio + Input not shown -- deferred from the core dependency graph.
+> - No `ffmpeg`, no `libavcodec`, no `libvpx` -- all rejected.
+> - No custom `logger` module -- every module takes `*slog.Logger` directly.
 
 **Key Properties:**
 - Each domain module is a leaf or near-leaf (depends only on stdlib + system libs via CGo)

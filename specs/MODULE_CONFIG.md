@@ -97,8 +97,12 @@ add-on. Examples:
 [server]
 bind         = "0.0.0.0"          # interface to bind  (restart required)
 port         = 30084              # HTTPS+WSS port     (restart required)
-allow_origin = "*"                # CORS allow-origin for /ws upgrade
+allow_origin = ""                 # empty = same-origin only (SECURE DEFAULT).
+                                  # Set to "*" only for trusted LANs. Server rejects
+                                  # WebSocket upgrades where Origin header doesn't match.
 max_clients  = 25                 # max concurrent WebSocket connections (reject with 503)
+max_message_bytes = 4096          # max WebSocket text message size (bytes). Rejects larger.
+input_rate_limit  = 1000          # max input events/sec per client (mousemove coalesced)
 
 [server.tls]
 # If both cert + key are empty, a self-signed cert is generated on startup
@@ -106,6 +110,9 @@ max_clients  = 25                 # max concurrent WebSocket connections (reject
 # absolute paths of a certificate chain and matching private key in PEM form.
 cert = ""                         # (restart required)
 key  = ""                         # (restart required)
+min_version  = "1.2"              # minimum TLS version: "1.2" or "1.3"
+                                  # cipher suites restricted to AEAD only
+                                  # (GCM, ChaCha20-Poly1305). No CBC, RC4, 3DES.
 
 [log]
 format = "auto"     # "auto" | "json" | "text"
@@ -167,14 +174,16 @@ hdr         = false
 color_space = "bt709"            # "bt709" (SDR) | "bt2020" (HDR)
 
 [stream.adaptive]
-# Bandwidth adaptation policy. Pipeline measures network telemetry every
-# 500ms and adjusts bitrate based on packet loss + RTT.
+# Bandwidth adaptation policy. Two-tier: fast (send-side, per-frame) +
+# slow (client feedback, 100ms windows). See MODULE_STREAM_PARAMS.md.
 enabled               = true
+interval_ms           = 100          # telemetry window (100ms, NOT 500ms)
 min_bitrate_bps       = 1_000_000    # 1 Mbps floor
 max_bitrate_bps       = 25_000_000   # 25 Mbps ceiling
-loss_threshold_pct    = 5.0          # trigger bitrate reduction
+loss_threshold_pct    = 5.0          # trigger bitrate reduction (slow path)
 recovery_threshold_pct = 1.0         # allow bitrate increase
-adjustment_factor     = 0.7          # multiply on degradation
+fast_reduction_factor = 0.5          # immediate reduction on send-side detection
+adjustment_factor     = 0.7          # multiply on slow-path degradation
 recovery_factor       = 1.1          # multiply on recovery
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -182,24 +191,32 @@ recovery_factor       = 1.1          # multiply on recovery
 # ─────────────────────────────────────────────────────────────────────────
 
 [auth]
-# Mode: "none" (dev only) | "token" | "password" | "pin" | "oauth" (deferred)
-mode = "none"
+# Mode: "none" (dev only, prints warning) | "token" | "password" | "pin"
+mode = "token"                       # SECURE DEFAULT. "none" only for local dev.
 
 # Token mode
-token              = ""              # explicit token; "" = auto-generate at startup
-token_file         = ""              # write generated token here for ops tooling
-session_ttl_minutes = 60             # successful auth lifetime
+token              = ""              # explicit token; "" = auto-generate 32-byte
+                                     # crypto/rand token at startup (CSPRNG mandatory).
+                                     # Validation: if set explicitly, must be ≥ 32 chars.
+token_file         = ""              # write generated token here (mode 0600) for ops tooling
+session_ttl_minutes = 60             # auth session lifetime
 
 # Password mode (requires "viewport-rds hash-password" to generate)
 password_hash      = ""              # argon2id hash
 
 # PIN mode (first-launch pairing)
+pin_length             = 8           # 8-digit PIN (100M possibilities). Min 6, max 12.
 pairing_window_minutes = 5
-paired_devices_file    = ""          # e.g. "/var/lib/viewport-rds/paired.json"
+max_pin_attempts       = 10          # global limit per window (not per-IP). Exponential
+                                     # backoff: 1s, 2s, 4s, 8s... after 3rd failure.
+paired_devices_file    = ""          # e.g. "/var/lib/viewport-rds/paired.json" (mode 0600)
 
 # Authorization
-require_auth_for_view = false        # set true to require auth even for viewer role
-allow_takeover        = true         # set false to lock the controller slot
+require_auth_for_view = true         # SECURE DEFAULT. Viewers must also authenticate.
+                                     # Set false only for trusted LANs / demos.
+allow_takeover        = false        # SECURE DEFAULT. Controller slot is locked.
+                                     # When takeover occurs, displaced controller gets
+                                     # WS close code 4410 with reason "controller_takeover".
 
 # OAuth (deferred — interface defined, no implementation in v1)
 # oauth_provider     = "google" | "github" | "azure" | "okta"
@@ -397,9 +414,11 @@ show_cursor      = false          # false = cursor sent separately as CursorUpda
 | `stream.bitrate_bps` | 0 (QP mode) or ≥ 100000 (100 kbps minimum) | startup error |
 | `stream.qp` | 0–51 | startup error |
 | `stream.width` / `stream.height` | 0 (native) or ≥ 320 | startup error |
-| `auth.mode` | one of `none`/`token`/`password`/`pin` | startup error |
+| `auth.mode` | one of `none`/`token`/`password`/`pin`; `none` prints security warning | startup error |
 | `auth.password_hash` | required if `mode = "password"` | startup error |
-| `auth.token` | required if `mode = "token"` | startup error |
+| `auth.token` | if `mode = "token"`: empty = auto-generate (CSPRNG); if set, must be ≥ 32 chars | startup error |
+| `auth.pin_length` | 6–12 (default 8) | startup error |
+| `auth.max_pin_attempts` | 1–100 (default 10) | startup error |
 | `reconnect.cache_ttl_seconds` | 0–3600 | startup error |
 | `server.max_clients` | 1–100 | startup error |
 | Unknown key anywhere | strict mode | startup error |

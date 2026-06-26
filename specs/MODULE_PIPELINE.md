@@ -36,7 +36,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Pipeline, error)
 func (p *Pipeline) Start(ctx context.Context) error
 
 // Stats returns a snapshot of pipeline performance metrics.
-func (p *Pipeline) Stats() Stats
+// Returns StatsSnapshot (no sync.Mutex — safe to copy/serialize).
+func (p *Pipeline) Stats() StatsSnapshot
 ```
 
 The pipeline takes `*config.Config` directly (the parsed TOML struct from
@@ -87,7 +88,9 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
 
 ### Main Frame Loop
 
-Key fixes vs round 1: skip is decided BEFORE capture; each path returns a full `EncodedFrame` (carrying W/H/timestamp/keyframe); the server owns the sequence (no `frameSeq` here); `codecType` is passed; pacing and skip no longer fight.
+Key fixes vs round 1: skip is decided BEFORE capture; `EncodedFrame.Data` is contiguous Annex B (no per-NAL split/rejoin); the server owns the sequence; pacing is capture-to-capture (NOT delivery-to-delivery).
+
+**Allocation strategy:** NAL output buffers and WS message buffers use `sync.Pool` (sized to typical access-unit ~50KB). Steady-state frame loop is zero-alloc after warmup. The `Converter.Convert()` reuses I420 buffers (already documented); the encoder and server must follow the same pattern.
 
 ```go
 func (p *Pipeline) runFrameLoop(ctx context.Context) {
@@ -95,12 +98,11 @@ func (p *Pipeline) runFrameLoop(ctx context.Context) {
     defer runtime.UnlockOSThread()
 
     targetInterval := time.Second / time.Duration(p.params.FPS)
-    // Floor of 5 FPS: never skip so many frames that effective rate < 5.
     maxSkip := (p.params.FPS / 5) - 1
     if maxSkip < 0 { maxSkip = 0 }
 
     var (
-        skipBudget int       // frames we still owe to "catch up" (bounded by maxSkip)
+        skipBudget int
         lastFrameT time.Time
     )
 
@@ -109,39 +111,39 @@ func (p *Pipeline) runFrameLoop(ctx context.Context) {
             return
         }
 
-        // (1) If we owe skips from a previous slow frame, skip a capture now.
+        // (1) Skip owed frames from a previous overrun.
         if skipBudget > 0 {
             skipBudget--
             p.stats.RecordDrop()
-            // Still respect pacing so we don't busy-spin.
             sleepToInterval(&lastFrameT, targetInterval)
             continue
         }
 
         // (2) Pacing: wait until the next frame is due.
         sleepToInterval(&lastFrameT, targetInterval)
+        lastFrameT = time.Now() // SET BEFORE capture, not after broadcast.
+                                // This makes pacing capture-to-capture,
+                                // decoupled from downstream processing time.
 
-        // (3) Capture + encode (one of the two paths).
+        // (3) Capture + encode.
         frameStart := time.Now()
         ef, ok, err := p.captureEncode()
         if err != nil {
-            if errors.Is(err, hwencode.ErrFallbackToSoftware) {
+            if errors.Is(err, stream.ErrFallbackToSoftware) {
                 p.degradeToSoftware() // permanent for this session
                 continue
             }
-            p.recordCaptureError(err) // transient/3x/10x policy
+            p.recordCaptureError(err)
             continue
         }
         if !ok {
-            // No new frame (static screen) — nothing to send this tick.
-            lastFrameT = time.Now()
-            continue
+            continue // static screen, nothing to send
         }
 
-        // (4) Broadcast exactly one per-frame message.
-        p.server.Broadcast(p.codecType(), ef)
+        // (4) Broadcast. Keyframe detection is done once here; the server
+        //     trusts ef.Keyframe (no redundant NAL scan).
+        p.server.Broadcast(ef.CodecType, ef)
         p.stats.RecordFrame(time.Since(frameStart))
-        lastFrameT = time.Now()
 
         // (5) Drop decision: if we overran, owe skips (capped at maxSkip → 5 FPS floor).
         if d := time.Since(frameStart); d > targetInterval {
@@ -185,18 +187,20 @@ func (p *Pipeline) runHardwareFrame() (EncodedFrame, bool, error) {
     return *encoded, true, nil
 }
 
-func (p *Pipeline) runSoftwareFrame() (EncodedFrame, bool, error) {
+func (p *Pipeline) runSoftwareFrame() (stream.EncodedFrame, bool, error) {
     frame, err := p.capturer.NextFrame()
-    if err != nil { return EncodedFrame{}, false, err }
-    if frame == nil { return EncodedFrame{}, false, nil } // static screen
+    if err != nil { return stream.EncodedFrame{}, false, err }
+    if frame == nil { return stream.EncodedFrame{}, false, nil } // static screen
 
-    i420 := p.converter.Convert(frame.Data)
-    nals, err := p.encoder.Encode(i420)
-    if err != nil { return EncodedFrame{}, false, err }
-    if len(nals) == 0 { return EncodedFrame{}, false, nil } // encoder skip
-    return EncodedFrame{
-        NALs: nals, Width: uint16(frame.Width), Height: uint16(frame.Height),
-        Timestamp: frame.Timestamp, Keyframe: containsKeyframe(nals, p.codecType()),
+    i420 := p.converter.Convert(frame) // takes *capture.Frame, NOT frame.Data
+    data, err := p.encoder.Encode(i420)
+    if err != nil { return stream.EncodedFrame{}, false, err }
+    if len(data) == 0 { return stream.EncodedFrame{}, false, nil }
+    return stream.EncodedFrame{
+        Data: data, Width: uint16(frame.Width), Height: uint16(frame.Height),
+        Timestamp: frame.Timestamp,
+        Keyframe:  containsKeyframe(data, p.codecType()),
+        CodecType: protocol.FrameTypeVideoH264, // SW path is always H.264
     }, true, nil
 }
 
@@ -341,30 +345,39 @@ their associated paths.
 
 ```go
 type Stats struct {
-    mu sync.Mutex // Stats is updated from the frame loop and read from /status
+    // Counters are atomics — no mutex needed for the hot path.
+    framesCaptured   atomic.Uint64
+    framesEncoded    atomic.Uint64
+    framesDropped    atomic.Uint64
+    framesBroadcast  atomic.Uint64
+    bytesBroadcast   atomic.Uint64
+    clientCount      atomic.Int32
+    audioChunks      atomic.Uint64
+    audioDrops       atomic.Uint64
 
-    // Frame pipeline counters
-    FramesCaptured   uint64
-    FramesEncoded    uint64
-    FramesDropped    uint64
-    FramesBroadcast  uint64
-
-    // Timing (rolling window, last 60 frames)
-    TotalFrameTime  RollingStats // end-to-end per processed frame
-
-    // Network
-    BytesBroadcast  uint64
-    ClientCount     int32
-
-    // Audio
-    AudioChunks     uint64
-    AudioDrops      uint64
+    // RollingStats is the only field needing a mutex (ring buffer).
+    mu             sync.Mutex
+    totalFrameTime RollingStats // 60-sample sliding window
 }
 
-// Methods used by the frame loop (all O(1), lock briefly):
-func (s *Stats) RecordFrame(d time.Duration) // FramesCaptured++, FramesBroadcast++, TotalFrameTime.Record(d)
-func (s *Stats) RecordDrop()                 // FramesDropped++
-func (s *Stats) Snapshot() StatsSnapshot     // lock-free copy for /status
+// StatsSnapshot is the read-only copy returned by Snapshot().
+// Contains NO sync.Mutex (safe to copy, return by value, serialize).
+type StatsSnapshot struct {
+    FramesCaptured  uint64
+    FramesEncoded   uint64
+    FramesDropped   uint64
+    FramesBroadcast uint64
+    BytesBroadcast  uint64
+    ClientCount     int32
+    AudioChunks     uint64
+    AudioDrops      uint64
+    FrameTime       RollingSnapshot // Min, Max, Avg, P99
+}
+
+// Methods used by the frame loop (all O(1)):
+func (s *Stats) RecordFrame(d time.Duration) // atomic increment + mu-locked ring append
+func (s *Stats) RecordDrop()                 // atomic increment only (no lock)
+func (s *Stats) Snapshot() StatsSnapshot     // reads atomics + locks mu briefly for rolling stats
 
 // RollingStats tracks min/max/avg/p99 over a sliding 60-sample window.
 type RollingStats struct {

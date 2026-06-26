@@ -60,9 +60,11 @@ The client determines its role from the URL:
 WebSocket binary frame
     → parse 22-byte header {version, type, seq, timestamp, w, h, payloadSize}
     → switch type:
-        6  (Config):  JSON.parse(payload) → configure decoder, set stream dims, cursorMode
-        1/5 (Video):  decodeVideo(seq, timestamp, payload)
-        4  (AudioPCM): playAudio(timestamp, payload)
+        6  (Config):  JSON.parse(payload) → configure decoder (ONLY if codec/width/height changed), set cursorMode
+        1  (VideoH264): decodeVideo(seq, timestamp, payload)
+        7  (VideoHEVC): decodeVideo(seq, timestamp, payload)
+        4  (AudioPCM):  playAudio(timestamp, payload)
+        5  (reserved):  ignore (formerly VP8, rejected)
         11 (CursorUpdate): cursor.update(payload)
         14 (InputAck): input.recordAck(seq, serverTs)
         2  (Ping):    send {"type":"pong","nonce":...} over text
@@ -72,7 +74,7 @@ WebSocket binary frame
 ```javascript
 // On Config frame:
 decoder.configure({
-    codec: cfg.codec,          // full WebCodecs string from server, e.g. "avc1.42E01E" (H.264) or "hvc1.*" (HW HEVC)
+    codec: cfg.codec,          // full WebCodecs string from server, e.g. "avc1.42E01F" (H.264) or "hvc1.*" (HW HEVC)
     optimizeForLatency: true,
     // Annex B in-band SPS/PPS → no `description` needed (avc Annex B mode)
 });
@@ -195,7 +197,7 @@ Updates every 1 second with frame count and byte count deltas.
 The file defines `init()` twice (line 22 and line 292). The second silently shadows the first. Merge into a single initialization function.
 
 ### R-CLI-02 + R-CLI-03: Codec from Config Handshake (RESOLVED)
-The codec mismatch is fixed by the protocol handshake: the server sends a binary `FrameTypeConfig` (type 6) frame FIRST, whose JSON payload carries the full WebCodecs `codec` string (e.g., `avc1.42E01E` for H.264 or `hvc1.*` when HW HEVC is in use), plus `width/height/fps/audio*/cursorMode`. The client configures `VideoDecoder` from that — never hardcoded.
+The codec mismatch is fixed by the protocol handshake: the server sends a binary `FrameTypeConfig` (type 6) frame FIRST, whose JSON payload carries the full WebCodecs `codec` string (e.g., `avc1.42E01F` for H.264 or `hvc1.*` when HW HEVC is in use), plus `width/height/fps/audio*/cursorMode`. The client configures `VideoDecoder` from that — never hardcoded.
 
 > Note: Config is a **binary** frame (type 6) with a JSON payload, NOT a JSON text control message. (Round-1 specs incorrectly described it as a text message — corrected here and in MODULE_PROTOCOL.)
 

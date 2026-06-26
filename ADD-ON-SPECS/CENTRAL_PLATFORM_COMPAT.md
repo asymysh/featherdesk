@@ -104,7 +104,7 @@ The wire protocol (`specs/MODULE_PROTOCOL.md`) is identical on all platforms:
 - JSON text frames for all client→server messages (input, keyframe request)
 
 The codec in the `Config` handshake is the **full WebCodecs codec string**:
-- H.264: `"avc1.42E01E"` (Constrained Baseline 3.0) — universal default
+- H.264: `"avc1.42E01F"` (Constrained Baseline 3.1) — universal default
 - AV1: `"av01.0.04M.08"` — RTX 40+ NVIDIA (Ada Lovelace), RDNA3+ AMD (RX 7000+), Intel Arc. **No Apple Silicon has AV1 HW encode** (M3+ has decode only).
 
 ---

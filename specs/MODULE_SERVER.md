@@ -95,22 +95,28 @@ type Config struct {
 
 ### TLS Configuration
 
-TLS is **mandatory** — WebCodecs in browsers requires a secure context.
+TLS is **mandatory** -- WebCodecs in browsers requires a secure context.
+
+**Minimum version:** TLS 1.2 (configurable via `server.tls.min_version`).
+**Cipher suites:** AEAD only -- GCM and ChaCha20-Poly1305. No CBC, RC4, 3DES.
+Go implementation: set `tls.Config.MinVersion = tls.VersionTLS12` and
+`tls.Config.CipherSuites` to the AEAD subset.
 
 Sources, in order:
 
-1. **`server.tls.cert` + `server.tls.key` both set** in the TOML config →
+1. **`server.tls.cert` + `server.tls.key` both set** in the TOML config ->
    load the PEM chain and key from those paths. Reload on SIGHUP.
-2. **Both empty** (development) → server generates a self-signed ECDSA P-256
+2. **Both empty** (development) -> server generates a self-signed ECDSA P-256
    certificate at startup:
    - Common Name: `viewport-rds`
    - SANs: `localhost`, `127.0.0.1`, hostname
    - Valid: 1 year
    - Cached on disk under the OS-conventional state directory so restarts
-     reuse the same cert (avoids re-prompting browser users on every
-     restart)
+     reuse the same cert. **Private key file permissions: mode 0600 (Unix)
+     / restrictive ACL (Windows). Verified on startup -- if permissions
+     are too open, server refuses to start with a clear error.**
 
-There is no Let's Encrypt integration — front the server with a reverse
+There is no Let's Encrypt integration -- front the server with a reverse
 proxy (Caddy, nginx, traefik) for ACME if needed.
 
 ### WebSocket Connection Lifecycle
@@ -154,7 +160,18 @@ proxy (Caddy, nginx, traefik) for ACME if needed.
     - conn.CloseNow()
 ```
 
-**Never** restart the capturer on connect (the original `capturer.Restart()` is removed — it disrupted all viewers).
+**Never** restart the capturer on connect (the original `capturer.Restart()` is removed -- it disrupted all viewers).
+
+### DoS Protection
+
+- **Message size limit:** `conn.SetReadLimit(server.max_message_bytes)` (default 4096).
+  Any text frame exceeding this is immediately closed with status 1009 (Message Too Big).
+  No legitimate input event exceeds 4KB.
+- **Input rate limit:** Per-client token bucket at `server.input_rate_limit` events/sec
+  (default 1000). `mousemove` events are coalesced (only the latest position is kept).
+  Events exceeding the bucket are silently dropped.
+- **Keyframe rate limit:** Max 1 forced keyframe per 500ms (coalesced across all clients).
+- **Connection limit:** `server.max_clients` (default 25). Excess connections rejected with 503.
 
 ### Session Cache (Reconnect)
 

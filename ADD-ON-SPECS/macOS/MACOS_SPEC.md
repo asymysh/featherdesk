@@ -139,12 +139,12 @@ advertised in the Config handshake.
 2. H.264 hardware (h264.gva in VTCopyVideoEncoderList)
      → kCMVideoCodecType_H264 + RequireHardwareAcceleratedVideoEncoder: true
      → All Macs from Sandy Bridge (2011+)
-     → Config codec string: "avc1.42E01E"
+     → Config codec string: "avc1.42E01F"
 
 3. H.264 software (VideoToolbox SW — Apple's own implementation)
      → kCMVideoCodecType_H264 + EnableHardwareAcceleratedVideoEncoder: false
      → Fallback when no supported GPU present
-     → Same Config codec string: "avc1.42E01E"
+     → Same Config codec string: "avc1.42E01F"
 ```
 
 VideoToolbox is the **primary encoder API** for all three tiers on macOS — HW and SW.
@@ -237,8 +237,8 @@ VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReorderin
 ### Config Handshake Codec Strings (WebCodecs)
 
 ```json
-// H.264 Constrained Baseline Level 3.0
-{ "codec": "avc1.42E01E" }
+// H.264 Constrained Baseline Level 3.1
+{ "codec": "avc1.42E01F" }
 
 // HEVC Main Profile Level 3.1
 { "codec": "hvc1.1.6.L93.B0" }

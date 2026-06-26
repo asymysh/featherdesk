@@ -139,7 +139,7 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 
 | Option | How |
 |--------|-----|
-| User installs ffmpeg | `winget install ffmpeg` / `apt install ffmpeg` / `brew install ffmpeg` |
+| User installs ffmpeg | `brew install ffmpeg` |
 | Bundle ffmpeg binary | Ship `ffmpeg` inside the .app bundle's Resources directory |
 | Docker | `FROM golang:1.26 AS build` + `apt install ffmpeg` in runtime stage |
 

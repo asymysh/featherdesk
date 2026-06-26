@@ -35,13 +35,12 @@ AOMedia AV1).
 
 | Mac | H.264 HW | HEVC HW | AV1 HW |
 |-----|---------|---------|--------|
-| Apple Silicon M1 | ✅ | ✅ | ❌ encode (decode only) |
-| Apple Silicon M1+ | ✅ | ✅ | ❌ (no AV1 HW encode on any Apple Silicon) |
-| Apple Silicon M3+ | ✅ | ✅ | ✅ |
+| Apple Silicon M1/M2 | ✅ | ✅ | ❌ (no AV1 HW encode on any Apple Silicon) |
+| Apple Silicon M3/M4 | ✅ | ✅ | ❌ encode (M3+ has AV1 HW **decode** only) |
 | Intel + AMD discrete (2016+) | ✅ AMD VCE | ✅ AMD VCE | ❌ |
 | Intel integrated Skylake+ (2015+) | ✅ QSV | ✅ QSV | ❌ |
 | Intel integrated Haswell (2014) | ✅ QSV | ❌ | ❌ |
-| Intel integrated Sandy/Ivy Bridge (2011–12) | ✅ QSV | ❌ | ❌ |
+| Intel integrated Sandy/Ivy Bridge (2011-12) | ✅ QSV | ❌ | ❌ |
 
 Runtime probe via `VTCopyVideoEncoderList` returns the available encoders. The
 add-on advertises in `FrameTypeConfig` the codec it actually picked.
@@ -120,7 +119,7 @@ no CPU pixel copy at any stage. Sunshine's macOS path does exactly this.
 ## Codec Strings (WebCodecs Config Handshake)
 
 ```json
-{ "codec": "avc1.42E01E" }    // H.264 Constrained Baseline Level 3.0
+{ "codec": "avc1.42E01F" }    // H.264 Constrained Baseline Level 3.1
 { "codec": "hvc1.1.6.L93.B0" } // HEVC Main Profile Level 3.1
 // AV1 encode not available on any Apple Silicon -- removed from codec strings
 ```
@@ -202,7 +201,7 @@ func ProbeVideoToolboxHW() (*VTHWCapabilities, error) {
 Pipeline probes (macOS, this add-on compiled in):
 ```
 VT HW supports HEVC? → pick HEVC (announce hvc1.1.6.L93.B0 in Config)
-VT HW supports H.264? → pick H.264 (announce avc1.42E01E)
+VT HW supports H.264? → pick H.264 (announce avc1.42E01F)
 Neither?              → fall through to VT SW or OpenH264 CGo add-on
 ```
 

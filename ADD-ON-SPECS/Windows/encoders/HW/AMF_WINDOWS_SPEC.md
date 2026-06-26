@@ -40,7 +40,6 @@ be redistributed without restriction.
 | Vega | ✅ | ✅ | ❌ | 1.4+ |
 | RDNA 1 (RX 5000) | ✅ | ✅ | ❌ | 1.4+ |
 | RDNA 2 (RX 6000) | ✅ | ✅ | ❌ decode only | 1.4+ |
-| RDNA 3+ (RX 7000+) | ✅ | ✅ | ✅ | 1.4+ |
 | RDNA 3 (RX 7000) | ✅ | ✅ | ✅ | 1.4+ |
 | RDNA 4 (RX 9000) | ✅ | ✅ | ✅ | 1.4+ |
 

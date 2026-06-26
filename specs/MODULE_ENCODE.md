@@ -28,10 +28,13 @@ package encode
 
 // Encoder is the contract every software encoder add-on must satisfy.
 type Encoder interface {
-    // Encode takes a YUV I420 frame and returns encoded H.264 NAL units.
+    // Encode takes a YUV I420 frame and returns the encoded bitstream as
+    // contiguous Annex B bytes (start codes retained). The server sends
+    // this directly -- NO per-NAL splitting.
     // Returns nil, nil if the frame was intentionally skipped (rate control).
-    // Returned byte slices are freshly allocated (safe to hold across calls).
-    Encode(frame *I420Frame) ([][]byte, error)
+    // The returned buffer is from a sync.Pool and must not be retained
+    // after the next Encode() call (caller copies into the WS message).
+    Encode(frame *I420Frame) ([]byte, error)
 
     // ForceKeyframe requests that the next encoded frame be an IDR.
     // Thread-safe. May be called from any goroutine.
@@ -90,12 +93,14 @@ func (c *Converter) Convert(f *capture.Frame) *I420Frame
 func (c *Converter) Close()
 ```
 
-### NAL Output Contract
+### Bitstream Output Contract
 
-Every H.264 encoder returns NALs in **Annex B form** (start code `00 00 00 01`
-retained). A keyframe's slice includes SPS, PPS, and the IDR NAL, in that order.
-The server concatenates these verbatim into one per-frame WebSocket message;
-it does NOT re-frame or strip start codes.
+`Encode()` returns a **contiguous Annex B bitstream** (start codes `00 00 00 01`
+retained). A keyframe contains SPS + PPS + IDR in order. The output is NOT split
+per-NAL -- this avoids the decompose/recompose copy overhead. The server
+prepends the 22-byte protocol header and sends the bitstream directly into
+one WebSocket message. The buffer is from a `sync.Pool` -- steady-state
+encoding is zero-alloc after warmup.
 
 ---
 
@@ -170,8 +175,8 @@ Encode module deliberately excludes:
 - **No NAL parsing.** Encoders return Annex B slices; the server's keyframe
   detection (scanning for type 5 IDR NAL) lives in MODULE_SERVER.
 - **No rate control switching.** Each add-on implements its own RC mode
-  selection from `EncoderConfig.BitrateBps` (0 = QP mode) and its own
-  TOML section.
+  selection from `EncoderConfig.InitialParams.BitrateBps` (0 = QP mode)
+  and its own TOML section.
 
 ---
 

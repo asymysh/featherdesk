@@ -52,7 +52,6 @@ is a custom NVIDIA license, Intel is MIT). No royalties, fully redistributable.
 | GCN 5 / Vega | Mesa or PRO | ✅ AMF supported on PRO |
 | RDNA 1 (RX 5000) | Mesa or PRO | ✅ AMF supported |
 | RDNA 2 (RX 6000) | Mesa or PRO | ✅ AMF H.264/HEVC (no AV1 — decode only) |
-| RDNA 3+ (RX 7000+) | Mesa or PRO | ✅ AMF + AV1 encode |
 | RDNA 3 (RX 7000) | Mesa or PRO | ✅ AMF + AV1 + improved PA |
 | RDNA 4 (RX 9000) | Mesa or PRO | ✅ AMF latest |
 

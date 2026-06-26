@@ -20,6 +20,20 @@ would require N implementations. Centralizing the contract means the
 ```go
 package stream
 
+// EncodedFrame is the pipeline-to-server handoff type. Shared by both
+// SW and HW encoder paths so the server is path-agnostic.
+type EncodedFrame struct {
+    Data      []byte // Contiguous Annex B bitstream (start codes retained).
+                     // NOT split per-NAL -- avoids decompose/recompose copy.
+                     // The server prepends the 22-byte header and sends
+                     // Data directly into the WebSocket frame.
+    Width     uint16
+    Height    uint16
+    Timestamp uint64 // CLOCK_MONOTONIC ns, carried through from capture
+    Keyframe  bool   // true if this access unit is a keyframe
+    CodecType uint8  // protocol.FrameTypeVideoH264 or FrameTypeVideoHEVC
+}
+
 // Params is the cross-platform streaming contract.
 // Owned by the pipeline; translated by each capture + encoder add-on.
 type Params struct {
@@ -257,8 +271,13 @@ the policy; add-ons translate.
   4K when display is 1080p.
 - **One reconfig at a time.** Concurrent resize requests are coalesced; the
   pipeline applies only the latest.
-- **Hysteresis.** Server ignores changes <10% from current resolution to
-  prevent oscillation during continuous resize drags.
+- **Hysteresis.** Server applies a resize if ANY dimension changes by >5%
+  OR if the aspect ratio changes by >2%. This prevents oscillation during
+  continuous resize drags while avoiding the stretching artifact that a
+  10% per-dimension threshold would cause on aspect ratio changes.
+  When a resize IS suppressed, the server sends a control message
+  `{"type":"resize_suppressed","width":W,"height":H}` so the client can
+  maintain correct aspect ratio (letterbox/pillarbox) instead of stretching.
 - **Re-keyframe required.** New resolution invalidates the GOP; the
   pipeline forces an IDR on the first frame after the change.
 
@@ -271,17 +290,20 @@ Pong roundtrip + client stats messages) and feeds adaptive signals into
 `stream.Params`:
 
 ```
-[telemetry loop, runs every 500ms]
+[telemetry loop, runs every 100ms]
    ↓
-measure RTT, PacketLossPct
+measure RTT (WS pong), PacketLossPct (client stats), send-side timing
    ↓
 update params.NetworkRTTMs, params.PacketLossPct
    ↓
-[adaptation policy]
-   if PacketLossPct > 5% for 3 consecutive windows:
-       new_bitrate = max(current * 0.7, min_bitrate)
-   else if PacketLossPct < 1% for 5 consecutive windows AND RTT stable:
-       new_bitrate = min(current * 1.1, max_bitrate)
+[adaptation policy — two-tier response]
+   FAST path (send-side): if conn.Write() takes > 2× target interval,
+       immediate 0.5× bitrate reduction (single measurement, no window)
+   SLOW path (client feedback):
+       if PacketLossPct > 5% for 2 consecutive 100ms windows (200ms):
+           new_bitrate = max(current * 0.7, min_bitrate)
+       else if PacketLossPct < 1% for 10 consecutive windows (1s) AND RTT stable:
+           new_bitrate = min(current * 1.1, max_bitrate)
    ↓
 if new_bitrate != current:
    params.BitrateBps = new_bitrate

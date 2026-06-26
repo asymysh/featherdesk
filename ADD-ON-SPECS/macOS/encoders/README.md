@@ -70,7 +70,7 @@ When multiple encoders are compiled in:
 
 ```
 1. VT HW (HEVC available)?  → use HEVC HW (announce hvc1.1.6.L93.B0)
-2. VT HW (H.264 available)? → use H.264 HW (announce avc1.42E01E)
+2. VT HW (H.264 available)? → use H.264 HW (announce avc1.42E01F)
 3. x264 subprocess?         → use x264 (GPL builds only — 2× faster than alternatives)
 4. VT SW?                   → use VT SW (macOS-native fallback)
 5. OpenH264?                → use OpenH264 (cross-platform BSD fallback)

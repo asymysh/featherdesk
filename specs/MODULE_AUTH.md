@@ -59,15 +59,17 @@ session_ttl_minutes = 60             # successful auth lifetime before re-auth
 ### Behavior
 
 - At startup, if `token` is empty, server generates a random 32-byte token
-  (base64url, 43 chars).
+  via `crypto/rand.Read()` (**CSPRNG mandatory**), base64url encoded (43 chars).
+  If set explicitly, must be ≥ 32 characters.
 - Token is printed to stdout once at startup:
   ```
-  ✓ Auth token: G3vK9xTHRvUu3yz1BqLmPnRoSt6wYzAbCdEfGhIjKlMnO
+  Auth token: G3vK9xTHRvUu3yz1BqLmPnRoSt6wYzAbCdEfGhIjKlMnO
   ```
-- If `token_file` is set, token is also written to that path (mode 600).
+- If `token_file` is set, token is also written to that path (mode 0600).
   This is how systemd / Docker / k8s pick it up.
-- Client must supply the token as a query parameter on the WebSocket
-  upgrade: `wss://host:port/ws?token=<the-token>`
+- Client authenticates via the `Authorization: Bearer <token>` header on
+  the WebSocket upgrade request. **NOT** as a URL query parameter -- query
+  params leak into proxy logs, Referer headers, and browser history.
 - Wrong/missing token → 401 Unauthorized, no WebSocket upgrade.
 
 ### Token rotation
@@ -122,10 +124,12 @@ session_ttl_minutes = 60
 
 ```toml
 [auth]
-mode                  = "pin"
+mode                   = "pin"
+pin_length             = 8           # 8-digit PIN (100M possibilities). Min 6, max 12.
 pairing_window_minutes = 5           # accept new pairings for N min after start
-paired_devices_file   = "/var/lib/viewport-rds/paired.json"
-session_ttl_minutes   = 60
+max_pin_attempts       = 10          # GLOBAL limit per window. Exponential backoff after 3.
+paired_devices_file    = "/var/lib/viewport-rds/paired.json"
+session_ttl_minutes    = 60
 ```
 
 ### Behavior
@@ -134,14 +138,20 @@ Sunshine-style first-launch pairing:
 
 1. Server starts. If `paired_devices_file` is empty or missing, opens a
    **pairing window** for `pairing_window_minutes`.
-2. During the window, server prints a 4-digit PIN to stdout:
+2. During the window, server prints an N-digit PIN (default 8) to stdout:
    ```
-   ✓ PAIRING MODE — enter PIN at https://host:port/pair
-     PIN: 4729  (valid for 4:58 more)
+   PAIRING MODE -- enter PIN at https://host:port/pair
+     PIN: 47293816  (valid for 4:58 more)
    ```
-3. Client browses to `/pair`, enters the PIN.
+3. Client browses to `/pair`, enters the PIN. Server issues a CSRF token
+   on GET `/pair`; POST must include the token. Cookie `SameSite=Strict;
+   Secure; HttpOnly`.
 4. Server validates the PIN, issues a permanent **device token** for that
-   client, stores in `paired_devices_file`.
+   client, stores in `paired_devices_file` (mode 0600).
+5. Brute-force protection: `max_pin_attempts` is a **global** counter per
+   pairing window. After 3 failures, exponential backoff (1s, 2s, 4s, 8s...)
+   between allowed attempts. After `max_pin_attempts` total, window closes.
+   An 8-digit PIN with 10 allowed attempts = 0.00001% brute-force probability.
 5. Future connections from that client use the device token (same
    mechanism as `mode = "token"` but per-client).
 
@@ -210,7 +220,7 @@ token** in the Config handshake:
 ```json
 {
   "version": 1,
-  "codec": "avc1.42E01E",
+  "codec": "avc1.42E01F",
   "width": 1920,
   "height": 1080,
   "fps": 60,
@@ -344,16 +354,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
     }
 
     // 2. Fall back to full auth
-    newToken, err := s.auth.Authenticate(r)
+    identity, err := s.auth.Authenticate(r)
     if err != nil {
         s.respondAuthError(w, err)
         return
     }
 
+    // Server creates the session token (Authenticator only validates).
+    token := generateSessionToken() // crypto/rand 32-byte base64url
     sess := &Session{
-        Token:   newToken,
-        Created: time.Now(),
-        Role:    determineRole(r),
+        Token:    token,
+        UserID:   identity.UserID,
+        DeviceID: identity.DeviceID,
+        Created:  time.Now(),
+        Role:     identity.Role,
     }
     s.storeSession(sess)
     s.upgradeAndStream(w, r, sess)
@@ -366,14 +380,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 ```
 internal/auth/
-├── auth.go            // Authenticator interface, Session struct, ModeXxx constants
-├── none.go            // ModeNone implementation
-├── token.go           // ModeToken implementation
+├── auth.go            // Authenticator interface, Identity struct, ModeXxx constants
+├── none.go            // ModeNone implementation (prints security warning)
+├── token.go           // ModeToken implementation (Bearer header, not URL params)
 ├── password.go        // ModePassword implementation + argon2id hashing
-├── pin.go             // ModePIN implementation + /pair handler
+├── pin.go             // ModePIN implementation + /pair handler + CSRF tokens
+├── devices.go         // Paired device storage, per-device revocation
 ├── oauth_stub.go      // ModeOAuth stub (build tag: oauth)
-├── sessions.go        // Session cache, TTL, lookup
-├── ratelimit.go       // Per-IP attempt limiting
+├── sessions.go        // Session cache, TTL, lookup (crypto/rand tokens only)
+├── ratelimit.go       // Per-IP attempt limiting + global PIN attempt counter
 └── auth_test.go
 ```
 
@@ -383,13 +398,20 @@ internal/auth/
 
 | Concern | Mitigation |
 |---------|-----------|
-| Token leakage in URL | Server logs strip `?token=` query param before logging |
-| Replay attack on token | Session tokens are single-use within TTL — once expired, must re-auth |
-| Brute-force password | Argon2id (slow), per-IP rate limit (5/min), 60s block on exceed |
-| Brute-force PIN | 5-minute pairing window; PIN is 4 digits but window is bounded; rate limit 1 attempt/sec |
-| Session fixation | Server generates session_token, never accepts client-supplied |
-| CSRF on /pair | Same-origin only; rejects cross-origin POSTs |
-| Cleartext over HTTP | TLS is mandatory (see [`MODULE_SERVER.md`](./MODULE_SERVER.md)) — auth is never sent in clear |
+| Token leakage in URL | Token sent via `Authorization: Bearer` header, NEVER in URL query params |
+| Replay attack on token | Session tokens are scoped to TTL -- once expired, must re-auth |
+| Brute-force password | Argon2id (memory-hard), per-IP rate limit (5/min), 60s block on exceed |
+| Brute-force PIN | 8-digit default (100M space), global max 10 attempts per window, exponential backoff after 3 |
+| Session fixation | Server generates session_token via `crypto/rand.Read()` (CSPRNG mandatory), never accepts client-supplied |
+| CSRF on /pair | CSRF token issued on GET `/pair`, required on POST. Cookie: `SameSite=Strict; Secure; HttpOnly` |
+| Cleartext over HTTP | TLS 1.2+ mandatory, AEAD ciphers only (see [`MODULE_SERVER.md`](./MODULE_SERVER.md)) |
+| Token generation | **All** random tokens (auth, session, device) MUST use `crypto/rand.Read()`. `math/rand` is prohibited. |
+| TLS key storage | Self-signed cert private key cached with mode 0600 (Unix) / restrictive ACL (Windows). Permissions verified on startup. |
+| Device revocation | `DELETE /devices/{device_id}` admin endpoint (requires controller auth) revokes individual paired devices. CLI: `viewport-rds revoke-device <id>`. |
+| Metrics endpoint | If `metrics.bind` is not a loopback address, server prints a security warning at startup. Consider adding bearer token auth to scrape endpoint for exposed deployments. |
+| Viewer-only attacks | `require_auth_for_view = true` by default. Unauthenticated viewing requires explicit opt-in. |
+| Controller takeover | `allow_takeover = false` by default. When enabled, displaced controller receives WS close code 4410. |
+| Origin hijacking | `allow_origin = ""` by default (same-origin only). Wildcard `"*"` requires explicit opt-in. |
 
 ---
 

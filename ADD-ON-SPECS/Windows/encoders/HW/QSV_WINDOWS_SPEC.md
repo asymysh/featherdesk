@@ -69,8 +69,9 @@ CGo config:
 import "C"
 ```
 
-`vpl.lib` ships with the Intel graphics driver. SDK headers vendored under
-`internal/encode/qsv/vpl/`.
+`vpl.lib` is the static import library from the **oneVPL SDK** (not the
+graphics driver -- the driver ships the runtime DLL `libmfx-gen.dll`).
+SDK headers vendored under `internal/encode/qsv/vpl/`.
 
 ---
 

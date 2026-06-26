@@ -38,10 +38,17 @@ package hwencode
 // This is the SAME struct as capture.FBInfo, exported here for clarity.
 type SurfaceHandle = capture.FBInfo
 
-// EncodedFrame lives in the stream package (pkg/stream/frame.go) — both
-// SW and HW encoders produce the same type so the pipeline is path-agnostic.
-// Re-exported here for documentation clarity:
-//   type EncodedFrame = stream.EncodedFrame
+// EncodedFrame lives in pkg/stream/frame.go — shared by SW and HW paths:
+//
+//   type EncodedFrame struct {
+//       Data      []byte  // Contiguous Annex B bitstream (NOT split per-NAL)
+//       Width     uint16
+//       Height    uint16
+//       Timestamp uint64
+//       Keyframe  bool
+//       CodecType uint8   // FrameTypeVideoH264 or FrameTypeVideoHEVC
+//   }
+type EncodedFrame = stream.EncodedFrame
 
 // HardwareEncoder is the contract every HW encoder add-on must satisfy.
 type HardwareEncoder interface {
@@ -59,7 +66,7 @@ type HardwareEncoder interface {
     ForceKeyframe()
 
     // Codec returns the WebCodecs codec string for the Config handshake
-    // (e.g. "avc1.42E01E" for H.264 Constrained Baseline 3.0, "hvc1.*"
+    // (e.g. "avc1.42E01F" for H.264 Constrained Baseline 3.1, "hvc1.*"
     // for HEVC variants).
     Codec() string
 
