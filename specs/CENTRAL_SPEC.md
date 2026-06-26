@@ -71,7 +71,7 @@ in code. See [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 8 plug-and-play modules. Each module has its own spec
+The system is decomposed into 12 plug-and-play modules. Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
@@ -84,22 +84,45 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 6 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs) |
 | 7 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: probe + select compiled-in add-ons, lifecycle, pacing, frame drops, wiring |
 | 8 | **Config** | [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
+| 9 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract (injection impls are add-ons per OS) |
+| 10 | **Clipboard** | [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
+| 11 | **File Transfer** | [`./MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder over a dedicated `/files` connection (core) |
+| 12 | **Webcam** | [`./MODULE_WEBCAM.md`](./MODULE_WEBCAM.md) | Client→host virtual-camera contract + H.264 decode (virtual-camera sinks are add-ons per OS) |
 
-> **Encoder + capture implementations are not core modules.** Every encoder
-> (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF, QSV,
-> MediaFoundation HW) and every capture backend (KMS+EGL, NvFBC, SCK, DXGI DD)
-> is a build-tagged add-on under
-> [`../ADD-ON-SPECS/{Platform}/{capture,encoders}/`](../ADD-ON-SPECS/).
-> The default binary ships with zero encoders and zero capture backends — users
-> compile in what they need. See the index below.
+> **Encoder, capture, input, and webcam implementations are not core modules.**
+> Every encoder (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF,
+> QSV, MediaFoundation HW), every capture backend (KMS+EGL, NvFBC, SCK, DXGI DD),
+> every input injector (interception, uinput, cgevent, win_touch), and every
+> webcam sink (v4l2loopback, dshow_vcam, cmio_ext) is a build-tagged add-on
+> under [`../ADD-ON-SPECS/{Platform}/{capture,encoders,input,webcam}/`](../ADD-ON-SPECS/).
+> The default binary ships with zero of each — users compile in what they need.
+> A binary with no input add-on is **view-only**; with no webcam add-on it has
+> no webcam capability. See the index below.
+
+> **Clipboard + File Transfer are core (not add-ons).** Their OS surface is small
+> (clipboard APIs, file I/O) and they are baseline remote-desktop expectations,
+> so they live in core with per-OS files behind build constraints.
 
 > **Removed from the module map:**
 > - **Logger** — replaced by stdlib `log/slog`. No dedicated module spec needed.
 >   Server/Pipeline take a `*slog.Logger` directly. Behavior (text vs JSON,
 >   level, output) is set via the `[log]` config section.
-> - **Audio** + **Input** — deferred until video capture+encode is stable
->   across all three OSes. Specs retained at `MODULE_AUDIO.md` / `MODULE_INPUT.md`
->   for reference but marked deferred at the top of each file.
+> - **Audio** — deferred until video capture+encode is stable across all three
+>   OSes. Spec retained at `MODULE_AUDIO.md`, marked deferred at the top.
+>   (**Input is no longer deferred** — see module 9.)
+
+> **Not supported (permanently out of scope):**
+> - **Generic USB redirection** — needs kernel drivers on both ends, cannot work
+>   from a browser, and is the single largest attack surface (BadUSB-class). Every
+>   peer (Parsec, Sunshine, Moonlight) skips it. Device-class features (webcam,
+>   future gamepad) are handled at the API level instead.
+> - **DRM-protected content** (Netflix/Disney+ L1) — renders through the OS
+>   Protected Media Path and bypasses the compositor (black frames) on
+>   Windows/macOS; no legal bypass exists. Linux L3 captures naturally with no
+>   special handling. FeatherDesk neither circumvents nor markets DRM streaming.
+> - **TUN/VPN tunnel** — browsers cannot use a TUN device; full LAN exposure is a
+>   serious security surface. Recommend Tailscale alongside FeatherDesk instead.
+> - **Smart card / FIDO2 redirection** — no demonstrated demand; out of scope.
 
 ---
 
@@ -228,6 +251,31 @@ for the full rationale, recommended combinations, and headless install flow.
 > **MediaFoundation HW is the recommended cross-vendor default for Windows** —
 > closest equivalent to VA-API on Linux. Ship `mf_hw` for one-binary-covers-everything;
 > add vendor SDKs (NVENC/AMF/QSV) for peak performance and vendor-specific features.
+
+### Input add-on specs
+
+Implement `input.KeyMouseInjector` / `input.TouchInjector`. The core decodes the
+binary input protocol; the add-on performs OS injection. No input add-on
+compiled in → **view-only** binary. See [`MODULE_INPUT.md`](./MODULE_INPUT.md).
+
+| Add-on | Build tag | OS | Spec | Mechanism | Status |
+|--------|-----------|----|----- |-----------|--------|
+| Interception | `interception` | Windows | [`Windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/INTERCEPTION_WINDOWS_SPEC.md) | Filter driver + SendSAS (Ctrl+Alt+Del); injects below UIPI | 📋 Specced |
+| Win Touch | `win_touch` | Windows | [`Windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/WIN_TOUCH_WINDOWS_SPEC.md) | Touch Injection API; pen→touch (pressure kept) | 📋 Specced |
+| uinput | `uinput` | Linux | [`Linux/input/UINPUT_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/input/UINPUT_LINUX_SPEC.md) | Kernel `/dev/uinput`, X11+Wayland; unified (gamepad/touch-capable) | 📋 Specced |
+| CGEvent | `cgevent` | macOS | [`macOS/input/CGEVENT_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/input/CGEVENT_MACOS_SPEC.md) | `CGEventPost`; needs Accessibility permission | 📋 Specced |
+
+### Webcam add-on specs
+
+Implement `webcam.Sink` (client→host virtual camera). The core decodes H.264 to
+NV12; the add-on presents it as a local camera. No webcam add-on → no webcam
+capability. See [`MODULE_WEBCAM.md`](./MODULE_WEBCAM.md).
+
+| Add-on | Build tag | OS | Spec | Sink | Status |
+|--------|-----------|----|----- |------|--------|
+| v4l2loopback | `v4l2loopback` | Linux | [`Linux/webcam/V4L2LOOPBACK_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/webcam/V4L2LOOPBACK_LINUX_SPEC.md) | `/dev/videoN` (v4l2loopback module) | 📋 Specced |
+| DirectShow VCam | `dshow_vcam` | Windows | [`Windows/webcam/DSHOW_VCAM_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/webcam/DSHOW_VCAM_WINDOWS_SPEC.md) | DirectShow source filter (OBS-style) | 📋 Specced |
+| CoreMediaIO Ext | `cmio_ext` | macOS | [`macOS/webcam/CMIO_EXT_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/webcam/CMIO_EXT_MACOS_SPEC.md) | CoreMediaIO Camera Extension (12.3+) | 📋 Specced |
 
 ### Where to register a new add-on
 
@@ -399,21 +447,31 @@ One WebSocket binary message = one frame (one access unit). The server NEVER spl
 
 ---
 
-### Contract 4: Client -> Server (JSON text channel)
+### Contract 4: Client -> Server (two channels)
 
-The client sends ONLY JSON text (never binary). Input events carry a per-connection `seq` echoed back via `InputAck`.
+Client→server uses the WebSocket opcode as the discriminator (see
+[`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) and [`MODULE_INPUT.md`](./MODULE_INPUT.md)):
 
-```json
-{"type": "key", "seq": 1024, "event": "down|up", "code": "KeyA"}
-{"type": "mousemove", "seq": 1025, "x": 500, "y": 300}
-{"type": "mousedown", "seq": 1026, "button": 0}
-{"type": "mouseup", "seq": 1027, "button": 1}
-{"type": "wheel", "seq": 1028, "deltaY": -120}
-{"type": "keyframe"}                  // request IDR (e.g., on detected gap)
-{"type": "pong", "nonce": 12345}      // reply to server Ping
+- **Binary frames:** input events (compact 6-byte record header, types
+  `0x01-0x4F`) and webcam (type `0x50`, 22-byte header). Input is binary for
+  performance + security (measured ~121× faster decode, zero-alloc, smaller
+  attack surface).
+- **Text frames (JSON):** rare human-triggered control only.
+
+```
+BINARY  [Version=1][Type][Seq u32][…record…]      // input event (MODULE_INPUT)
+BINARY  [22-byte FrameHeader, Type=0x50][H.264]   // webcam (MODULE_WEBCAM)
+TEXT    {"type":"keyframe"}                         // request IDR
+TEXT    {"type":"resize","width":1280,"height":720}
+TEXT    {"type":"clipboard","format":"text/plain","text":"…"}
+TEXT    {"type":"pong","nonce":12345}
 ```
 
-**Coordinate-space rule:** the `x`/`y` in `mousemove` are in the **stream coordinate space** advertised by the latest `Config` (its `width`/`height`). The server's uinput device MUST be configured to that exact range. Capture, encode, Config, and input dims must all agree (no hidden scaling).
+**Coordinate-space rule:** absolute pointer `X`/`Y` are in the **stream
+coordinate space** advertised by the latest `Config` (`width`/`height`). The
+injector's absolute range MUST equal that range. Capture, encode, Config, and
+input dims must all agree (no hidden scaling); the pipeline calls
+`Dispatcher.Resize` on a resolution change.
 
 ---
 
@@ -572,10 +630,14 @@ type Server interface {
 > - `encode -> capture` (Converter takes `*capture.Frame`)
 > - `hwencode -> capture` (`SurfaceHandle = capture.FBInfo`)
 > - `encode, hwencode, capture -> stream` (Params, error sentinels)
-> - `server -> {protocol, auth, stream}` (types + auth gate)
+> - `server -> {protocol, auth, stream, input}` (types + auth gate + input dispatch)
+> - `input` injection add-ons -> `input` core (KeyMouseInjector/TouchInjector + HID table)
+> - `clipboard`, `filetransfer` are core leaves (per-OS files); `server` calls them
+> - `webcam` sink add-ons -> `webcam` core (Sink interface); core decode -> `stream`
 > - No cycles. `stream` is the shared leaf. `pipeline` is the sole orchestrator.
-> - Audio + Input not shown -- deferred from the core dependency graph.
-> - No `ffmpeg`, no `libavcodec`, no `libvpx` -- all rejected.
+> - Audio not shown -- deferred from the core dependency graph.
+> - No `ffmpeg`, no `libavcodec`, no `libvpx` -- all rejected (webcam decode uses
+>   the same CGo decode capability as the bench tooling, not a new dependency).
 > - No custom `logger` module -- every module takes `*slog.Logger` directly.
 
 **Key Properties:**
@@ -707,6 +769,11 @@ featherdesk/
 │   │   └── encode.go           # Encoder interface + I420Frame + EncoderConfig
 │   ├── hwencode/
 │   │   └── hwencode.go         # HardwareEncoder interface + per-OS surface types
+│   ├── stream/
+│   │   └── stream.go           # Params, EncodedFrame, error sentinels (shared leaf)
+│   ├── input/
+│   │   ├── input.go            # KeyMouseInjector/TouchInjector + Event + Dispatcher
+│   │   └── hid.go              # Shared HID-usage tables (neutral keycode contract)
 │   ├── protocol/
 │   │   └── protocol.go         # Wire types + marshal/unmarshal (v1, 22-byte header)
 │   └── config/
@@ -726,9 +793,28 @@ featherdesk/
 │   │   ├── vt/                 # VideoToolbox macOS SW+HW add-on (build tags: vt_sw, vt_hw)
 │   │   ├── mf/                 # MediaFoundation Windows HW add-on (build tag: mf_hw)
 │   │   └── convert/            # libyuv color conversion (used by every SW encoder add-on)
+│   ├── input/                 # Input injection add-ons (zero-by-default → view-only)
+│   │   ├── interception/      # Windows filter driver + SendSAS (build tag: interception)
+│   │   ├── wintouch/          # Windows Touch Injection (build tag: win_touch)
+│   │   ├── uinput/            # Linux /dev/uinput (build tag: uinput)
+│   │   └── cgevent/           # macOS CGEventPost (build tag: cgevent)
+│   ├── clipboard/             # CORE clipboard sync (per-OS files behind build constraints)
+│   │   ├── clipboard.go        # Monitor interface, Content, sanitization
+│   │   ├── clipboard_windows.go # AddClipboardFormatListener + CF_HTML
+│   │   ├── clipboard_linux.go   # XFixes / wlr-data-control
+│   │   └── clipboard_darwin.go  # NSPasteboard changeCount polling
+│   ├── filetransfer/          # CORE file transfer (dedicated /files connection)
+│   │   ├── service.go          # Transfer service, windowed flow control, SHA-256
+│   │   └── sandbox.go          # Fixed-folder path-traversal guard
+│   ├── webcam/                # Webcam virtual-camera sink add-ons + core decode
+│   │   ├── receiver.go         # CORE: H.264 → NV12 decode, drives the Sink
+│   │   ├── v4l2loopback/       # Linux /dev/videoN (build tag: v4l2loopback)
+│   │   ├── dshow_vcam/         # Windows DirectShow filter writer (build tag: dshow_vcam)
+│   │   └── cmio_ext/           # macOS CoreMediaIO Extension IPC (build tag: cmio_ext)
 │   ├── server/
 │   │   ├── server.go           # HTTPS/WSS server (TLS mandatory)
-│   │   ├── client.go           # Per-client state
+│   │   ├── client.go           # Per-client state; binary-input vs text routing
+│   │   ├── files.go            # /files WebSocket endpoint (file transfer)
 │   │   └── metrics.go          # Prometheus /metrics handler (separate port)
 │   ├── config/
 │   │   ├── load.go             # TOML parse + validate
@@ -736,10 +822,10 @@ featherdesk/
 │   └── pipeline/
 │       ├── pipeline.go         # Pipeline struct, Start(), shutdown
 │       ├── frameloop.go        # Main frame loop, pacing, drop logic
-│       ├── probe.go            # Add-on probe + selection
+│       ├── probe.go            # Add-on probe + selection (capture/encode/input/webcam)
 │       └── stats.go            # Rolling-window statistics + Prometheus metric registration
 │
-│  (audio/ and input/ subdirs deferred — to be added when those modules are un-paused)
+│  (audio/ subdir deferred — added when the audio module is un-paused)
 ├── specs/                       # This spec directory
 ├── go.mod
 ├── go.sum

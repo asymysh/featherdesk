@@ -135,50 +135,84 @@ WebSocket binary frame (Type == 11, CursorUpdate)
 - When `cursorMode == "embedded"`, the cursor is already in the video; the client hides its overlay and ignores CursorUpdate.
 - Client-side cursor moves immediately on each update without waiting for a video frame → lower perceived input latency.
 
-### Input Handling
+### Input Handling (binary)
+
+Input is sent as **binary** WebSocket frames using the compact record format
+from [`MODULE_INPUT.md`](./MODULE_INPUT.md) — not JSON. The client encodes into a
+reused `ArrayBuffer` via `DataView` (zero garbage on the hot path) and maps
+`KeyboardEvent.code` → USB HID usage via a static table for layout neutrality.
 
 ```javascript
 let inputSeq = 0;
 const sentAt = new Map();              // seq → performance.now(), for latency
+const buf = new ArrayBuffer(16), dv = new DataView(buf);  // reused; largest record fits
 
-function sendInput(msg) {
-    if (ws.readyState !== WebSocket.OPEN) return;   // R-CLI-07
-    msg.seq = ++inputSeq;
-    sentAt.set(msg.seq, performance.now());
-    ws.send(JSON.stringify(msg));
+function header(type) {                // 6-byte shared header
+    dv.setUint8(0, 1);                 // Version
+    dv.setUint8(1, type);              // Type
+    dv.setUint32(2, ++inputSeq, true); // Seq (LE)
+    sentAt.set(inputSeq, performance.now());
+    return inputSeq;
 }
+function send(len) { if (ws.readyState === WebSocket.OPEN) ws.send(buf.slice(0, len)); }
 
-// Only the controller captures input (viewer mode does nothing)
 if (isController) {
+    // Key: HID usage from code; Flags bit0 = down
     document.addEventListener('keydown', (e) => { e.preventDefault();
-        sendInput({ type: "key", event: "down", code: e.code }); });
+        header(0x10); dv.setUint16(6, hidFromCode(e.code), true); dv.setUint8(8, 1); send(9); });
     document.addEventListener('keyup', (e) => { e.preventDefault();
-        sendInput({ type: "key", event: "up", code: e.code }); });
+        header(0x10); dv.setUint16(6, hidFromCode(e.code), true); dv.setUint8(8, 0); send(9); });
 
-    // Mouse movement: absolute, scaled to the stream space from Config (streamWidth/Height)
+    // Mouse: absolute (or relative when pointer-locked)
     canvas.addEventListener('pointermove', (e) => {
-        const rect = canvas.getBoundingClientRect();
-        const x = Math.round((e.clientX - rect.left) / rect.width  * streamWidth);
-        const y = Math.round((e.clientY - rect.top)  / rect.height * streamHeight);
-        sendInput({ type: "mousemove", x, y });
+        if (document.pointerLockElement === canvas) {           // relative (FPS)
+            header(0x21); dv.setInt16(6, e.movementX, true); dv.setInt16(8, e.movementY, true); send(10);
+        } else {                                                 // absolute, scaled to stream space
+            const r = canvas.getBoundingClientRect();
+            const x = Math.round((e.clientX - r.left) / r.width  * streamWidth);
+            const y = Math.round((e.clientY - r.top)  / r.height * streamHeight);
+            header(0x20); dv.setUint16(6, x, true); dv.setUint16(8, y, true); send(10);
+        }
     });
-    canvas.addEventListener('pointerdown', (e) => sendInput({ type: "mousedown", button: e.button }));
-    canvas.addEventListener('pointerup',   (e) => sendInput({ type: "mouseup",   button: e.button }));
+    canvas.addEventListener('pointerdown', (e) => { header(0x22); dv.setUint8(6, e.button); dv.setUint8(7, 1); send(8); });
+    canvas.addEventListener('pointerup',   (e) => { header(0x22); dv.setUint8(6, e.button); dv.setUint8(7, 0); send(8); });
     canvas.addEventListener('wheel', (e) => { e.preventDefault();
-        sendInput({ type: "wheel", deltaY: e.deltaY }); });
+        const unit = e.deltaMode;       // 0=pixel,1=line,2=page
+        header(0x23); dv.setInt16(6, e.deltaX, true); dv.setInt16(8, e.deltaY, true); dv.setUint8(10, unit); send(11); });
 }
 
-// InputAck → latency
+// InputAck (binary type 14) → latency
 function recordAck(seq /*, serverTs */) {
     const t0 = sentAt.get(seq);
     if (t0 !== undefined) { inputLatencyMs = performance.now() - t0; sentAt.delete(seq); }
 }
 ```
 
-- **Input is JSON text** (never binary), separate from the media stream.
-- Every event carries a monotonic `seq`; the server's `InputAck` (binary type 14) echoes it so the client measures input round-trip latency.
-- `sendInput` checks `ws.readyState` before sending (fixes R-CLI-07).
-- Keyframe requests on gap use the same text channel: `ws.send('{"type":"keyframe"}')`.
+- **Input is binary** (`ws.binaryType = 'arraybuffer'`), zero-alloc on the hot
+  path. `hidFromCode()` is a static `KeyboardEvent.code` → HID-usage table.
+- Pointer Lock toggles absolute (0x20) ↔ relative (0x21); request
+  `canvas.requestPointerLock({ unadjustedMovement: true })` on click (Chrome/Edge
+  disable mouse acceleration; Safari ignores the option).
+- Every record carries `Seq`; the server's `InputAck` (binary type 14) echoes it
+  for latency measurement.
+- **Control** messages (keyframe, resize, set_*, clipboard, webcam_*) still use
+  JSON **text** frames: `ws.send('{"type":"keyframe"}')`.
+
+### Clipboard, File Transfer, Webcam (client side)
+
+- **Clipboard** (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)): on Chrome/Edge,
+  request `clipboard-read`/`clipboard-write` and use the `clipboardchange` event
+  to push copies (JSON text `{"type":"clipboard",...}`); write host clipboard
+  pushes (binary type 12) silently. On Firefox/Safari, intercept `copy`/`paste`
+  events (gesture-bound). Text + sanitized HTML only.
+- **File transfer** (see [`MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md)):
+  `dragover`/`drop` on the canvas → open the dedicated `/files` WebSocket → stream
+  `file.stream()` in 64 KiB chunks. Show a drop overlay. A **Files** panel lists
+  the host Outgoing folder for downloads (`showSaveFilePicker` on Chrome/Edge).
+- **Webcam** (see [`MODULE_WEBCAM.md`](./MODULE_WEBCAM.md), Chrome/Edge only):
+  `getUserMedia(720p30)` → WebCodecs `VideoEncoder` (H.264 CBP, realtime) →
+  binary frames (type 0x50) on the main socket. A camera-sharing indicator + stop
+  control are shown.
 
 ### Status Display
 
@@ -213,14 +247,17 @@ Measure decode latency and frame drop rate. Send periodic stats back to server t
 ### R-CLI-07: Handle WebSocket Send Errors (RESOLVED)
 `sendInput()` now checks `ws.readyState === OPEN` before sending and drops otherwise (see Input Handling).
 
-### R-CLI-08: Add Touch Input Support
-Map touch events to mouse events for tablet/mobile access:
-- `touchstart` → `mousedown` (button 0)
-- `touchmove` → `mousemove`
-- `touchend` → `mouseup`
+### R-CLI-08: Touch Input (RESOLVED — native touch records)
+Touch uses `PointerEvent` and the binary `TouchContact` record (type 0x30), NOT
+mouse emulation. The host injects real multitouch where a `TouchInjector` add-on
+exists (Windows `win_touch`); where none exists the host drops touch records.
+Pen is downgraded to touch (pressure preserved on Windows). See
+[`MODULE_INPUT.md`](./MODULE_INPUT.md).
 
-### R-CLI-09: Add Clipboard Sync (Future)
-Bidirectional clipboard: `navigator.clipboard.read/write` on client, xclip/wl-copy on server.
+### R-CLI-09: Clipboard Sync (RESOLVED — see MODULE_CLIPBOARD)
+Bidirectional text + sanitized HTML clipboard, opt-in, direction-controlled.
+Client uses `clipboardchange` (Chrome/Edge) or `copy`/`paste` interception
+(Firefox/Safari). See [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md).
 
 ### R-CLI-10: Modularize JavaScript
 Split `compositor.js` into modules:

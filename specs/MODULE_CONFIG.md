@@ -235,6 +235,48 @@ cache_ttl_seconds     = 300          # how long server holds session state after
 require_same_auth     = true         # don't allow resume with different credentials
 # NOTE: max connections is server.max_clients (not here)
 
+# ─────────────────────────────────────────────────────────────────────────
+# INPUT (injection — requires a compiled-in input add-on; see MODULE_INPUT.md)
+# ─────────────────────────────────────────────────────────────────────────
+
+[input]
+enabled        = true     # master switch. false = view-only even if an add-on is compiled in.
+relative_mouse = true     # honor pointer-lock relative-mode frames (FPS gaming)
+
+# ─────────────────────────────────────────────────────────────────────────
+# CLIPBOARD (core; text + rich HTML; see MODULE_CLIPBOARD.md)
+# ─────────────────────────────────────────────────────────────────────────
+
+[clipboard]
+enabled    = false              # opt-in (clipboard carries secrets)
+direction  = "bidirectional"    # "bidirectional" | "client_to_host" | "host_to_client" | "disabled"
+max_bytes  = 1048576            # 1 MiB cap per payload
+formats    = ["text", "html"]   # supported: "text", "html" (image/file NOT supported)
+
+# ─────────────────────────────────────────────────────────────────────────
+# FILE TRANSFER (core; drag-drop, fixed folder, separate /files connection)
+# ─────────────────────────────────────────────────────────────────────────
+
+[filetransfer]
+enabled        = false          # opt-in
+incoming_dir   = ""             # "" = <Downloads>/FeatherDesk/Incoming
+outgoing_dir   = ""             # "" = <Downloads>/FeatherDesk/Outgoing
+max_file_bytes = 0              # 0 = unlimited; else per-file cap
+max_concurrent = 4              # simultaneous transfers
+rate_limit_bps = 0              # 0 = unlimited; else throttle to protect video
+
+# ─────────────────────────────────────────────────────────────────────────
+# WEBCAM (client→host virtual camera — requires a webcam add-on; MODULE_WEBCAM.md)
+# ─────────────────────────────────────────────────────────────────────────
+
+[webcam]
+enabled   = false                  # opt-in
+label     = "FeatherDesk Camera"   # device name shown to host apps
+width     = 1280
+height    = 720
+fps       = 30
+bitrate   = 2000000                # client encoder target (advisory)
+
 # ═════════════════════════════════════════════════════════════════════════
 # ADD-ON MODULE CONFIGS
 # ═════════════════════════════════════════════════════════════════════════
@@ -376,20 +418,59 @@ virtual_display_hz     = 60
 display_id       = 0              # 0 = main display, or NSScreen index
 show_cursor      = false          # false = cursor sent separately as CursorUpdate
 
+# ─────────────────────────────────────────────────────────────────────────
+# Input add-ons (injection backends; see MODULE_INPUT.md)
+# ─────────────────────────────────────────────────────────────────────────
+
+[addon_module_interception]
+# Windows Interception filter driver + SendSAS for Ctrl+Alt+Del.
+keyboard_device = 0    # 0 = first available keyboard (1..10 to pin a specific device)
+mouse_device    = 0    # 0 = first available mouse (11..20 to pin)
+enable_sas      = true # allow Ctrl+Alt+Del via SendSAS (requires SYSTEM service)
+
+[addon_module_uinput]
+# Linux kernel /dev/uinput (X11 + Wayland). Keyboard, mouse, scroll.
+device_name   = "FeatherDesk Virtual Input"
+hi_res_scroll = true   # use REL_WHEEL_HI_RES if the kernel supports it
+
+[addon_module_cgevent]
+# macOS CGEventPost. Requires Accessibility permission.
+prompt_accessibility = true   # auto-open the Accessibility pane if not trusted
+
+[addon_module_win_touch]
+# Windows Touch Injection API. Separate from interception.
+max_contacts = 10      # 1..256 simultaneous touch points
+feedback     = "none"  # "none" | "default" | "indirect" — system touch visual
+
+# ─────────────────────────────────────────────────────────────────────────
+# Webcam add-ons (client→host virtual camera; see MODULE_WEBCAM.md)
+# ─────────────────────────────────────────────────────────────────────────
+
+[addon_module_v4l2loopback]
+# Linux v4l2loopback virtual camera.
+device_path  = ""                  # "" = auto-discover by card_label
+card_label   = "FeatherDesk Camera"
+
+[addon_module_dshow_vcam]
+# Windows DirectShow virtual camera (OBS-style, shared memory + registered filter).
+shared_mem_name = "FeatherDeskCam"
+register_check  = true             # verify the filter is regsvr32'd at startup
+
+[addon_module_cmio_ext]
+# macOS CoreMediaIO Camera Extension (signed + notarized system extension).
+ipc_path     = ""                  # "" = default XPC/socket path
+extension_id = "ai.featherdesk.camera"
+
 # ═════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────────────────────────────────────────────────────────
-# Deferred sections — not yet enforced. Reserved for when audio + input
-# modules come out of deferral.
+# Deferred sections — not yet enforced. Reserved for when the audio module
+# comes out of deferral. (Input is NO LONGER deferred — see [input] above.)
 # ─────────────────────────────────────────────────────────────────────────
 
 # [audio]
 # enabled = false
 # (full schema TBD when MODULE_AUDIO is un-deferred)
-
-# [input]
-# enabled = false
-# (full schema TBD when MODULE_INPUT is un-deferred)
 ```
 
 ---
@@ -421,6 +502,14 @@ show_cursor      = false          # false = cursor sent separately as CursorUpda
 | `auth.max_pin_attempts` | 1–100 (default 10) | startup error |
 | `reconnect.cache_ttl_seconds` | 0–3600 | startup error |
 | `server.max_clients` | 1–100 | startup error |
+| `clipboard.direction` | one of `bidirectional`/`client_to_host`/`host_to_client`/`disabled` | startup error |
+| `clipboard.max_bytes` | ≥ 1024 | startup error |
+| `clipboard.formats` | subset of `["text","html"]` | startup error |
+| `filetransfer.incoming_dir` / `outgoing_dir` | empty (default) or writable directory | startup error |
+| `filetransfer.max_concurrent` | 1–16 | startup error |
+| `webcam.fps` | 1–60 | startup error |
+| `webcam.width` / `webcam.height` | ≥ 160 | startup error |
+| `input.enabled` requires an input add-on compiled in | else view-only (warn, not error) | startup warning |
 | Unknown key anywhere | strict mode | startup error |
 
 ---
@@ -474,7 +563,11 @@ type Config struct {
     Stream    StreamSection    `toml:"stream"`     // dynamic params: width/height/fps/bitrate/qp/hdr
     Auth      AuthSection      `toml:"auth"`       // mode, password_hash, token, pin_*
     Reconnect ReconnectSection `toml:"reconnect"`  // cache_ttl_seconds, require_same_auth
-    // Audio + Input added when those modules are un-deferred
+    Input        InputSection        `toml:"input"`         // enabled, relative_mouse
+    Clipboard    ClipboardSection    `toml:"clipboard"`     // enabled, direction, max_bytes, formats
+    FileTransfer FileTransferSection `toml:"filetransfer"`  // enabled, dirs, caps
+    Webcam       WebcamSection       `toml:"webcam"`        // enabled, label, geometry, bitrate
+    // Audio added when that module is un-deferred.
     // Per-addon sections ([addon_module_*]) are parsed dynamically by each
     // add-on's init config reader -- they do not appear as static struct fields.
 }

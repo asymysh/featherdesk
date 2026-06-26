@@ -13,26 +13,34 @@ package protocol
 
 const HeaderSize = 22
 
-// Frame type constants (all server → client; client uses JSON text channel)
+// Frame type constants.
+// Server → client uses these binary frame types with the 22-byte FrameHeader.
+// Client → server uses BINARY frames for input (compact 6-byte record header,
+// see MODULE_INPUT.md) + webcam (FrameTypeWebcamH264 with the 22-byte header),
+// and TEXT frames for rare JSON control. See "Channel Model" below.
 const (
     FrameTypeVideoH264    uint8 = 1
     FrameTypePing         uint8 = 2
     // 3 reserved (client Pong routed via JSON text channel)
     FrameTypeAudioPCM     uint8 = 4
     // 5 reserved (formerly VideoVP8 -- VP8 codec rejected; never reuse without protocol version bump)
-    FrameTypeConfig       uint8 = 6  // JSON handshake; resent on capability change
-    FrameTypeVideoHEVC    uint8 = 7  // HEVC access unit (VPS+SPS+PPS+IDR for keyframes; NAL types 19-20)
-    FrameTypeCursorUpdate uint8 = 11
-    FrameTypeInputAck     uint8 = 14
+    FrameTypeConfig       uint8 = 6  // S→C JSON handshake; resent on capability change
+    FrameTypeVideoHEVC    uint8 = 7  // S→C HEVC access unit (VPS+SPS+PPS+IDR; NAL types 19-20)
+    FrameTypeCursorUpdate uint8 = 11 // S→C cursor position + optional image
+    FrameTypeClipboard    uint8 = 12 // S→C clipboard push (JSON payload; see MODULE_CLIPBOARD.md)
+    FrameTypeInputAck     uint8 = 14 // S→C echoes client input seq + recv timestamp
+    FrameTypeWebcamH264   uint8 = 0x50 // C→S webcam access unit (Annex B H.264; see MODULE_WEBCAM.md)
 )
 
 // Custom WebSocket close codes (RFC 6455 allows 4000-4999 for private use)
 const (
-    CloseResumeExpired = 4401 // session token unknown or expired; client must re-auth
+    CloseResumeExpired     = 4401 // session token unknown or expired; client must re-auth
+    CloseControllerTakeover = 4410 // controller slot seized by another authenticated user
 )
 // NOTE: There is no binary KeyframeReq or Resize type.
 //   - Keyframe requests arrive as JSON text: {"type":"keyframe"}
 //   - Resolution changes are pushed as a fresh Config frame.
+//   - Input events are BINARY (not JSON) — see MODULE_INPUT.md.
 
 // FrameHeader is the fixed-size header prepended to every WebSocket binary message.
 type FrameHeader struct {
@@ -76,44 +84,73 @@ Offset  Size  Type     Field         Encoding
 
 ### Frame Types
 
-**Direction convention:** All binary frame types are **server → client** only. The client → server channel uses **JSON text** WebSocket messages exclusively (see "Client → Server Control Channel" below). This keeps the binary media path and the control path cleanly separated.
+**Server → client** frames use the 22-byte `FrameHeader` below.
+**Client → server** uses two channels distinguished by the WebSocket opcode:
+**binary** frames (input + webcam) and **text** frames (JSON control). See
+"Channel Model" below.
 
-| Type | Value | Dir | Payload Content | Width/Height Semantics |
-|------|-------|-----|-----------------|------------------------|
-| VideoH264 | 1 | S→C | One access unit = all NAL units of a frame concatenated in **Annex B** (start codes `00 00 00 01` retained). A keyframe message contains SPS+PPS+IDR together. | Frame dimensions (pixels) |
-| Ping | 2 | S→C | 8-byte nonce (echoed by client Pong over text channel). Optional; WS-level ping also used. | Unused (0) |
-| Pong | 3 | C→S(text) | Reserved — client pongs over text channel | Unused (0) |
-| AudioPCM | 4 | S→C | Raw S16LE interleaved PCM (one capture chunk) | SampleRate, Channels |
-| _(reserved)_ | 5 | — | Formerly VideoVP8 — VP8 codec rejected. Reserved; do not reuse without protocol version bump. | — |
-| Config | 6 | S→C | JSON handshake (codec, dims, fps, audio, cursorMode). Sent first on connect and again on any capability change (resolution, codec). | Unused (0) |
-| CursorUpdate | 11 | S→C | Cursor position + optional image (client-side cursor) | Unused (0) |
-| InputAck | 14 | S→C | Echoes the client input `seq` (uint32 LE) + server-receive timestamp (uint64 LE) for RTT | Unused (0) |
+| Type | Value | Dir | Header | Payload Content | Width/Height |
+|------|-------|-----|--------|-----------------|--------------|
+| VideoH264 | 1 | S→C | 22-byte | One access unit, all NALs concatenated Annex B (keyframe = SPS+PPS+IDR) | Frame dims |
+| Ping | 2 | S→C | 22-byte | 8-byte nonce (client pongs over text channel) | Unused (0) |
+| _(reserved)_ | 3 | — | — | Reserved — client Pong over text channel | — |
+| AudioPCM | 4 | S→C | 22-byte | Raw S16LE interleaved PCM (deferred — audio paused) | SampleRate, Channels |
+| _(reserved)_ | 5 | — | — | Formerly VideoVP8 — rejected. Do not reuse without version bump. | — |
+| Config | 6 | S→C | 22-byte | JSON handshake (codec, dims, fps, hdr, cursorMode, session_token) | Unused (0) |
+| VideoHEVC | 7 | S→C | 22-byte | HEVC access unit, Annex B (keyframe = VPS+SPS+PPS+IDR) | Frame dims |
+| CursorUpdate | 11 | S→C | 22-byte | Cursor position + optional image | Unused (0) |
+| Clipboard | 12 | S→C | 22-byte | JSON clipboard push (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)) | Unused (0) |
+| InputAck | 14 | S→C | 22-byte | Client input `seq` (u32 LE) + server-recv timestamp (u64 LE) | Unused (0) |
+| **WebcamH264** | **0x50** | **C→S** | 22-byte | Webcam access unit, Annex B H.264 (see [`MODULE_WEBCAM.md`](./MODULE_WEBCAM.md)) | Frame dims |
+| **Input events** | **0x01-0x4F** | **C→S** | 6-byte | Binary input records (see [`MODULE_INPUT.md`](./MODULE_INPUT.md)) | n/a |
 
-> `Resize` is **not** a separate type — a resolution change is communicated by sending a fresh `Config` frame. `KeyframeReq` is **not** a binary type — the client requests a keyframe via the JSON text control channel.
+> `Resize` is **not** a separate type — a resolution change is a fresh `Config`
+> frame. `KeyframeReq` is **not** a binary type — requested via JSON text.
+
+### Channel Model
+
+```
+SERVER → CLIENT : binary frames only (22-byte FrameHeader + payload)
+
+CLIENT → SERVER : discriminated by WebSocket opcode
+  ├─ BINARY opcode:
+  │     byte[1] == 0x50         → WebcamH264 (22-byte header, MODULE_WEBCAM)
+  │     byte[1] in 0x01..0x4F   → input record (6-byte header, MODULE_INPUT)
+  └─ TEXT opcode (JSON):           rare, human-triggered control
+```
+
+**Why input is binary, not JSON:** measured ~121× faster decode, zero-alloc,
+~70-79% smaller, and a far smaller attack surface. Industry-unanimous
+(VNC/RDP/Moonlight/Parsec/Steam). Full rationale + record formats in
+[`MODULE_INPUT.md`](./MODULE_INPUT.md). This replaces the previous
+"client→server is JSON-only" rule.
 
 ### Client → Server Control Channel (JSON text)
 
-The client never sends binary frames. All client-origin messages are JSON text:
+Only **rare, human-triggered** messages use JSON text (their cost is negligible
+and human-readability aids debugging):
 
 ```json
-{"type": "key",   "seq": 1024, "event": "down", "code": "KeyA"}
-{"type": "mousemove", "seq": 1025, "x": 500, "y": 300}
-{"type": "mousedown",  "seq": 1026, "button": 0}
-{"type": "mouseup",    "seq": 1027, "button": 0}
-{"type": "wheel",      "seq": 1028, "deltaY": -120}
-{"type": "keyframe"}                      // request an IDR (e.g., after detecting a gap)
-{"type": "pong", "nonce": 12345}          // reply to a server Ping
-{"type": "stats", "decodeMs": 3.2, "dropped": 0}  // optional client telemetry
-{"type": "resize", "width": 1280, "height": 720}    // dynamic resolution change
-{"type": "set_bitrate", "kbps": 8000}                // dynamic bitrate adjustment (control role only)
+{"type": "keyframe"}                                 // request an IDR after a gap
+{"type": "pong", "nonce": 12345}                     // reply to a server Ping
+{"type": "stats", "decodeMs": 3.2, "dropped": 0}     // optional client telemetry
+{"type": "resize", "width": 1280, "height": 720}     // dynamic resolution change
+{"type": "set_bitrate", "kbps": 8000}                // dynamic bitrate (control role only)
 {"type": "set_fps", "fps": 30}                       // dynamic frame rate (control role only)
-{"type": "set_hdr", "hdr": true}                     // toggle HDR pipeline (forces codec switch)
+{"type": "set_hdr", "hdr": true}                     // toggle HDR pipeline
+{"type": "clipboard", "format": "text/plain", "text": "..."}   // clipboard C→H (MODULE_CLIPBOARD)
+{"type": "webcam_start", "width": 1280, "height": 720, "fps": 30}  // begin webcam share
+{"type": "webcam_stop"}                              // end webcam share
 ```
 
-- `seq` is a per-connection monotonic counter on input events; the server echoes it in `InputAck` for latency measurement.
-- Non-input control messages (`keyframe`, `pong`, `stats`, `resize`, `set_*`) carry no `seq`.
-- `resize`, `set_bitrate`, `set_fps`, `set_hdr` are gated by authorization role (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); the server silently drops them from `view` role clients.
-- Parameter-change messages flow through the `stream.Params` contract (see [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)); the server may emit a new `FrameTypeConfig` in response if the codec or color space changed.
+- **Input events are NOT here** — they are binary (see above).
+- `keyframe`/`pong`/`stats`/`resize`/`set_*`/`clipboard`/`webcam_*` carry no input `seq`.
+- `resize`, `set_*`, `clipboard` (C→H), `webcam_*` are gated by authorization role
+  (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); the server silently drops them from
+  `view` role clients.
+- Parameter-change messages flow through the `stream.Params` contract (see
+  [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)); the server may emit a
+  new `FrameTypeConfig` if the codec or color space changed.
 
 ### Resume Path (client → server, before WebSocket upgrade)
 

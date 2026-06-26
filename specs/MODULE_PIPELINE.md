@@ -73,15 +73,23 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    to software path permanently for the rest of the session
 6. Derive stream dims from the capturer's actual resolution (NOT hardcoded).
 7. Create server (embedded client FS, session token).
-8. Create input device sized to the SAME stream dims (best-effort; warn if unavailable).
-9. Create audio capturer (if `[audio] enabled = true` and PipeWire available). [deferred]
-10. Wire callbacks:
-   - server.ConfigProvider      → returns current ConfigPayload (codec, dims, fps, audio, cursorMode)
+8. Probe + create input dispatcher if an input add-on is compiled in AND
+   `[input] enabled`: build `KeyMouseInjector` (interception/uinput/cgevent) and
+   optional `TouchInjector` (win_touch), sized to the SAME stream dims. If no
+   input add-on is compiled in, the binary is **view-only** (log it; not an error).
+9. Probe + create webcam Receiver + Sink if a webcam add-on is compiled in AND
+   `[webcam] enabled`. Otherwise no webcam capability.
+10. Create clipboard Monitor + file-transfer Service if their `[*] enabled`.
+11. Create audio capturer (if `[audio] enabled = true` and PipeWire available). [deferred]
+12. Wire callbacks:
+   - server.ConfigProvider      → returns current ConfigPayload (codec, dims, fps, hdr, cursorMode, session_token)
    - server.OnNewClient         → p.forceKeyframe() ONLY (server already gates on cached keyframe)
-   - server.OnInput             → input.HandleRawMessage()
+   - server.SetInputCallback    → input.Dispatcher.Dispatch (binary; nil if view-only)
+   - server.SetWebcamCallback   → webcam.Receiver.HandleFrame (nil if no webcam add-on)
+   - server.SetClipboardCallback→ clipboard.Monitor.Set (direction-gated)
    - server.OnKeyframeRequest   → p.forceKeyframe() (server rate-limits before calling)
-11. Start goroutines (frame loop, audio loop, server).
-12. Enter main frame loop.
+13. Start goroutines (frame loop, clipboard monitor, audio loop, server).
+14. Enter main frame loop.
 ```
 
 > `forceKeyframe()` dispatches to the active encoder (hw or sw) — never to a nil one. This fixes the round-1 bug where `encoder.ForceKeyframe()` would nil-panic on the hardware path.

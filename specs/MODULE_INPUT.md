@@ -1,28 +1,139 @@
 # Module Spec: Input
 
-> # ⏸️ DEFERRED
->
-> **Status:** Deferred until video capture+encode is stable across all three OSes
-> (Linux, macOS, Windows).
->
-> **Why:** Input is currently a Linux-only uinput implementation. Properly
-> cross-platform input injection (SendInput on Windows, CGEventPost on macOS,
-> uinput/libei on Linux) needs its own design pass. The current spec also
-> contradicts confirmed architectural decisions (`*slog.Logger`, no custom
-> Logger interface).
->
-> **Not core.** This module has been removed from the CENTRAL_SPEC module map.
-> The content below is preserved for reference but should not be treated as
-> current architecture.
->
-> **Trigger to un-defer:** Video capture+encode add-ons working end-to-end on
-> Linux + macOS + Windows with the bench harness producing comparable numbers.
+## Overview
+
+The Input module is the core, transport-neutral layer that decodes client input
+events from the wire and dispatches them to a compiled-in **input add-on** which
+performs the actual OS-level injection.
+
+Like capture and encode, **input injection is zero-by-default**: the core binary
+ships with NO input add-on and is therefore **view-only** until an injection
+add-on is compiled in. The core module owns:
+
+- The **binary input wire format** (decode + validation).
+- The platform-neutral **event types** (`KeyEvent`, `PointerEvent`, etc.).
+- The **HID-usage keycode** contract (physical-key neutrality across clients).
+- The **dispatcher** that routes decoded events to the active injector add-on(s).
+
+Each platform's injection mechanism is a separate build-tagged add-on:
+
+| Platform | Add-on | Build tag | Mechanism | Spec |
+|----------|--------|-----------|-----------|------|
+| Windows | Interception | `interception` | Interception filter driver + `SendSAS` for Ctrl+Alt+Del | [`../ADD-ON-SPECS/Windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/INTERCEPTION_WINDOWS_SPEC.md) |
+| Linux | uinput | `uinput` | Kernel `/dev/uinput` (X11 + Wayland; keyboard, mouse, scroll) | [`../ADD-ON-SPECS/Linux/input/UINPUT_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/input/UINPUT_LINUX_SPEC.md) |
+| macOS | CGEvent | `cgevent` | `CGEventPost` to `kCGHIDEventTap` | [`../ADD-ON-SPECS/macOS/input/CGEVENT_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/input/CGEVENT_MACOS_SPEC.md) |
+
+Touch is a **separate** add-on (Windows only for now):
+
+| Platform | Add-on | Build tag | Mechanism | Spec |
+|----------|--------|-----------|-----------|------|
+| Windows | Win Touch | `win_touch` | `InitializeTouchInjection` / `InjectTouchInput` | [`../ADD-ON-SPECS/Windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/WIN_TOUCH_WINDOWS_SPEC.md) |
+
+> **Not supported:** Pen/stylus is NOT a distinct add-on. Pen input from the
+> client is downgraded to touch (pressure preserved where the touch add-on
+> supports it; tilt/twist dropped). Gamepad is out of scope for the browser
+> client and is revisited only with the future native client.
 
 ---
 
-## Overview
+## Wire Format: Binary Input Protocol
 
-The Input module handles remote input injection. It receives input events from the browser client (keyboard, mouse, wheel) over WebSocket, translates them from W3C web standards to Linux input event codes, and injects them into the kernel via the uinput subsystem.
+Input is the highest-frequency client→server message (1000+ events/sec during
+gaming / fast mouse movement). It uses a **fixed-layout binary protocol**, not
+JSON. This decision is grounded in measured data (see decision record below):
+binary decode is ~121× faster, zero-allocation, ~70-79% smaller on the wire, and
+has a far smaller attack surface than JSON.
+
+**Channel discrimination by WebSocket opcode:**
+- **Binary** WebSocket frames from the client = input events (and webcam, see
+  [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)).
+- **Text** WebSocket frames from the client = rare human-triggered JSON control
+  (`keyframe`, `pong`, `stats`, `resize`, `set_*`, `clipboard`).
+
+This replaces the previous "client→server is JSON-only" rule.
+
+### Shared 6-byte record header
+
+Every input record begins with the same prefix (mirrors the media header's
+`[Version][Type]` convention for sniffability):
+
+```
+Offset  Size  Type   Field     Notes
+0       1     u8     Version   = 1 (sniff byte; reject if != 1)
+1       1     u8     Type      event type (ranges below)
+2       4     u32    Seq       LE, per-connection monotonic; echoed in InputAck (type 14)
+```
+
+### Type ranges (extensibility)
+
+```
+0x01-0x0F  meta / control (batch, heartbeat)
+0x10-0x1F  keyboard
+0x20-0x2F  mouse
+0x30-0x3F  touch / pen
+0x40-0x4F  gamepad (reserved — not supported until native client)
+0xF0-0xFF  vendor / experimental
+```
+
+> Client→server media (webcam) lives at `0x50` and is decoded by the protocol
+> layer, not the input dispatcher (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)).
+
+### Records (all little-endian)
+
+**KeyEvent — Type `0x10` (9 bytes)**
+```
+6   2   u16   HidUsage   USB HID Keyboard/Keypad usage ID (KeyA=0x04, …)
+8   1   u8    Flags      bit0 down(1)/up(0); bit1 autorepeat; bits2-7 reserved=0
+```
+
+**MouseMoveAbs — Type `0x20` (10 bytes)**
+```
+6   2   u16   X   stream-pixel X (0 .. width-1; server clamps)
+8   2   u16   Y   stream-pixel Y (0 .. height-1; server clamps)
+```
+
+**MouseMoveRel — Type `0x21` (10 bytes)** — pointer-lock / FPS gaming
+```
+6   2   i16   Dx   relative dx
+8   2   i16   Dy   relative dy
+```
+
+**MouseButton — Type `0x22` (8 bytes)**
+```
+6   1   u8   Button   W3C order: 0=left, 1=middle, 2=right, 3=back, 4=forward
+7   1   u8   Flags    bit0 down(1)/up(0)
+```
+
+**Scroll — Type `0x23` (11 bytes)**
+```
+6    2   i16   Dx    horizontal (high-res)
+8    2   i16   Dy    vertical (high-res; sign matches W3C deltaY)
+10   1   u8    Unit  0=pixel, 1=line, 2=page (W3C deltaMode)
+```
+
+**TouchContact — Type `0x30` (13 bytes)** — handled only if a `TouchInjector` add-on is present
+```
+6    2   u16   PointerId
+8    1   u8    Phase       0=down, 1=move, 2=up, 3=cancel
+9    2   u16   X           stream-pixel X (server clamps)
+11   2   u16   Y           stream-pixel Y (server clamps)
+```
+
+**InputBatch — Type `0x01` (header + N records)** — coalescing container
+```
+6    1   u8    Count
+7    …         Count × [u16 RecLen][RecLen bytes = one complete input record]
+```
+Amortizes per-frame overhead when the client coalesces several samples per
+animation frame (`PointerEvent.getCoalescedEvents()`). Sub-records are
+length-prefixed and self-delimiting; an unknown inner Type is skipped.
+
+### Forward-compatibility rules
+
+1. **Unknown top-level `Type`** → drop the whole frame (one frame = one record).
+2. **Additive evolution** → append new trailing fields; decoders validate
+   `len >= knownPrefix`, read known fields, ignore the tail.
+3. **Breaking change** (reorder/resize/remove fields) → bump `Version`.
 
 ---
 
@@ -31,186 +142,245 @@ The Input module handles remote input injection. It receives input events from t
 ```go
 package input
 
-// InputHandler processes remote input events.
-type InputHandler interface {
-    // HandleRawMessage parses and injects a single input event.
-    // data is a JSON-encoded message from the WebSocket client.
-    // Returns the message Seq (for InputAck) and any injection error.
-    HandleRawMessage(data []byte) (seq uint32, err error)
+// Event is the decoded, platform-neutral input event (tagged union).
+// The protocol layer produces these from binary records; the dispatcher
+// routes them to the active injector add-on(s).
+type Event struct {
+    Kind EventKind
+    Seq  uint32
 
-    // Resize destroys and recreates the uinput device with new ABS_X/ABS_Y
-    // ranges. Called by the pipeline on a resolution change so absolute
-    // coordinates keep mapping 1:1 to the stream.
+    // Keyboard
+    HidUsage uint16 // USB HID usage ID
+    Down     bool
+
+    // Mouse
+    X, Y     int    // absolute, stream-pixel space
+    Dx, Dy   int    // relative (move) or scroll delta
+    Button   uint8  // W3C button index
+    ScrollUnit uint8 // 0=pixel, 1=line, 2=page
+
+    // Touch
+    Contacts []TouchContact
+}
+
+type EventKind uint8
+const (
+    KindKeyDownUp EventKind = iota
+    KindPointerAbs
+    KindPointerRel
+    KindButton
+    KindScroll
+    KindTouch
+)
+
+type TouchContact struct {
+    PointerID uint16
+    Phase     uint8 // 0=down, 1=move, 2=up, 3=cancel
+    X, Y      int   // absolute, stream-pixel space
+}
+
+// KeyMouseInjector is the base contract every keyboard/mouse input add-on
+// implements (interception, uinput, cgevent).
+type KeyMouseInjector interface {
+    // InjectKey injects a key press/release. hidUsage is a USB HID usage ID;
+    // the add-on maps it to the platform keycode (Linux KEY_*, Windows scan
+    // code, macOS virtual key).
+    InjectKey(hidUsage uint16, down bool) error
+
+    // InjectPointerAbs moves the pointer to an absolute stream-pixel position.
+    InjectPointerAbs(x, y int) error
+
+    // InjectPointerRel applies a relative pointer delta (pointer-lock mode).
+    InjectPointerRel(dx, dy int) error
+
+    // InjectButton presses/releases a mouse button (W3C index).
+    InjectButton(button uint8, down bool) error
+
+    // InjectScroll scrolls. unit is 0=pixel, 1=line, 2=page.
+    InjectScroll(dx, dy int, unit uint8) error
+
+    // Resize updates the absolute-coordinate range to match new stream dims.
     Resize(width, height int) error
 
-    // Close destroys the virtual input device.
     Close() error
 }
 
-// InputConfig configures the virtual input device.
-type InputConfig struct {
-    Width  int // Screen width (for absolute mouse positioning)
-    Height int // Screen height (for absolute mouse positioning)
+// TouchInjector is the optional contract a touch add-on (win_touch)
+// implements. The dispatcher type-asserts for it; touch events are dropped
+// if no TouchInjector is compiled in.
+type TouchInjector interface {
+    InjectTouch(contacts []TouchContact) error
+    Close() error
+}
+
+// InjectorConfig is passed to an add-on's constructor.
+type InjectorConfig struct {
+    Width  int          // initial stream width (absolute-coordinate range)
+    Height int          // initial stream height
     Logger *slog.Logger
 }
 
-// InputMessage represents a parsed input event from the client.
-type InputMessage struct {
-    Type   string `json:"type"`             // "key", "mousemove", "mousedown", "mouseup", "wheel"
-    Seq    uint32 `json:"seq,omitempty"`    // Per-connection monotonic id; echoed in InputAck
-    Event  string `json:"event,omitempty"`  // "down" or "up" (for key events)
-    Code   string `json:"code,omitempty"`   // W3C KeyboardEvent.code (e.g., "KeyA")
-    Button int    `json:"button,omitempty"` // Mouse button index (0=left, 1=middle, 2=right)
-    X      int    `json:"x,omitempty"`      // Absolute X in STREAM coordinate space (Config dims)
-    Y      int    `json:"y,omitempty"`      // Absolute Y in STREAM coordinate space (Config dims)
-    DeltaY int    `json:"deltaY,omitempty"` // Wheel scroll delta
+// Dispatcher decodes binary input records and routes Events to injectors.
+// Owned by the server; created with whichever add-ons were compiled in.
+type Dispatcher interface {
+    // Dispatch decodes one binary WebSocket frame and injects it.
+    // Returns the record Seq (for InputAck) and any injection error.
+    // Performs validation + clamping before injection.
+    Dispatch(frame []byte) (seq uint32, err error)
+
+    // Resize propagates a resolution change to all injectors.
+    Resize(width, height int) error
+
+    Close() error
 }
 ```
 
-**InputAck / latency:** after injecting an event, the server (not this module) emits a `FrameTypeInputAck` carrying `Seq` + a server timestamp. The client measures input round-trip latency from it. The input module's `HandleRawMessage` returns the parsed `Seq` (or the server reads it) so the server can ack.
+**Capability composition.** On Windows, the `interception` add-on provides a
+`KeyMouseInjector` and the `win_touch` add-on provides a `TouchInjector` — two
+independent add-ons. On Linux, `uinput` provides `KeyMouseInjector` (and may
+later add `TouchInjector`). The dispatcher holds one `KeyMouseInjector` and an
+optional `TouchInjector`, routing by event kind.
 
-**Coordinate-space constraint:** `X`/`Y` are already in the stream's pixel space (the client scaled them using the latest `Config` width/height). The uinput device's `ABS_X`/`ABS_Y` range MUST equal those same dims. The pipeline creates/resizes the device to match capture dims; there is no scaling inside this module.
+**InputAck / latency.** After injecting, the **server** (not this module) emits a
+`FrameTypeInputAck` (type 14) carrying `Seq` + a server-receive timestamp. The
+client measures input round-trip latency from it. `Dispatch` returns the parsed
+`Seq` so the server can ack.
 
----
-
-## Internal Architecture
-
-### Virtual Device (uinput)
-
-```
-/dev/uinput → open(O_RDWR|O_CLOEXEC)
-    → ioctl(UI_SET_EVBIT, EV_KEY)     // Enable key events
-    → ioctl(UI_SET_EVBIT, EV_REL)     // Enable relative events (wheel)
-    → ioctl(UI_SET_EVBIT, EV_ABS)     // Enable absolute events (mouse)
-    → ioctl(UI_SET_KEYBIT, KEY_*)     // Register all key codes
-    → ioctl(UI_SET_RELBIT, REL_WHEEL) // Register wheel axis
-    → ioctl(UI_SET_ABSBIT, ABS_X/Y)  // Register absolute axes
-    → write(uinput_user_dev{...})     // Device descriptor (name, ID, abs ranges)
-    → ioctl(UI_DEV_CREATE)            // Finalize: device appears in /dev/input/
-```
-
-**Device Identity:**
-- Name: "viewport-rds" (or configurable)
-- Bus: BUS_USB (0x03)
-- Vendor: 0x1234
-- Product: 0x5678
-- Version: 1
-
-### Event Injection
-
-All injection follows the pattern: `write(input_event{type, code, value})` + `write(SYN_REPORT)`
-
-| Method | Event Type | Code | Value |
-|--------|-----------|------|-------|
-| `InjectKey(code, down)` | EV_KEY | Linux keycode | 1=down, 0=up |
-| `InjectMouseMove(x, y)` | EV_ABS | ABS_X, ABS_Y | Pixel coordinate |
-| `InjectMouseButton(btn, down)` | EV_KEY | BTN_LEFT/RIGHT/MIDDLE | 1=down, 0=up |
-| `InjectWheel(delta)` | EV_REL | REL_WHEEL | +1 or -1 |
-
-### Keymap Translation
-
-Browser `KeyboardEvent.code` (W3C standard, physical key position) → Linux `KEY_*` scancode:
-
-**Covered:**
-- Letters: KeyA-KeyZ → KEY_A-KEY_Z (26 keys)
-- Digits: Digit0-Digit9 → KEY_0-KEY_9 (10 keys)
-- Function: F1-F12 → KEY_F1-KEY_F12 (12 keys)
-- Modifiers: Shift/Control/Alt/Meta Left+Right (8 keys)
-- Navigation: Arrow keys, Home, End, PageUp, PageDown (8 keys)
-- Editing: Backspace, Tab, Enter, Escape, Delete, Insert, Space (7 keys)
-- Punctuation: 10 keys
-- Lock/System: CapsLock, NumLock, ScrollLock, PrintScreen, Pause, ContextMenu (6 keys)
-
-**Missing (to be added):**
-- Numpad: Numpad0-9, NumpadEnter, NumpadAdd, NumpadSubtract, etc.
-- Media: AudioVolumeUp/Down, MediaPlayPause, etc.
-- F13-F24
-- International keys
-
-### Mouse Button Translation
-
-| Browser Button | Linux Code |
-|----------------|-----------|
-| 0 (left) | BTN_LEFT (0x110) |
-| 1 (middle) | BTN_MIDDLE (0x112) |
-| 2 (right) | BTN_RIGHT (0x111) |
-
-### Message Dispatch Flow
-
-```
-WebSocket text frame (JSON)
-    → ParseMessage([]byte) → *InputMessage
-    → HandleMessage(device, msg):
-        switch msg.Type:
-            "key"       → BrowserCodeToLinux(msg.Code) → InjectKey(code, down)
-            "mousemove" → InjectMouseMove(msg.X, msg.Y)
-            "mousedown" → MouseButtonToLinux(msg.Button) → InjectMouseButton(btn, true)
-            "mouseup"   → MouseButtonToLinux(msg.Button) → InjectMouseButton(btn, false)
-            "wheel"     → normalize(msg.DeltaY) → InjectWheel(±1)
-```
+**Coordinate-space constraint.** `X`/`Y` are already in the stream's pixel space
+(the client scaled them using the latest `Config` width/height). The injector's
+absolute range MUST equal those dims. The pipeline calls `Resize` on a
+resolution change; there is no scaling inside an add-on.
 
 ---
 
-## Refactoring Directives
+## HID-Usage Keycode Contract
 
-### R-INP-01: Surface Injection Errors
-`HandleMessage` currently discards all errors from `Inject*` methods. Propagate errors back to caller and log them. A broken fd should trigger device recreation or a fatal error.
+Keyboard neutrality across clients is achieved by transmitting **USB HID
+Keyboard/Keypad usage IDs** (HID Usage Tables §10), not browser key strings.
 
-### R-INP-02: Validate Mouse Coordinates
-Add bounds clamping in `InjectMouseMove`: `x = clamp(x, 0, width-1)`, `y = clamp(y, 0, height-1)`. Out-of-bounds values can confuse the kernel input layer.
+- **Client** maps `KeyboardEvent.code` (physical position, e.g. `"KeyA"`) to a
+  HID usage (`0x04`) via a static table. This is layout-independent.
+- **Add-on** maps HID usage → platform keycode:
+  - Linux: HID → `KEY_*` (input-event-codes.h).
+  - Windows: HID → scan code (set 1), injected via the Interception driver.
+  - macOS: HID → virtual key code, via `CGEventCreateKeyboardEvent`.
 
-### R-INP-03: Preserve Wheel Magnitude
-The current normalization discards scroll magnitude (all deltas become ±1). Implement high-resolution scrolling using `REL_WHEEL_HI_RES` or scale the delta: `delta = clamp(msg.DeltaY / 120, -10, 10)`.
+The HID usage table is **shared core code** (`pkg/input/hid.go`), so every
+add-on translates from the same neutral source. This is the
+platform-neutral input encoding required by
+[`FUTURE_NATIVE_CLIENT.md`](./FUTURE_NATIVE_CLIENT.md) — a future native client
+sends the same HID usages.
 
-### R-INP-04: Complete Keymap Coverage
-Add numpad keys, media keys, F13-F24, and international keys to `browserToLinux` map. Consider generating the map from the Linux input-event-codes.h header.
-
-### R-INP-05: Remove Dead Code
-- `inputEvent` struct (lines 40-46) is defined but never used
-- Remove or use it in `writeEvent`
-
-### R-INP-06: Use Typed Message Variants
-Replace the flat `InputMessage` struct with a discriminated union pattern:
-```go
-type InputEvent interface{ inputEvent() }
-type KeyEvent struct { Code string; Down bool }
-type MouseMoveEvent struct { X, Y int }
-type MouseButtonEvent struct { Button int; Down bool }
-type WheelEvent struct { DeltaY int }
-```
-
-### R-INP-07: Dynamic Resolution Update
-Add a `Resize(width, height int)` method that destroys and recreates the uinput device with new ABS_X/ABS_Y ranges. Wire this to the capture module's resolution change events.
-
-### R-INP-08: Extract Interface to `pkg/input`
-Move `InputHandler` and `InputConfig` to a public package. Keep uinput implementation in `internal/input/uinput/`.
-
-### R-INP-09: Ioctl Error Handling in NewDevice
-Check return values of all `ioctl` calls during device setup. If a capability registration fails, return a descriptive error rather than creating a partially-functional device.
-
-### R-INP-10: Add Horizontal Wheel Support
-The constant `relHWheel` is defined but never used. Add horizontal scroll injection triggered by `deltaX` in wheel events.
+**Coverage (must be complete, generated from the HID usage tables):**
+letters, digits, F1-F24, modifiers (L/R Ctrl/Shift/Alt/Meta), navigation,
+editing, numpad, lock/system, media keys, international keys.
 
 ---
 
-## Testing Strategy
+## Dispatch Flow
 
-| Level | What | Hardware Required |
-|-------|------|-------------------|
-| Unit | JSON parsing (all message types, invalid input) | No |
-| Unit | Keymap translation (all keys, unknown keys) | No |
-| Unit | Mouse button translation | No |
-| Unit | Wheel normalization logic | No |
-| Integration | Full device lifecycle (create, inject, close) | Yes (/dev/uinput) |
-| Integration | Verify events appear in `evtest` output | Yes (/dev/uinput) |
-| Mock | Fake device for server testing | No |
+```
+WebSocket BINARY frame (client → server)
+    → byte[1] (Type):
+        0x50            → webcam (handed to protocol/webcam, NOT input)
+        0x01-0x4F       → input.Dispatcher.Dispatch(frame):
+            decode record (zero-alloc, bounds-checked)
+            validate: Version==1, len matches Type, ranges in bounds
+            clamp:    X∈[0,W-1], Y∈[0,H-1]
+            route by kind:
+                KindKeyDownUp  → keyMouse.InjectKey(hid, down)
+                KindPointerAbs → keyMouse.InjectPointerAbs(x, y)
+                KindPointerRel → keyMouse.InjectPointerRel(dx, dy)
+                KindButton     → keyMouse.InjectButton(btn, down)
+                KindScroll     → keyMouse.InjectScroll(dx, dy, unit)
+                KindTouch      → if touch != nil { touch.InjectTouch(contacts) }
+                                 else drop
+            return Seq
+    → server emits InputAck(Seq, recvTimestamp)
+```
+
+Only the **controller** client's binary frames reach the dispatcher; viewer
+frames are dropped at the server (see [`MODULE_SERVER.md`](./MODULE_SERVER.md)
+and [`MODULE_AUTH.md`](./MODULE_AUTH.md)).
 
 ---
 
 ## Security Considerations
 
-- `/dev/uinput` requires elevated permissions (root or `input` group membership)
-- The virtual device can inject ANY input event into the system
-- Only the designated "controller" client should have input privileges
-- Consider rate-limiting injection to prevent event flooding attacks
-- Consider an event type whitelist (no SYS_* or dangerous key combos by default)
+- **Injection privilege.** An input add-on can inject ANY OS input event. Only
+  the designated **controller** client reaches the dispatcher; viewers never do.
+- **Binary bounds.** Every record is validated to an exact length and field
+  range before injection. A frame that is not exactly the expected size for its
+  Type is rejected before any work — fixed-size = inherently bounded (no
+  billion-laughs / deep-nesting class of attack that JSON carries).
+- **Coordinate clamping.** Absolute X/Y are clamped to the current stream dims
+  before injection; out-of-range values cannot reach the kernel input layer.
+- **Rate limiting.** The server applies a per-client input rate limit
+  (`server.input_rate_limit`, default 1000 ev/s) with `mousemove` coalescing
+  before dispatch.
+- **HID whitelist (optional).** The HID-usage table is static; an optional
+  policy can reject dangerous usages. The Secure Attention Sequence
+  (Ctrl+Alt+Del) is never synthesizable from ordinary input on Windows — it is
+  handled out-of-band by the `interception` add-on via `SendSAS` (see its spec).
+- **Privilege of the injector.** On Windows, injection into elevated apps
+  requires the Interception driver (kernel-level), avoiding the UIPI silent-fail
+  that `SendInput` suffers. On Linux, `/dev/uinput` needs `input`-group/root. On
+  macOS, Accessibility permission is mandatory and checked at startup.
+
+---
+
+## Configuration
+
+Input behavior is configured in the `[input]` TOML section; each add-on reads
+its own `[addon_module_<tag>]` section. See
+[`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
+
+```toml
+[input]
+enabled        = true     # master switch; false = view-only even if an add-on is compiled in
+relative_mouse = true     # honor pointer-lock relative-mode frames
+```
+
+---
+
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | Binary decode: every record type, truncated/oversized frames, unknown Type | No |
+| Unit | HID-usage → platform keycode mapping (all keys, unknown usage) | No |
+| Unit | Coordinate clamping, scroll unit conversion | No |
+| Unit | InputBatch unpacking (nested records, unknown inner Type skip) | No |
+| Integration | Full inject lifecycle per add-on (create, inject, close) | Yes (per OS) |
+| Integration | Linux: events visible in `evtest` | Yes (/dev/uinput) |
+| Integration | Windows: events visible to a raw-input test app + Ctrl+Alt+Del via SendSAS | Yes |
+| Mock | Fake injector for dispatcher/server tests | No |
+
+---
+
+## Decision Record: Binary vs JSON
+
+Measured on Go 1.26, Ryzen 9 5900X, against the exact prior JSON shapes:
+
+| Operation | JSON (struct) | Binary | Delta |
+|-----------|--------------:|-------:|-------|
+| Server decode, mousemove | 909.5 ns, 6 allocs, 328 B | 7.49 ns, 0 allocs, 0 B | ~121× faster, zero-alloc |
+| Client encode, mousemove | 243 ns, 1 alloc | 0.5 ns, 0 allocs | ~486× faster |
+| On-wire mousemove | 53 B | 16 B | ~70% smaller |
+
+Security: binary's fixed-layout decoder is ~10 lines of bounds-checked slicing
+with no recursion, no string allocation, no number parsing — an
+orders-of-magnitude smaller attack surface than reflection-based JSON, and every
+field is range-checkable before injection. Industry precedent is unanimous:
+RFB/VNC (6-byte PointerEvent, 8-byte KeyEvent), RDP, Moonlight, Parsec, and Steam
+Remote Play all use binary input. FeatherDesk's video path is already binary;
+input now matches that discipline.
+
+---
+
+## Status
+
+📋 **Specced — un-deferred.** Replaces the previous Linux-only JSON design. The
+core module (wire decode + dispatcher + HID table) plus at least one injection
+add-on must be implemented for a binary to accept input. Default binary remains
+view-only.

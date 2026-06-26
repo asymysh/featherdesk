@@ -46,10 +46,18 @@ type Server interface {
     // to force a keyframe ONLY when no cached keyframe is available.
     SetNewClientCallback(fn func())
 
-    // SetInputCallback fires for each input JSON text message from the controller.
-    // The callback injects the event and returns its seq (0 if none); the server
-    // then emits an InputAck(seq) so the client can measure round-trip latency.
-    SetInputCallback(fn func([]byte) (seq uint32))
+    // SetInputCallback fires for each BINARY input frame from the controller.
+    // The callback (input.Dispatcher.Dispatch) decodes + injects the event and
+    // returns its seq; the server then emits an InputAck(seq) so the client can
+    // measure round-trip latency. Input is binary, not JSON — see MODULE_INPUT.md.
+    SetInputCallback(fn func(frame []byte) (seq uint32, err error))
+
+    // SetWebcamCallback fires for each binary WebcamH264 (0x50) frame from the
+    // controller (webcam.Receiver.HandleFrame). nil if no webcam add-on.
+    SetWebcamCallback(fn func(payload []byte, ptsNanos uint64) error)
+
+    // SetClipboardCallback fires for a clipboard JSON text message (C→H).
+    SetClipboardCallback(fn func(format, text, html string) error)
 
     // SetKeyframeRequestCallback fires when a client requests a keyframe
     // (JSON {"type":"keyframe"}). The server rate-limits before invoking.
@@ -81,10 +89,16 @@ type Config struct {
 |------|--------|---------|-------------|
 | `/` | GET | `http.FileServer` | Serves embedded web client (index.html + compositor.js) |
 | `/healthz` | GET | `handleHealth` | `200 {"status":"ok"}` for load balancer probes |
-| `/ws` | GET | `handleWS` | WebSocket upgrade endpoint (gated by `auth.Authenticator`) |
+| `/ws` | GET | `handleWS` | Main WebSocket: media (S→C), binary input + webcam (C→S), JSON control |
+| `/files` | GET | `handleFiles` | **Dedicated** file-transfer WebSocket (same auth; see [`MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md)) |
 | `/auth` | POST | `handleAuth` | Login endpoint for password/token modes (returns session token) |
 | `/pair` | POST | `handlePair` | PIN-based pairing (Sunshine-style first-launch flow) — see [`MODULE_AUTH.md`](./MODULE_AUTH.md) |
 | `/logout` | POST | `handleLogout` | Revoke a session token immediately |
+
+> **Why `/files` is separate:** file-transfer chunks must never queue ahead of
+> real-time video/input on the same TCP connection. The `/files` socket has
+> independent congestion control + back-pressure. It re-uses the main session's
+> auth (Bearer/session token validated at upgrade) and is controller-only.
 
 > Operational metrics live on a **separate Prometheus endpoint** (port 9090
 > by default, plain HTTP, no auth) per the `[metrics]` section of
@@ -145,14 +159,19 @@ proxy (Caddy, nginx, traefik) for ACME if needed.
 10. Send cached keyframe message if available (Config → keyframe → live)
 11. If NO keyframe cached: invoke onNewClient → pipeline forces keyframe on active encoder
     If keyframe cached: do NOT force (avoid storm)
-12. Block in ReadLoop():
-    - JSON text → dispatch:
-        input events       → onInput callback (controller only)
+12. Block in ReadLoop(), routing by WebSocket opcode:
+    - BINARY frame (controller only; dropped for viewers):
+        byte[1] == 0x50          → webcam.Receiver.HandleFrame (MODULE_WEBCAM)
+        byte[1] in 0x01..0x4F    → input.Dispatcher.Dispatch (MODULE_INPUT)
+                                    → returns Seq → emit InputAck(Seq, recvTs)
+        (a binary frame from a viewer, or with an unknown type byte, is dropped)
+    - TEXT frame (JSON):
         resize/set_*       → stream.Manager (controller only; viewers ignored)
+        clipboard          → clipboard.Monitor.Set (direction-gated; controller only)
+        webcam_start/stop  → webcam.Receiver.OnClientStart/OnClientStop (controller only)
         {"type":"keyframe"} → rate-limited keyframe-request callback
         {"type":"pong"}    → record RTT
         {"type":"stats"}   → record client telemetry
-    - Binary messages from client → protocol violation, ignore/log
 13. On disconnect:
     - Remove from sync.Map; decrement counter
     - Release controller slot (if was controller)
