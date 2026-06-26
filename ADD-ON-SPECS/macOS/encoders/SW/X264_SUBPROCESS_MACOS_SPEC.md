@@ -210,7 +210,7 @@ This add-on reads its tuning knobs from the `[addon_module_x264]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 
@@ -222,7 +222,7 @@ This add-on implements `stream.ConfigurableEncoder` (see [`../../../../specs/MOD
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|
-| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | `UpdateStreamParams` returns `stream.ErrRequiresRestart` -- pipeline tears down + respawns ffmpeg with new `-s WxH -r FPS -b:v B -crf QP -g KI` | no |
+| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | `UpdateStreamParams` returns `stream.ErrRequiresRestart` -- pipeline tears down + respawns ffmpeg with new `-s WxH -r FPS -crf QP -g KI` (CRF mode) or `-s WxH -r FPS -b:v B -g KI` (bitrate mode). `-crf` and `-b:v` are mutually exclusive. | no |
 | `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` -- H.264 HDR profile not in WebCodecs spec | n/a |
 
 **Restart semantics:** the bridge forces an IDR on the first frame from the new ffmpeg instance so the client decoder picks up the new SPS/PPS cleanly.

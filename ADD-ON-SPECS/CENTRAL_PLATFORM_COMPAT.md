@@ -31,9 +31,8 @@ No codec negotiation needed. The server picks the best codec it can encode and
 sends it in `FrameTypeConfig`. The client decodes whatever arrives.
 
 > **Firefox is not a supported browser.** Firefox has no HEVC WebCodecs support.
-> Minimum browser requirement: **Chrome 107+, Edge, Safari 14.1+**. All three
-> support HEVC hardware decode. This removes the need for any client-side codec
-> capability advertisement or fallback negotiation.
+> Minimum browser requirement: **Chrome 107+, Edge, Safari 16.4+** (partial
+> WebCodecs; full support Safari 26+). All three support HEVC hardware decode.
 
 ## Codec Support Matrix
 
@@ -48,7 +47,8 @@ sends it in `FrameTypeConfig`. The client decodes whatever arrives.
 | Windows | Intel (QSV) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 CGo |
 | Windows | No GPU | ❌ | ❌ | ❌ | OpenH264 CGo |
 | macOS | Apple Silicon M1 | ✅ | ✅ | ❌ encode | OpenH264 CGo* |
-| macOS | Apple Silicon M2+ | ✅ | ✅ | ✅ | OpenH264 CGo* |
+| macOS | Apple Silicon M2 | ✅ | ✅ | ❌ | OpenH264 CGo* |
+| macOS | Apple Silicon M3+ | ✅ | ✅ | ❌ (decode only) | OpenH264 CGo* |
 | macOS | Intel + AMD discrete | ✅ | ✅ | ❌ | OpenH264 CGo* |
 | macOS | Intel integrated Skylake+ | ✅ | ✅ | ❌ | OpenH264 CGo* |
 | macOS | Intel integrated pre-Skylake | ✅ | ❌ | ❌ | OpenH264 CGo* |
@@ -105,7 +105,7 @@ The wire protocol (`specs/MODULE_PROTOCOL.md`) is identical on all platforms:
 
 The codec in the `Config` handshake is the **full WebCodecs codec string**:
 - H.264: `"avc1.42E01E"` (Constrained Baseline 3.0) — universal default
-- AV1: `"av01.0.04M.08"` — M2+ Mac, RTX 40+ NVIDIA (Ada Lovelace), RDNA3+ AMD (RX 7000+), Intel Arc
+- AV1: `"av01.0.04M.08"` — RTX 40+ NVIDIA (Ada Lovelace), RDNA3+ AMD (RX 7000+), Intel Arc. **No Apple Silicon has AV1 HW encode** (M3+ has decode only).
 
 ---
 

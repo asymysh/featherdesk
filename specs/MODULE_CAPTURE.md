@@ -22,13 +22,20 @@ implementations evolve independently.
 package capture
 
 // Frame holds raw screen pixels (CPU-resident).
-// Used by the SW encoder path (RGBA → I420 → encoder).
+// Used by the SW encoder path (pixels → I420 → encoder).
 type Frame struct {
-    Data      []byte // BGRA pixels (or RGBA on some platforms)
+    Data      []byte      // Pixel buffer (width * height * 4)
+    PixelFmt  PixelFormat // PixelBGRA (macOS/Windows) or PixelRGBA (Linux GL)
     Width     int
     Height    int
-    Timestamp uint64 // CLOCK_MONOTONIC ns, sampled at capture
+    Timestamp uint64      // CLOCK_MONOTONIC ns, sampled at capture
 }
+
+type PixelFormat uint8
+const (
+    PixelBGRA PixelFormat = iota  // BGRA in memory = libyuv ARGB → use ARGBToI420
+    PixelRGBA                     // RGBA in memory = libyuv ABGR → use ABGRToI420
+)
 
 // FBInfo holds a GPU-resident surface handle (zero-copy path).
 // Used by the HW encoder path — the capturer never touches CPU memory.
@@ -40,6 +47,7 @@ type FBInfo struct {
     // Generic fields
     Width, Height int
     Timestamp     uint64
+    Release       func()  // Platform-specific cleanup; set by capture add-on
 
     // Linux fields (set when platform == "linux")
     DMAFD     int
@@ -67,18 +75,20 @@ type Capturer interface {
     Close() error
 }
 
-// DMABufCapturer is the optional zero-copy contract.
+// SurfaceCapturer is the optional zero-copy contract.
 // Capture add-ons that can produce GPU surfaces (KMS+EGL, NvFBC, SCK, DXGI DD)
 // implement this in addition to Capturer.
 //
 // The pipeline uses this when a hardware encoder is selected.
-type DMABufCapturer interface {
+// NOTE: the old name "DMABufCapturer" was Linux-specific. The interface is
+// cross-platform — the returned FBInfo uses a tagged-union pattern with
+// per-OS fields (DMAFD, IOSurface, D3DTexture).
+type SurfaceCapturer interface {
     Capturer
 
-    // NextDMABuf returns a GPU-resident surface handle.
-    // Caller must release the underlying handle via the FBInfo's Release()
-    // function (set per-platform by the add-on).
-    NextDMABuf() (*FBInfo, error)
+    // NextSurface returns a GPU-resident surface handle.
+    // Caller must call fb.Release() when done (set per-platform by the add-on).
+    NextSurface() (*FBInfo, error)
 }
 
 // CaptureConfig holds the capturer's INITIAL configuration. Once running,
@@ -132,7 +142,7 @@ lives in [`MODULE_PIPELINE.md`](./MODULE_PIPELINE.md), which:
    macOS; DXGI DD on Windows)
 3. On Windows headless: triggers IddCx VDD auto-install before retrying probe
 4. Calls the chosen add-on's constructor with `CaptureConfig`
-5. Passes the resulting `Capturer` (and optionally `DMABufCapturer`) to the
+5. Passes the resulting `Capturer` (and optionally `SurfaceCapturer`) to the
    frame loop
 
 There is **no `CaptureBackend` enum** in this module. Selection is purely
@@ -173,7 +183,7 @@ The module intentionally does NOT support:
 - `Capturer.NextFrame()` returns a **borrowed** `*Frame.Data` — valid only
   until the next `NextFrame()` call. Callers (the SW path's Converter) copy
   into pinned encoder input buffers as needed.
-- `DMABufCapturer.NextDMABuf()` returns an **owned** `*FBInfo` — caller must
+- `SurfaceCapturer.NextSurface()` returns an **owned** `*FBInfo` — caller must
   hand it to a HW encoder for consumption, which releases the underlying
   handle after `Encode()` completes.
 - The Capturer is **not safe** for concurrent `NextFrame()` calls from

@@ -109,7 +109,7 @@ Understanding this prevents wasted time on false-start implementations.
 **Goal:** detect VA-API hardware at startup, no ffmpeg involved.
 
 ```go
-// internal/hwencode/vaapi/probe.go
+// internal/encode/libva/probe.go
 type VAAPICapabilities struct {
     Available    bool
     RenderNode   string   // e.g. /dev/dri/renderD128
@@ -307,7 +307,7 @@ import "C"
 ## File Structure
 
 ```
-internal/hwencode/vaapi/
+internal/encode/libva/
 ├── probe.go          // Phase 1: VAAPICapabilities, ProbeVAAPI()
 ├── encoder.go        // Phases 2+4: VAAPIEncoder struct, NewVAAPIEncoder(), Encode(), Close()
 ├── dmabuf.go         // Phase 5: EncodeDMABuf() zero-copy path
@@ -383,7 +383,7 @@ This add-on reads its tuning knobs from the `[addon_module_libva]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 

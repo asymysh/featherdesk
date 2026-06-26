@@ -258,7 +258,7 @@ Support `?token=<auth_token>` query parameter for authentication (paired with R-
 
 ## Browser Compatibility
 
-**Supported browsers:** Chrome 107+, Edge (Chromium-based), Safari 14.1+.
+**Supported browsers:** Chrome 107+, Edge (Chromium-based), Safari 16.4+ (partial WebCodecs; full support Safari 26+).
 
 **Firefox is not supported.** WebCodecs support in Firefox lags meaningfully
 in feature parity (`optimizeForLatency`, hardware decode path) and the
@@ -268,7 +268,7 @@ graceful fail with an unsupported-browser notice.
 | Feature | Required | Minimum supported version |
 |---------|----------|--------------------------|
 | WebSocket (binary) | Yes | All supported browsers |
-| WebCodecs VideoDecoder | Yes | Chrome 107, Safari 14.1 (latency-optimized config) |
+| WebCodecs VideoDecoder | Yes | Chrome 107+, Safari 16.4+ (partial), Safari 26+ (full) |
 | Pointer Lock | Optional | Chrome (all), Safari 13.1 |
 | Fullscreen API | Optional | Chrome (all), Safari (all) |
 | ES Modules | For refactored version | Chrome (all), Safari (all) |

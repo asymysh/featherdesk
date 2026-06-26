@@ -13,12 +13,13 @@ package pipeline
 
 // Pipeline connects capture, encode, server, audio, and input into a streaming system.
 type Pipeline struct {
-    config    PipelineConfig
+    cfg       *config.Config           // parsed TOML config (owned by caller, read-only)
     capturer  capture.Capturer
-    encoder   encode.Encoder
+    surfCap   capture.SurfaceCapturer  // nil if capturer doesn't implement SurfaceCapturer
+    encoder   encode.Encoder           // nil if hardware path
     hwEncoder hwencode.HardwareEncoder // nil if software path
-    converter encode.Converter         // nil if hardware path (HW encoders consume FBInfo directly)
     server    server.Server
+    params    stream.Params            // current dynamic stream parameters
     logger    *slog.Logger
     stats     *Stats
     // (audio + input deferred — see MODULE_AUDIO / MODULE_INPUT deferred banners)
@@ -38,11 +39,10 @@ func (p *Pipeline) Start(ctx context.Context) error
 func (p *Pipeline) Stats() Stats
 ```
 
-There is **no `PipelineConfig` struct with CLI-flag-style fields**. All
-configuration is driven by the TOML schema documented in
-[`MODULE_CONFIG.md`](./MODULE_CONFIG.md). The pipeline reads top-level
-`[encode]`, `[capture]`, `[server]` sections plus per-add-on
-`[addon_module_<tag>]` sections for tuning the chosen add-on.
+The pipeline takes `*config.Config` directly (the parsed TOML struct from
+[`MODULE_CONFIG.md`](./MODULE_CONFIG.md)). There is no separate `PipelineConfig`
+struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
+`[stream.adaptive]` sections plus per-add-on `[addon_module_<tag>]` sections.
 
 ---
 
@@ -66,14 +66,14 @@ configuration is driven by the TOML schema documented in
       - If forced and probe fails: startup error
       - If auto: pick first available per the order above
 4. Match capture surface format to encoder input:
-   - HW encoder + DMABufCapturer with compatible FBInfo → zero-copy path
+    - HW encoder + SurfaceCapturer with compatible FBInfo → zero-copy path
    - SW encoder + any Capturer → CPU readback + I420 conversion path
 5. If hardware path errors with ErrFallbackToSoftware mid-session: degrade
    to software path permanently for the rest of the session
 6. Derive stream dims from the capturer's actual resolution (NOT hardcoded).
 7. Create server (embedded client FS, session token).
 8. Create input device sized to the SAME stream dims (best-effort; warn if unavailable).
-9. Create audio capturer (if --no-audio not set and PipeWire available).
+9. Create audio capturer (if `[audio] enabled = true` and PipeWire available). [deferred]
 10. Wire callbacks:
    - server.ConfigProvider      → returns current ConfigPayload (codec, dims, fps, audio, cursorMode)
    - server.OnNewClient         → p.forceKeyframe() ONLY (server already gates on cached keyframe)
@@ -94,9 +94,9 @@ func (p *Pipeline) runFrameLoop(ctx context.Context) {
     runtime.LockOSThread()
     defer runtime.UnlockOSThread()
 
-    targetInterval := time.Second / time.Duration(p.config.FPS)
+    targetInterval := time.Second / time.Duration(p.params.FPS)
     // Floor of 5 FPS: never skip so many frames that effective rate < 5.
-    maxSkip := (p.config.FPS / 5) - 1
+    maxSkip := (p.params.FPS / 5) - 1
     if maxSkip < 0 { maxSkip = 0 }
 
     var (
@@ -126,7 +126,7 @@ func (p *Pipeline) runFrameLoop(ctx context.Context) {
         ef, ok, err := p.captureEncode()
         if err != nil {
             if errors.Is(err, hwencode.ErrFallbackToSoftware) {
-                p.switchToSoftware() // permanent for this session
+                p.degradeToSoftware() // permanent for this session
                 continue
             }
             p.recordCaptureError(err) // transient/3x/10x policy
@@ -162,8 +162,7 @@ func (p *Pipeline) captureEncode() (EncodedFrame, bool, error) {
 }
 
 func (p *Pipeline) runHardwareFrame() (EncodedFrame, bool, error) {
-    dmaCap := p.capturer.(capture.DMABufCapturer)
-    fb, err := dmaCap.NextDMABuf()
+    fb, err := p.surfCap.NextSurface()
     if err != nil {
         if errors.Is(err, hwencode.ErrFallbackToSoftware) {
             p.degradeToSoftware()
@@ -209,7 +208,7 @@ func (p *Pipeline) forceKeyframe() {
 
 **`containsKeyframe`**: for H.264, scans NALs for type 5 (IDR). **`sleepToInterval(&lastFrameT, interval)`** sleeps until `lastFrameT + interval`, then sets `lastFrameT = now()`. Both are O(1)/cheap.
 
-> **Frame-drop semantics: pull-latest source assumed.** The skip-a-capture strategy assumes the capturer is a **pull-latest** source: a call to `NextFrame` / `NextDMABuf` / `NextIOSurface` always returns the CURRENT framebuffer, so skipping cleanly drops stale frames. This is true for KMS+EGL DMA-BUF (Linux), ScreenCaptureKit (macOS), and DXGI Desktop Duplication (Windows) — the supported capture add-ons. Pipe-based subprocess capturers (X11grab, ffmpeg-based) would behave as FIFO buffers and need a `DrainLatest()` extension — those backends were rejected from the architecture, so the pipeline never needs to handle them.
+> **Frame-drop semantics: pull-latest source assumed.** The skip-a-capture strategy assumes the capturer is a **pull-latest** source: a call to `NextFrame` / `NextSurface` always returns the CURRENT framebuffer, so skipping cleanly drops stale frames. This is true for KMS+EGL (Linux), ScreenCaptureKit (macOS), and DXGI Desktop Duplication (Windows). Pipe-based subprocess capturers (X11grab, ffmpeg-based) were rejected from the architecture.
 
 ### Audio Loop (Separate Goroutine)
 
@@ -242,7 +241,8 @@ func (p *Pipeline) runAudioLoop(ctx context.Context) {
 The pipeline owns the resolution-change orchestration (no other module drives it):
 
 ```go
-// Detected when capture returns new dims (or a sentinel capture.ErrResized).
+// Detected when capture returns a frame with different Width/Height than the
+// current params. No sentinel error needed -- the pipeline compares dimensions.
 func (p *Pipeline) handleResize(newW, newH int) {
     p.logger.Info("pipeline", fmt.Sprintf("resolution change → %dx%d", newW, newH))
     // 1. Rebuild software converter + encoder (or reconfigure hw encoder) for new dims.
@@ -404,8 +404,8 @@ func (r *RollingStats) P99() time.Duration
 
 ### R-PIP-01: Extract from main.go
 Move all logic from `cmd/server/main.go` into this module. `main.go` should only:
-1. Parse flags into `PipelineConfig`
-2. Call `pipeline.New(cfg)`
+1. Parse `--config <path>` → `config.Load(path)` → `*config.Config`
+2. Call `pipeline.New(cfg, logger)`
 3. Call `pipeline.Start(ctx)`
 4. Print final stats
 5. Exit
@@ -414,19 +414,19 @@ Move all logic from `cmd/server/main.go` into this module. `main.go` should only
 Expose stats via the server's `/status` endpoint (already exists) and optionally via Prometheus metrics endpoint (`/metrics`).
 
 ### R-PIP-03: Hot-Reload Encoder
-If hardware encoder becomes unavailable mid-stream (GPU reset, driver crash), seamlessly fall back to software encoder without dropping the connection:
+If hardware encoder becomes unavailable mid-stream (GPU reset, driver crash), fall back to software encoder without dropping the connection:
 1. Detect encode error
 2. Create software encoder with same config
 3. Force keyframe on new encoder
 4. Swap atomically
 
 ### R-PIP-04: Configuration Validation
-Validate PipelineConfig at `New()` time:
-- FPS must be 1-240
-- Port must be 1-65535
-- QP must be 0-51 (H.264 range)
-- BitrateBps must be 0 or >= 100000 (100kbps minimum)
-- Bind must be valid IP or "0.0.0.0"
+Validate `*config.Config` at `New()` time (in addition to MODULE_CONFIG validation):
+- `stream.fps` must be 1-240
+- `stream.qp` must be 0-51 (H.264 range)
+- `stream.bitrate_bps` must be 0 (QP mode) or >= 100000 (100kbps minimum)
+- At least one capture add-on compiled in
+- At least one encoder add-on compiled in
 
 ### R-PIP-05: Structured Shutdown Logging
 On shutdown, log a summary:
@@ -440,7 +440,7 @@ INFO [pipeline] Shutdown complete: 18432 frames captured, 147 dropped (0.8%), 2h
 
 | Level | What | Hardware Required |
 |-------|------|-------------------|
-| Unit | PipelineConfig validation | No |
+| Unit | Config validation at New() | No |
 | Unit | Frame drop calculation logic | No |
 | Unit | Stats rolling window (min/max/avg/p99) | No |
 | Unit | Capability probe result parsing | No |

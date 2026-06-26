@@ -69,13 +69,49 @@ Add-ons implement these in addition to their base contract to support runtime
 parameter changes:
 
 ```go
+package stream
+
+// Error sentinels — defined in the stream package to avoid import cycles
+// between encode, hwencode, and capture packages.
+var (
+    // ErrRequiresRestart is returned by UpdateStreamParams when the requested
+    // change cannot be applied mid-stream (pipeline tears down + recreates).
+    ErrRequiresRestart = errors.New("stream: parameter change requires add-on restart")
+
+    // ErrHDRUnsupported is returned by UpdateStreamParams when an encoder
+    // cannot produce HDR output (8-bit only). Pipeline switches to an
+    // HEVC-capable encoder.
+    ErrHDRUnsupported = errors.New("stream: encoder does not support HDR/10-bit")
+
+    // ErrFallbackToSoftware is returned by EncodeSurface (HW encoder) or
+    // NextSurface (capturer) when the GPU path fails (surface import error,
+    // driver constraint, GPU reset). Pipeline catches this once per session
+    // and degrades permanently to SW path.
+    ErrFallbackToSoftware = errors.New("stream: hardware path unavailable, fall back to software")
+)
+
+// Manager coordinates dynamic parameter changes across the pipeline.
+// The server feeds client-driven changes (resize, set_bitrate, set_fps)
+// and bandwidth-adaptation signals into the Manager, which applies them
+// to the active encoder + capturer via the Configurable* interfaces.
+type Manager interface {
+    // Apply attempts to apply new parameters. Returns the effective params
+    // (which may differ from requested due to clamping/hysteresis).
+    Apply(requested Params) (effective Params, err error)
+
+    // Current returns the active parameters.
+    Current() Params
+}
+```
+
+The `Configurable*` interfaces live in their respective packages but import
+`stream.Params` and return `stream.ErrRequiresRestart` / `stream.ErrHDRUnsupported`:
+
+```go
 package encode  // SW encoder add-ons
 
 type ConfigurableEncoder interface {
     Encoder
-    // UpdateStreamParams applies new parameters to the running encoder.
-    // Returns ErrRequiresRestart if the requested change cannot be applied
-    // mid-stream (the pipeline will tear down + recreate the encoder).
     UpdateStreamParams(p stream.Params) error
 }
 
@@ -92,9 +128,6 @@ type ConfigurableCapturer interface {
     Capturer
     UpdateStreamParams(p stream.Params) error
 }
-
-// Returned when an add-on cannot apply a parameter change mid-stream.
-var ErrRequiresRestart = errors.New("parameter change requires add-on restart")
 ```
 
 Add-ons that do **not** implement these interfaces are treated as immutable:
@@ -111,7 +144,7 @@ Each add-on translates `stream.Params` to its native concepts:
 
 | `stream.Params` field | OpenH264 | x264 (subprocess) | NVENC | AMF | MF HW | VT HW |
 |----------------------|----------|-------------------|-------|-----|-------|-------|
-| `Width`, `Height` | `SetOption(SVC_ENCODE_PARAM_EXT)` — requires re-init if resolution changes mid-stream | Restart ffmpeg with new `-s WxH` | `nvEncReconfigureEncoder` (hot) | `SetProperty(AMF_VIDEO_ENCODER_FRAMESIZE)` (hot) | `IMFTransform::ProcessMessage(MESSAGE_NOTIFY_END_OF_STREAM)` + reinit | `VTCompressionSessionInvalidate` + recreate |
+| `Width`, `Height` | `SetOption(SVC_ENCODE_PARAM_EXT)` — requires re-init | Restart ffmpeg with new `-s WxH` | `nvEncReconfigureEncoder` (hot if within initial `maxEncodeWidth/Height`) | `Terminate` + `ReInit` (cold -- AMF does NOT support hot resolution change) | `IMFTransform` teardown + reinit | `VTCompressionSessionInvalidate` + recreate |
 | `FPS` | `SetOption(FRAMERATE)` (hot) | Restart with new `-r` | `nvEncReconfigureEncoder` (hot) | `SetProperty(FRAMERATE)` (hot) | `MF_MT_FRAME_RATE` (requires reinit) | `kVTCompressionPropertyKey_ExpectedFrameRate` (hot) |
 | `BitrateBps` | `SetOption(BITRATE)` (hot) | Restart with new `-b:v` | `nvEncReconfigureEncoder` (hot) | `SetProperty(TARGET_BITRATE)` (hot) | `CODECAPI_AVEncCommonMeanBitRate` (hot via property store) | `kVTCompressionPropertyKey_AverageBitRate` (hot) |
 | `QP` | `SetOption(SVC_ENCODE_PARAM)` (hot) | Restart with new `-crf` | `nvEncReconfigureEncoder` (hot) | `SetProperty(QP_I/QP_P)` (hot) | `CODECAPI_AVEncCommonQuality` (hot) | `kVTCompressionPropertyKey_Quality` (hot) |
@@ -126,7 +159,7 @@ Each add-on translates `stream.Params` to its native concepts:
 | `Width`, `Height` | Output is native — pipeline scales via libyuv or GL blit | Output is native — pipeline scales | `SCStreamConfiguration.{width,height}` (requires `updateConfiguration:`) | Output is native — pipeline scales via D3D11 blit |
 | `FPS` | Pipeline pacing (capture is event-driven) | Pipeline pacing | `SCStreamConfiguration.minimumFrameInterval` (hot) | `IDXGIOutputDuplication::AcquireNextFrame` timeout |
 | `BitDepth=10` + `HDR` | Request `DRM_FORMAT_XRGB2101010` framebuffer (driver-dependent) | NvFBC supports HDR via `NVFBC_FRAME_GRAB_FLAGS_NOWAIT` + 10-bit pixel format | `SCStreamConfiguration.pixelFormat = kCVPixelFormatType_64RGBALeAccurate` (requires macOS 14+) | `DXGI_FORMAT_R10G10B10A2_UNORM` (requires HDR enabled in Display Settings) |
-| `ColorSpace` | Reported per surface metadata; pipeline annotates encoder | Reported per surface | Set automatically based on display | `DXGI_OUTDUPL_DESC.ColorSpace` |
+| `ColorSpace` | Reported per surface metadata; pipeline annotates encoder | Reported per surface | Set automatically based on display | `IDXGIOutput6::GetDesc1()` → `DXGI_OUTPUT_DESC1.ColorSpace` |
 | `NetworkRTTMs`, `PacketLossPct` | Ignored (capture isn't bandwidth-sensitive) | Ignored | Ignored | Ignored |
 
 ---

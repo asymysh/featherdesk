@@ -17,12 +17,18 @@ const HeaderSize = 22
 const (
     FrameTypeVideoH264    uint8 = 1
     FrameTypePing         uint8 = 2
-    FrameTypePong         uint8 = 3  // reserved (client pongs over text channel)
+    // 3 reserved (client Pong routed via JSON text channel)
     FrameTypeAudioPCM     uint8 = 4
-    // 5 reserved (formerly VideoVP8 — VP8 codec rejected; never reuse without protocol version bump)
+    // 5 reserved (formerly VideoVP8 -- VP8 codec rejected; never reuse without protocol version bump)
     FrameTypeConfig       uint8 = 6  // JSON handshake; resent on capability change
+    FrameTypeVideoHEVC    uint8 = 7  // HEVC access unit (VPS+SPS+PPS+IDR for keyframes; NAL types 19-20)
     FrameTypeCursorUpdate uint8 = 11
     FrameTypeInputAck     uint8 = 14
+)
+
+// Custom WebSocket close codes (RFC 6455 allows 4000-4999 for private use)
+const (
+    CloseResumeExpired = 4401 // session token unknown or expired; client must re-auth
 )
 // NOTE: There is no binary KeyframeReq or Resize type.
 //   - Keyframe requests arrive as JSON text: {"type":"keyframe"}
@@ -193,8 +199,8 @@ On WebSocket connect, the server MUST send a `FrameTypeConfig` (binary frame typ
 - `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01E` for H.264 Constrained Baseline L3.0, or `hvc1.2.4.L93.B0` for HEVC Main10 HDR), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
 - `hdr` and `color_space` advertise the HDR mode (see [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)).
 - `cursorMode` is `"separate"` (client renders cursor from `CursorUpdate` messages) or `"embedded"` (cursor is burned into the video frame).
-- `session_token` is issued after successful auth (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); client stores it (in-memory) for reconnection.
-- `session_ttl_sec` is the server-side cache lifetime for this session's state.
+- `session_token` is issued by the server after successful auth (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); client stores it (in-memory only) for reconnection.
+- `session_ttl_sec` is the auth session lifetime (from `[auth] session_ttl_minutes`). The reconnect state cache has a separate, shorter TTL (`[reconnect] cache_ttl_seconds`, default 300s).
 - `resumed = true` on Config frames sent in response to a successful resume — client skips full decoder re-init and just waits for the replayed IDR.
 - If capabilities change (resolution, codec, cursor mode, HDR), the server sends a **new** Config frame; the client reconfigures its decoder and input scaling.
 - Send order on connect: **Config → cached IDR (if any) → live frames.**

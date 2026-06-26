@@ -100,11 +100,14 @@ session_ttl_minutes = 60
   $argon2id$v=19$m=65536,t=3,p=4$RyVKczQy...
   ```
 - Hash goes in `password_hash`.
-- Client supplies password via HTTP Basic Auth on the upgrade request:
+- Client POSTs to `/auth` with HTTP Basic Auth:
   `Authorization: Basic <base64(":password")>` (username field empty).
 - Server verifies via constant-time argon2id comparison.
+- On success, server returns `{"session_token":"...","ttl_sec":3600}`.
+- Client then upgrades to WebSocket with `Authorization: Bearer <session_token>`.
 - Failed attempts are rate-limited (5 attempts per IP per minute);
   exceeding triggers a 60-second IP block.
+- The password is NEVER sent on the WebSocket URL -- only on the HTTPS `/auth` POST.
 
 ### Why argon2id
 
@@ -211,10 +214,22 @@ token** in the Config handshake:
   "width": 1920,
   "height": 1080,
   "fps": 60,
+  "hdr": false,
+  "color_space": "bt709",
+  "audio": false,
+  "audioSampleRate": 0,
+  "audioChannels": 0,
+  "cursorMode": "separate",
   "session_token": "Yhgz...43chars...AbCd",
-  "session_ttl_sec": 3600
+  "session_ttl_sec": 3600,
+  "resumed": false
 }
 ```
+
+(See [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) `ConfigPayload` for the full
+field list. `session_ttl_sec` here is the auth session lifetime from
+`[auth] session_ttl_minutes`; reconnect state caching uses the separate
+`[reconnect] cache_ttl_seconds`.)
 
 The client stores `session_token` (in-memory; not localStorage — avoid
 persistent token leakage). On reconnect within `session_ttl_sec`:
@@ -228,18 +243,24 @@ Server-side flow:
 2. If found AND not expired: skip auth, jump straight to "resumed" Config
    handshake + cached IDR replay (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)
    resume flow)
-3. If not found / expired: 401 Unauthorized, client falls back to full auth
-   re-flow with stored credentials (token / password / device token)
+3. If not found / expired: WebSocket close code 4401. Client falls back to
+   full auth re-flow with stored credentials (token / password / device token).
+   NOTE: resume happens post-WS-upgrade, so HTTP 401 is not possible here --
+   always use WS close code 4401.
 
 ### Session token properties
 
-- 32-byte random, base64url encoded
-- Single-use within the TTL — multiple concurrent connections with the same
-  session_token are allowed (mirrored streams), but each tab gets its own
-  token from the initial auth
+- 32 bytes random, base64url-encoded (43 characters, no padding).
+- Each WebSocket connection gets its own token from the initial auth. Multiple
+  concurrent connections from the same authenticated identity are allowed
+  (mirrored streams), but each has a distinct token.
 - Server-side storage: in-memory only (lost on restart). Operators wanting
   durable session persistence handle that externally.
-- TTL: configurable `[auth] session_ttl_minutes` (default 60).
+- TTL: configurable `[auth] session_ttl_minutes` (default 60). This is the
+  **auth session lifetime** -- how long the token remains valid for new
+  WebSocket connections. Distinct from `[reconnect] cache_ttl_seconds`
+  (default 300), which is how long the server caches stream state for
+  fast-resume after a disconnect.
 
 ---
 
@@ -284,8 +305,16 @@ const (
 
 type Authenticator interface {
     // Authenticate validates a WebSocket upgrade request.
-    // Returns a session token on success, or error with HTTP status code.
-    Authenticate(r *http.Request) (sessionToken string, err error)
+    // Returns the authenticated identity on success, or error with HTTP
+    // status code. The SERVER creates the session token -- the Authenticator
+    // only validates credentials.
+    Authenticate(r *http.Request) (identity Identity, err error)
+}
+
+type Identity struct {
+    UserID   string // empty for token/none modes; populated for password/OAuth
+    DeviceID string // populated for PIN mode (paired device)
+    Role     string // "control" | "view" | "" (auto)
 }
 
 type Session struct {

@@ -147,7 +147,7 @@ HEVC SW is meaningfully slower (~2× H.264 SW). Avoid HEVC SW for real-time stre
 ## File Structure
 
 ```
-internal/encode/videotoolbox/
+internal/encode/vt/
 ├── videotoolbox.go        // Encoder struct, NewVideoToolboxEncoder (covers SW + HW)
 ├── videotoolbox_cgo.go    // CGo binding (build tag: vt_sw OR vt_hw)
 ├── videotoolbox_stub.go   // No-op stub (build tag: !vt_sw,!vt_hw)
@@ -187,7 +187,7 @@ This add-on reads its tuning knobs from the `[addon_module_vt_sw]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 
@@ -205,4 +205,4 @@ This add-on implements `stream.ConfigurableEncoder` (note: SW encoder interface,
 | `QP` | `kVTCompressionPropertyKey_Quality` | yes |
 | `KeyframeInterval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` | yes |
 | `Width`, `Height` | session recreation (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` -- VT SW encoder is H.264 only (no HEVC SW on VideoToolbox); pipeline switches to `vt_hw` | n/a |
+| `BitDepth=10` / `HDR=true` | VT SW supports HEVC on macOS 12+ (set `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = false` + `kCMVideoCodecType_HEVC`). Requires session recreation with HEVC Main10 profile (returns `stream.ErrRequiresRestart`). | no |

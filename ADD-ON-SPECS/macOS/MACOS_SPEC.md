@@ -79,7 +79,8 @@ IOSurface → VideoToolbox path, and implementation sketch — are in
 | Mac Hardware | H.264 HW | HEVC HW | AV1 HW | Notes |
 |-------------|---------|---------|--------|-------|
 | **Apple Silicon M1** | ✅ | ✅ | ❌ encode | Media engine. AV1 decode only on M1. |
-| **Apple Silicon M2+** | ✅ | ✅ | ✅ | AV1 hardware encode added in M2. |
+| **Apple Silicon M2** | ✅ | ✅ | ❌ encode | No AV1 encode on any Apple Silicon. M2 has no AV1 decode either. |
+| **Apple Silicon M3+** | ✅ | ✅ | ❌ encode | M3+ adds AV1 HW **decode** only. No Apple Silicon has AV1 HW encode. |
 | **Intel + AMD discrete (2016+)** | ✅ AMD VCE | ✅ AMD VCE | ❌ | e.g. MBP 15" 2019, iMac 27" |
 | **Intel integrated only, Skylake+ (2015–16+)** | ✅ Quick Sync | ✅ Quick Sync | ❌ | MacBook Air 2017, Mac mini 2018 |
 | **Intel integrated only, Haswell (2014)** | ✅ Quick Sync | ❌ | ❌ | Mac mini 2014, MBA 2013–14 |
@@ -119,7 +120,7 @@ Primary:   H.264 HW via VideoToolbox  ← every Mac from 2011+, universal browse
 Secondary: HEVC HW via VideoToolbox   ← Skylake+ Intel (2015+) and all Apple Silicon
                                           ~40% better compression than H.264 same quality
                                           Announce via Config handshake codec string
-Future:    AV1 HW via VideoToolbox    ← M2+ only
+Future:    AV1 HW via VideoToolbox    ← no Apple Silicon has AV1 HW encode (SW only via libaom/SVT-AV1)
 Skip:      VP8/VP9                    ← no HW path on macOS, not worth SW cost
 ```
 
@@ -178,7 +179,7 @@ H.264 — never to libx265 (triple patent pool exposure).
 | H.264 SW | ~5–8ms | ~9–14ms | All Macs (fallback) |
 | HEVC HW | ~2–3ms | ~3–4ms | Skylake+ Intel, all Apple Silicon |
 | HEVC SW | ~15–25ms | ~30–50ms | All Macs (slow, avoid) |
-| AV1 HW | ~3–5ms | ~4–6ms | M2+ only |
+| AV1 HW | n/a | n/a | No Apple Silicon has AV1 HW encode |
 
 **Raw CSVs (Hackintosh):** `/tmp/fd_bench/enc_h264_hw_*.csv`, `enc_hevc_sw_*.csv`
 

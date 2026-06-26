@@ -113,10 +113,12 @@ enc->EncodeFrame(enc, &pic, &info);
 // info.sLayerInfo[i].pBsBuf contains the Annex B NAL units
 ```
 
-Force keyframe (IDR-on-demand):
+Force keyframe (IDR-on-demand) -- use the dedicated vtable method, NOT SetOption:
 ```c
-int enabled = 1;
-enc->SetOption(enc, ENCODER_OPTION_IDR_INTERVAL, &enabled);
+// ForceIntraFrame(encoder, bIDR) -- forces the NEXT frame to be IDR (one-shot).
+// Do NOT use ENCODER_OPTION_IDR_INTERVAL (that sets periodic IDR interval --
+// setting it to 1 makes EVERY frame an IDR, destroying compression).
+(*enc)->ForceIntraFrame(enc, true);
 ```
 
 ---
@@ -198,7 +200,7 @@ This add-on reads its tuning knobs from the `[addon_module_openh264]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 

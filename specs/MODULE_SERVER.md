@@ -54,9 +54,6 @@ type Server interface {
     // SetKeyframeRequestCallback fires when a client requests a keyframe
     // (JSON {"type":"keyframe"}). The server rate-limits before invoking.
     SetKeyframeRequestCallback(fn func())
-
-    SetEncoderType(t string)
-    SetAudioEnabled(v bool)
 }
 
 // Config holds server configuration.
@@ -125,14 +122,14 @@ proxy (Caddy, nginx, traefik) for ACME if needed.
      b. On success: skip auth, mark client as "resumed", jump to step 7
      c. On failure: close with 4401 (client must re-auth)
 3. Auth path: Authenticator.Authenticate(r) — see MODULE_AUTH.md
-     - Mode=none: accept
+     - Mode=none: accept (returns empty Identity)
      - Mode=token: check ?token=<t> against config
-     - Mode=password: require Authorization: Bearer <session_token> issued by /auth
-     - Mode=pin: require Authorization: Bearer <session_token> issued by /pair
-     On failure: reject 401
-4. Check maxClients (25) → reject with 503 if full
+     - Mode=password: require Authorization: Bearer <session_token> (issued by POST /auth)
+     - Mode=pin: require Authorization: Bearer <session_token> (issued by POST /pair)
+     On failure: reject with HTTP 401 (before WebSocket upgrade)
+4. Check cfg.Server.MaxClients (default 25) → reject with 503 if full
 5. websocket.Accept() (Origin checked per R-SRV-06)
-6. Issue new session token (uuid v4) → SessionCache.Put(token, sessionState, ttl)
+6. Issue new session token (32-byte random, base64url) → SessionCache.Put(token, sessionState)
 7. role=control? → atomic CAS on controller slot
      - First wins; others become viewers
      - If AllowTakeover && current controller is the same authenticated user → CAS replaces

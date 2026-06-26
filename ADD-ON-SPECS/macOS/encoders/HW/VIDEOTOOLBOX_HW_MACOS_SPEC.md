@@ -2,14 +2,14 @@
 
 ## Purpose
 
-Hardware-accelerated H.264 / HEVC / AV1 (M2+) encoder via Apple's VideoToolbox,
+Hardware-accelerated H.264 / HEVC encoder via Apple's VideoToolbox,
 called from Go through CGo. Routes to the appropriate hardware encoder on every
 Mac platform:
 
 | Mac hardware | Hardware encoder used |
 |-------------|----------------------|
 | Apple Silicon M1 | Apple Media Engine (`.gva` H.264 + HEVC) |
-| Apple Silicon M2+ | Apple Media Engine (H.264 + HEVC + **AV1**) |
+| Apple Silicon M1+ | Apple Media Engine (H.264 + HEVC). **No AV1 HW encode on any Apple Silicon.** |
 | Intel Mac + AMD discrete GPU | AMD VCE via Apple GVA framework |
 | Intel Mac integrated only | Intel Quick Sync via Apple GVA framework |
 
@@ -36,7 +36,7 @@ AOMedia AV1).
 | Mac | H.264 HW | HEVC HW | AV1 HW |
 |-----|---------|---------|--------|
 | Apple Silicon M1 | ✅ | ✅ | ❌ encode (decode only) |
-| Apple Silicon M2 | ✅ | ✅ | ✅ |
+| Apple Silicon M1+ | ✅ | ✅ | ❌ (no AV1 HW encode on any Apple Silicon) |
 | Apple Silicon M3+ | ✅ | ✅ | ✅ |
 | Intel + AMD discrete (2016+) | ✅ AMD VCE | ✅ AMD VCE | ❌ |
 | Intel integrated Skylake+ (2015+) | ✅ QSV | ✅ QSV | ❌ |
@@ -100,7 +100,7 @@ VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,         kV
 VTCompressionSessionPrepareToEncodeFrames(session);
 
 // For HEVC:  kCMVideoCodecType_HEVC + kVTProfileLevel_HEVC_Main_AutoLevel
-// For AV1 (M2+): kCMVideoCodecType_AV1 + appropriate profile
+// AV1: NOT available via HW encode on any Apple Silicon (decode only on M3+)
 ```
 
 ### Zero-copy path from ScreenCaptureKit
@@ -122,7 +122,7 @@ no CPU pixel copy at any stage. Sunshine's macOS path does exactly this.
 ```json
 { "codec": "avc1.42E01E" }    // H.264 Constrained Baseline Level 3.0
 { "codec": "hvc1.1.6.L93.B0" } // HEVC Main Profile Level 3.1
-{ "codec": "av01.0.04M.08" }   // AV1 Main Profile (M2+ only)
+// AV1 encode not available on any Apple Silicon -- removed from codec strings
 ```
 
 Server announces whichever codec it selected; client configures VideoDecoder
@@ -173,7 +173,7 @@ Documented separately in [`../../MACOS_SPEC.md`](../../MACOS_SPEC.md) and
 ## File Structure
 
 ```
-internal/encode/videotoolbox/
+internal/encode/vt/
 ├── videotoolbox.go        // shared with vt_sw add-on
 ├── videotoolbox_cgo.go    // CGo binding (build tag: vt_hw)
 ├── videotoolbox_stub.go   // (build tag: !vt_sw,!vt_hw)
@@ -181,7 +181,7 @@ internal/encode/videotoolbox/
 └── videotoolbox_test.go
 ```
 
-Same `internal/encode/videotoolbox/` package as the VT SW add-on; build tags decide
+Same `internal/encode/vt/` package as the VT SW add-on; build tags decide
 which paths compile in.
 
 ---
@@ -194,7 +194,7 @@ which paths compile in.
 func ProbeVideoToolboxHW() (*VTHWCapabilities, error) {
     // 1. VTCopyVideoEncoderList → enumerate available encoders
     // 2. Look for "*.gva" suffix entries (= hardware-accelerated)
-    // 3. Per codec: H.264, HEVC, AV1 (if M2+)
+    // 3. Per codec: H.264, HEVC
     // 4. Return supported codecs + max resolution
 }
 ```
@@ -213,7 +213,7 @@ Neither?              → fall through to VT SW or OpenH264 CGo add-on
 Use this add-on when:
 - Targeting any Mac that can run macOS 12.3+ (every M-series and most Intel)
 - Want zero-copy SCK → IOSurface → VT pipeline
-- Need AV1 encode on M2+ (only VT delivers this on macOS)
+- AV1 HW encode: not available on any current Apple Silicon
 
 Skip when:
 - Building a SW-only test binary
@@ -234,7 +234,7 @@ This add-on reads its tuning knobs from the `[addon_module_vt_hw]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 

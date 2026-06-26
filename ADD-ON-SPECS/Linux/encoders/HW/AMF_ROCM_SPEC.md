@@ -70,7 +70,7 @@ use. Users on pure open-source Mesa get VA-API (the default binary path) only.
 go build -tags amf_rocm -o viewport-rds-linux-amf ./cmd/server
 ```
 
-The `amf_rocm` build tag pulls in `internal/hwencode/amf/` package.
+The `amf_rocm` build tag pulls in `internal/encode/amf/` package.
 
 ### Runtime dependencies
 
@@ -102,8 +102,13 @@ directly.
 ## CGo Implementation Sketch
 
 ```c
-// Session setup
-AMFFactory* factory = AMFCreateFactory();
+// Session setup -- load AMF runtime via dlopen
+// AMFCreateFactory() does NOT exist. The real entry point is AMFInit().
+void* hDLL = dlopen("libamfrt64.so.1", RTLD_LAZY);
+AMFInit_Fn initFn = (AMFInit_Fn)dlsym(hDLL, "AMFInit");
+AMFFactory* factory = NULL;
+initFn(AMF_FULL_VERSION, &factory);
+
 AMFContext* ctx = NULL;
 factory->CreateContext(&ctx);
 
@@ -199,7 +204,7 @@ import extension is mature on Mesa and AMD's PRO driver.
 
 func ProbeAMF() (*AMFCapabilities, error) {
     // 1. dlopen libamf.so
-    // 2. AMFCreateFactory → AMFCreateContext → InitVulkan
+    // 2. dlopen("libamfrt64.so.1") → AMFInit() → CreateContext → InitVulkan
     // 3. Enumerate available encoder components
     // 4. Query capabilities per component
     // 5. Return capabilities or error
@@ -220,7 +225,7 @@ OpenH264?            → universal SW fallback
 ## File Structure
 
 ```
-internal/hwencode/amf/
+internal/encode/amf/
 ├── amf.go                // Encoder struct, NewAMFEncoder
 ├── amf_cgo.go            // CGo binding (build tag: amf_rocm)
 ├── amf_stub.go           // No-op stub (build tag: !amf_rocm)
@@ -272,7 +277,7 @@ This add-on reads its tuning knobs from the `[addon_module_amf_rocm]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 

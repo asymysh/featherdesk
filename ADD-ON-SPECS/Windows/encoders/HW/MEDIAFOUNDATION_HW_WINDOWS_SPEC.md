@@ -195,7 +195,7 @@ Skip / prefer vendor add-ons when:
 ## File Structure
 
 ```
-internal/encode/mediafoundation/
+internal/encode/mf/
 ├── mediafoundation.go
 ├── mf_hw_cgo.go             // build tag: mf_hw
 ├── d3d11_interop.go         // DXGI texture → IMFSample wrapping
@@ -218,7 +218,7 @@ This add-on reads its tuning knobs from the `[addon_module_mf_hw]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 

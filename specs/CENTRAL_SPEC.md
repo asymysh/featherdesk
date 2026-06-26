@@ -163,11 +163,17 @@ for the full rationale.
 
 ### macOS capture add-on specs
 
-**No add-ons needed.** ScreenCaptureKit is the only capture API on macOS 26+. All
-legacy alternatives (CGDisplayStream, CGWindowListCreateImage, etc.) were removed.
+ScreenCaptureKit is the only capture API on macOS. All legacy alternatives
+(CGDisplayStream, CGWindowListCreateImage, etc.) were removed. SCK is still a
+build-tagged add-on (`sck`) for architectural consistency -- it just happens to
+be the only capture option.
+
+| Add-on | Build tag | Spec | Hardware | Status |
+|--------|-----------|------|---------|--------|
+| ScreenCaptureKit | `sck` | [`ADD-ON-SPECS/macOS/capture/SCK_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/capture/SCK_MACOS_SPEC.md) | All Macs (macOS 12.3+) | 📋 Specced |
 
 See [`ADD-ON-SPECS/macOS/capture/README.md`](../ADD-ON-SPECS/macOS/capture/README.md)
-for the explanation. SCK is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
+for the full rationale.
 
 ### macOS encoder add-on specs
 
@@ -176,7 +182,7 @@ for the explanation. SCK is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
 | OpenH264 CGo | SW | BSD-2 (Cisco) | [`macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
 | x264 subprocess | SW | GPL-2 (isolated) | [`macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | Any CPU; needs ffmpeg | 📋 Specced |
 | VideoToolbox SW | SW | Apple system | [`macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
-| VideoToolbox HW | HW | Apple system | [`macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC), M2+ (HW AV1) | 📋 Specced |
+| VideoToolbox HW | HW | Apple system | [`macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC). No AV1 HW encode on any current Apple Silicon. | 📋 Specced |
 
 > **No vendor-specific HW add-ons on macOS** — Apple controls the entire graphics stack.
 > VideoToolbox is the single API for Intel Quick Sync, AMD VCE, and Apple Media Engine.
@@ -252,7 +258,7 @@ When adding a new vendor-specific encoder:
 │ -> *Frame       │ RGBA │ Encode()     │ │ Chunks()  │ │ HTTPS+WSS │  │ uinput     │
 │   (borrowed)    │      │ -> [][]byte  │ │ ->[]byte  │ │ Broadcast │  │ injection  │
 │                 │      └──────┬───────┘ └─────┬─────┘ └─────┬─────┘  └────────────┘
-│ NextDMABuf()    │──┐         │                │             │
+│ NextSurface()   │──┐         │                │             │
 │ -> *FBInfo      │  │  NALs   │                │ PCM         │
 └─────────────────┘  │         │                │             │
                      │         ▼                ▼             │
@@ -282,16 +288,16 @@ When adding a new vendor-specific encoder:
 
 ```
 PATH B — Hardware (zero-copy, GPU-resident)  [preferred]:
-    capturer.NextDMABuf() → FBInfo{fd, format, modifier, timestamp}
+    capturer.NextSurface() → FBInfo{fd/IOSurface/D3DTexture, timestamp}
     → hwEncoder.EncodeSurface(fbInfo) → EncodedFrame (GPU→CPU: ~30KB compressed only)
-    Use when: VA-API zero-copy available AND capturer implements DMABufCapturer
+    Use when: HW encoder available AND capturer implements SurfaceCapturer
     cursorMode = "separate" (client-side cursor)
 
          │  on ErrFallbackToSoftware (DMA-BUF import unsupported, GPU reset, etc.)
          ▼
 PATH A — Software (CPU round-trip)  [fallback / [encode] force_addon = "openh264" or "x264"]:
-    capturer.NextFrame() → RGBA []byte (GPU→CPU: ~24MB at 1440p)
-    → converter.Convert() → I420 (CPU, SIMD libyuv)
+    capturer.NextFrame() → BGRA []byte (GPU→CPU: ~24MB at 1440p)
+    → converter.Convert() → I420 (CPU, SIMD libyuv ARGBToI420)
     → encoder.Encode() → NALs (CPU; OpenH264 CGo or x264 subprocess — VP8/libavcodec/in-process-x264 rejected)
     cursorMode = "embedded" (server-side blend) OR "separate"
 ```
@@ -305,21 +311,29 @@ PATH A — Software (CPU round-trip)  [fallback / [encode] force_addon = "openh2
 ### Contract 1: Capture -> Encode
 
 ```go
-// Capture produces raw RGBA frames
+// Capture produces raw pixel frames (BGRA on macOS/Windows, RGBA on Linux GL)
 type Capturer interface {
     NextFrame() (*Frame, error)
     Close() error
 }
 
 type Frame struct {
-    Data      []byte  // BGRA pixel buffer (width * height * 4)
-    Width     int     // pixels
-    Height    int     // pixels
-    Timestamp uint64  // CLOCK_MONOTONIC nanoseconds
+    Data      []byte       // Pixel buffer (width * height * 4)
+    PixelFmt  PixelFormat  // PixelBGRA (macOS/Windows) or PixelRGBA (Linux GL)
+    Width     int          // pixels
+    Height    int          // pixels
+    Timestamp uint64       // CLOCK_MONOTONIC nanoseconds
 }
+
+type PixelFormat uint8
+const (
+    PixelBGRA PixelFormat = iota  // BGRA in memory = libyuv ARGB → use ARGBToI420
+    PixelRGBA                     // RGBA in memory = libyuv ABGR → use ABGRToI420
+)
 ```
 
-**Data Flow:** `capturer.NextFrame()` -> `converter.Convert(frame.Data)` -> `encoder.Encode(i420Frame)`
+**Data Flow:** `capturer.NextFrame()` -> `converter.Convert(frame)` -> `encoder.Encode(i420Frame)`
+- Converter selects `libyuv.ARGBToI420` (BGRA) or `libyuv.ABGRToI420` (RGBA) based on `frame.PixelFmt`.
 
 **Contract Rules:**
 - `Frame.Data` is BORROWED — only valid until the next `NextFrame()` call. Caller must copy before calling again.
@@ -371,12 +385,13 @@ Header layout (little-endian):
 **Frame Types (all server → client):**
 | Type | Value | Payload |
 |------|-------|---------|
-| VideoH264 | 1 | One access unit: all NALs concatenated, Annex B (keyframe = SPS+PPS+IDR) |
+| VideoH264 | 1 | One H.264 access unit: all NALs concatenated, Annex B (keyframe = SPS+PPS+IDR type 5) |
 | Ping | 2 | 8-byte nonce |
-| _(reserved)_ | 3 | Reserved for client Pong (currently routed via JSON text channel instead) |
+| _(reserved)_ | 3 | Reserved (client Pong routed via JSON text channel) |
 | AudioPCM | 4 | Raw S16LE PCM (Width=SampleRate, Height=Channels) — deferred (audio module paused) |
 | _(reserved)_ | 5 | Formerly VideoVP8 — VP8 codec rejected. Reserved; do not reuse without protocol version bump. |
-| Config | 6 | JSON handshake (codec, dims, fps, audio, cursorMode) — sent first, and on change |
+| Config | 6 | JSON handshake (codec, dims, fps, hdr, audio, cursorMode, session_token) — sent first, and on change |
+| VideoHEVC | 7 | One HEVC access unit: all NALs concatenated, Annex B (keyframe = VPS+SPS+PPS+IDR types 19-20) |
 | CursorUpdate | 11 | Cursor position + optional image (client-side cursor) |
 | InputAck | 14 | Echo of client input seq + server timestamp (RTT) |
 
@@ -427,21 +442,18 @@ type AudioChunk struct {
 ### Contract 6: Capture -> Hardware Encode (Zero-Copy Path)
 
 ```go
-// DMABufCapturer is the cross-platform zero-copy contract. Capture add-ons that
-// can produce GPU surfaces (KMS+EGL DMA-BUF, NvFBC CUDA buffer, SCK IOSurface,
-// DXGI DD ID3D11Texture2D) implement this in addition to Capturer.
+// SurfaceCapturer is the cross-platform zero-copy contract. Capture add-ons
+// that can produce GPU surfaces (KMS+EGL DMA-BUF, NvFBC CUDA buffer, SCK
+// IOSurface, DXGI DD ID3D11Texture2D) implement this in addition to Capturer.
 //
-// "DMABuf" in the name is historical (the Linux DMA-BUF was the first concrete
-// implementation). On macOS the handle is an IOSurface; on Windows a D3D11
-// texture. The HW encoder add-on type-switches on the populated field of FBInfo
-// to determine which platform-specific path to take.
-type DMABufCapturer interface {
+// The HW encoder add-on reads the populated per-OS field of FBInfo to
+// determine which platform-specific import path to take.
+type SurfaceCapturer interface {
     Capturer
 
-    // NextDMABuf returns a GPU-resident surface handle.
-    // Caller transfers ownership to a HardwareEncoder; the encoder releases
-    // the underlying handle after EncodeSurface completes.
-    NextDMABuf() (*FBInfo, error)
+    // NextSurface returns a GPU-resident surface handle.
+    // Caller must call fb.Release() after EncodeSurface completes.
+    NextSurface() (*FBInfo, error)
 }
 
 // FBInfo is the platform-specific surface handle. Only the field for the
@@ -449,7 +461,8 @@ type DMABufCapturer interface {
 type FBInfo struct {
     // Generic fields (always set)
     Width, Height int
-    Timestamp     uint64 // CLOCK_MONOTONIC ns, stamped at capture
+    Timestamp     uint64       // CLOCK_MONOTONIC ns, stamped at capture
+    Release       func()       // Platform-specific cleanup (close DMA-BUF fd, release IOSurface, etc.)
 
     // Linux fields (set when platform == "linux")
     DMAFD    int    // File descriptor (caller transfers ownership)
@@ -484,7 +497,7 @@ type HardwareEncoder interface {
 }
 ```
 
-**Data Flow:** `capturer.NextDMABuf()` -> `hwEncoder.EncodeSurface(handle)` -> returns `*EncodedFrame` -> `server.Broadcast(codecType, *encodedFrame)`
+**Data Flow:** `capturer.NextSurface()` -> `hwEncoder.EncodeSurface(handle)` -> `handle.Release()` -> `server.Broadcast(codecType, *encodedFrame)`
 
 **Contract Rules:**
 - `FBInfo` ownership is transferred from the capture add-on to the HW encoder add-on. The HW encoder releases the underlying platform handle after `EncodeSurface` returns.
@@ -507,8 +520,7 @@ type EncodedFrame struct {
 
 type Server interface {
     // Broadcast assembles one per-frame message and fans it out.
-    // codecType is FrameTypeVideoH264 (additional FrameType* values may be
-    // added as new codecs are introduced — VP8 was rejected).
+    // codecType is FrameTypeVideoH264 or FrameTypeVideoHEVC.
     // The server assigns the video Sequence and detects/uses Keyframe for IDR caching.
     Broadcast(codecType uint8, f EncodedFrame)
     BroadcastAudio(chunk AudioChunk)
@@ -642,7 +654,7 @@ client connects → server sends Config → server sends cached IDR message (if 
 ### Resolution-Change Flow
 ```
 capturer detects resolution change (monitor hotplug / mode switch)
-  → NextFrame/NextDMABuf returns new Width/Height (or a sentinel ErrResized)
+  → NextFrame/NextSurface returns new Width/Height (pipeline detects by comparison)
   → pipeline: rebuild converter + encoder (new dims), call input.Resize(w,h)
   → server: send a fresh Config frame (new dims) + force a keyframe
   → client: reconfigure VideoDecoder, update input coordinate scaling
@@ -664,7 +676,7 @@ The pipeline owns this orchestration; no module drives it alone.
 3. **Testable in Isolation:** Each module has unit tests that run without hardware.
 4. **Hot-Swappable:** Changing a capture or encoder add-on is a config change (`[capture] force_addon`, `[encode] force_addon`) or a recompile with different build tags — never a code change in the pipeline.
 5. **Error Propagation:** All errors flow up to the orchestrator with context (`fmt.Errorf("capture: %w", err)`).
-6. **No Global State:** No package-level variables except constants. No init() functions.
+6. **No Global State:** No package-level mutable variables except the add-on registry populated by build-tagged `init()` functions (the only permitted use of `init()`). No other `init()` functions.
 7. **Explicit Lifecycle:** Every module has `New()` (create), optional `Start()` (begin work), and `Close()` (cleanup).
 8. **Buffer Contracts:** Document whether returned slices are owned or borrowed.
 

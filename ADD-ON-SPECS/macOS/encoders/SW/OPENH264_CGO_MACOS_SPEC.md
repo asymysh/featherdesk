@@ -19,7 +19,7 @@ Linux/macOS/Windows is needed.
 |-----------|---------|-------|
 | libopenh264 | BSD-2-Clause | Cisco pays MPEG-LA royalties on behalf of all users |
 | Cisco prebuilt binary | BSD-2-Clause | Downloaded from `ciscobinary.openh264.org` |
-| Our CGo binding | Proprietary | In-process, no GPL contamination |
+| Our CGo binding | MIT | In-process, no GPL contamination |
 
 **Key advantage over x264:** No GPL. The main binary stays fully proprietary.
 Cisco's royalty arrangement means no H.264 patent fees for the user.
@@ -109,7 +109,7 @@ This add-on reads its tuning knobs from the `[addon_module_openh264]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 

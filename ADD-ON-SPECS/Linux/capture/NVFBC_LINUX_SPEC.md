@@ -91,9 +91,7 @@ The `nvfbc` build tag pulls in `internal/capture/nvfbc/` package.
 #cgo CFLAGS: -I${SRCDIR}/sdk
 #cgo LDFLAGS: -L/usr/lib/x86_64-linux-gnu -lnvidia-fbc -lcuda -ldl
 
-#include <NvFBC.h>
-#include <NvFBCToSys.h>     // CPU readback path (fallback)
-#include <NvFBCToCuda.h>    // CUDA zero-copy path (preferred)
+#include <NvFBC.h>            // Unified NvFBC 7.x+ header (replaces old NvFBCToSys.h / NvFBCToCuda.h)
 */
 import "C"
 ```
@@ -104,8 +102,9 @@ import "C"
 
 ```c
 // Session init (one-time)
-NvFBC_GetStatusParams statusParams = { NVFBC_GET_STATUS_VER };
-pNvFBCAPI->nvFBCGetStatus(&statusParams);
+NVFBC_GET_STATUS_PARAMS statusParams = { 0 };
+statusParams.dwVersion = NVFBC_GET_STATUS_PARAMS_VER;
+pFnList->nvFBCGetStatus(handle, &statusParams);
 // statusParams.bIsCapturePossible must be true
 
 NvFBC_CreateHandleParams createParams = { NVFBC_CREATE_HANDLE_VER };
@@ -256,7 +255,7 @@ This add-on reads its tuning knobs from the `[addon_module_nvfbc]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 
@@ -271,5 +270,5 @@ This add-on implements `stream.ConfigurableCapturer` (see [`../../../../specs/MO
 |--------------|-----------|------|
 | `Width`, `Height` | Output is native -- pipeline scales. No capturer change needed. | n/a (pipeline) |
 | `FPS` | Pipeline pacing. NvFBC grabs are synchronous (`NvFBCFrameGrab`). | n/a (pipeline) |
-| `BitDepth=10` / `HDR=true` | NvFBC supports 10-bit pixel format via `NVFBC_FRAME_GRAB_FLAGS_NOWAIT` + `NVFBC_BUFFER_FORMAT_BGRA_HDR` (Quadro/Tesla only) | requires re-init |
+| `BitDepth=10` / `HDR=true` | NvFBC does NOT have a dedicated HDR buffer format constant. Use `NVFBC_BUFFER_FORMAT_BGRA` -- HDR metadata (if any) comes from the display driver. NvFBC HDR support is limited and Quadro/Tesla only. | requires re-init |
 | `ColorSpace` | Reported per frame; pipeline annotates encoder | n/a (read-only) |

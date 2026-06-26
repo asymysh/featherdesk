@@ -71,7 +71,7 @@ the cap rarely matters.
 go build -tags nvenc -o viewport-rds-linux-nvenc ./cmd/server
 ```
 
-The `nvenc` build tag pulls in `internal/hwencode/nvenc/` package. Without the tag the
+The `nvenc` build tag pulls in `internal/encode/nvenc/` package. Without the tag the
 binary compiles without any NVIDIA SDK dependency.
 
 ### Runtime dependencies
@@ -94,7 +94,7 @@ import "C"
 ```
 
 The SDK headers (`nvEncodeAPI.h`, `cuda.h`) are checked into the source tree under
-`internal/hwencode/nvenc/sdk/` — NVIDIA's SDK license permits redistributing the headers
+`internal/encode/nvenc/sdk/` — NVIDIA's SDK license permits redistributing the headers
 inside an application source tree (this is what ffmpeg, Sunshine, OBS all do).
 
 ---
@@ -240,7 +240,7 @@ OpenH264?             → universal SW fallback
 ## File Structure
 
 ```
-internal/hwencode/nvenc/
+internal/encode/nvenc/
 ├── nvenc.go              // Encoder struct, NewNVENCEncoder
 ├── nvenc_cgo.go          // CGo binding (build tag: nvenc)
 ├── nvenc_stub.go         // No-op stub (build tag: !nvenc) for non-NVENC builds
@@ -298,7 +298,7 @@ This add-on reads its tuning knobs from the `[addon_module_nvenc]` section
 of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary`;` unknown
+strictly validated only when this add-on is compiled into the binary; unknown
 keys in this section will cause startup to fail.
 
 

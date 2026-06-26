@@ -98,6 +98,7 @@ add-on. Examples:
 bind         = "0.0.0.0"          # interface to bind  (restart required)
 port         = 30084              # HTTPS+WSS port     (restart required)
 allow_origin = "*"                # CORS allow-origin for /ws upgrade
+max_clients  = 25                 # max concurrent WebSocket connections (reject with 503)
 
 [server.tls]
 # If both cert + key are empty, a self-signed cert is generated on startup
@@ -214,8 +215,8 @@ allow_takeover        = true         # set false to lock the controller slot
 [reconnect]
 enabled               = true
 cache_ttl_seconds     = 300          # how long server holds session state after disconnect
-max_concurrent_sessions = 25         # cap on active sessions
 require_same_auth     = true         # don't allow resume with different credentials
+# NOTE: max connections is server.max_clients (not here)
 
 # ═════════════════════════════════════════════════════════════════════════
 # ADD-ON MODULE CONFIGS
@@ -280,7 +281,8 @@ async_depth      = 1              # 1 = synchronous, higher = pipelined
 gpu              = 0              # NVENC GPU index (0 = first NVIDIA GPU)
 preset           = "p1"           # p1 (fastest) -- p7 (slowest/best). p1 for streaming.
 tune             = "ull"          # "ull" (ultra-low-latency) | "ll" | "hq"
-profile          = "high"         # "baseline" | "main" | "high" — high recommended for screen content
+profile          = "h264_high"    # "h264_baseline" | "h264_main" | "h264_high" | "hevc_main" | "hevc_main10"
+                                  # codec-prefixed to disambiguate multi-codec add-ons
 multipass        = "disabled"     # "disabled" | "qres" | "fullres"
 
 [addon_module_amf]
@@ -390,10 +392,16 @@ show_cursor      = false          # false = cursor sent separately as CursorUpda
 | `capture.force_addon` | required if `mode = "forced"`; must be a compiled-in build tag | startup error |
 | `encode.mode` | `auto` or `forced` | startup error |
 | `encode.force_addon` | required if `mode = "forced"`; must be a compiled-in build tag | startup error |
-| `encode.fps` | 1–144 | startup error |
-| `encode.bitrate_bps` | ≥ 0 | startup error |
-| `encode.qp` | 0–51 | startup error |
 | `encode.cursor.mode` | `separate` or `embedded` | startup error |
+| `stream.fps` | 1–240 | startup error |
+| `stream.bitrate_bps` | 0 (QP mode) or ≥ 100000 (100 kbps minimum) | startup error |
+| `stream.qp` | 0–51 | startup error |
+| `stream.width` / `stream.height` | 0 (native) or ≥ 320 | startup error |
+| `auth.mode` | one of `none`/`token`/`password`/`pin` | startup error |
+| `auth.password_hash` | required if `mode = "password"` | startup error |
+| `auth.token` | required if `mode = "token"` | startup error |
+| `reconnect.cache_ttl_seconds` | 0–3600 | startup error |
+| `server.max_clients` | 1–100 | startup error |
 | Unknown key anywhere | strict mode | startup error |
 
 ---
@@ -422,7 +430,8 @@ On SIGHUP (or Windows equivalent):
 | `[metrics]` `port`/`bind` | ❌ | restart required |
 | `[capture]` `mode` | ✅ | active capture restarts |
 | `[capture]` `force_addon` | ❌ | restart required |
-| `[encode]` | ✅ all | active encoder reconfigured or recreated |
+| `[encode]` non-`force_addon` | ✅ | active encoder reconfigured |
+| `[encode]` `force_addon` | ❌ | restart required (swapping encoder binary at runtime is unsafe) |
 | `[encode.cursor.mode]` | ✅ | cursor pipeline rewired; cached IDR invalidated |
 
 Reload always **revalidates the entire file** before applying anything.
@@ -438,12 +447,17 @@ config still in effect.
 package config
 
 type Config struct {
-    Server  ServerSection  `toml:"server"`
-    Log     LogSection     `toml:"log"`
-    Metrics MetricsSection `toml:"metrics"`
-    Capture CaptureSection `toml:"capture"`
-    Encode  EncodeSection  `toml:"encode"`
+    Server    ServerSection    `toml:"server"`
+    Log       LogSection       `toml:"log"`
+    Metrics   MetricsSection   `toml:"metrics"`
+    Capture   CaptureSection   `toml:"capture"`
+    Encode    EncodeSection    `toml:"encode"`
+    Stream    StreamSection    `toml:"stream"`     // dynamic params: width/height/fps/bitrate/qp/hdr
+    Auth      AuthSection      `toml:"auth"`       // mode, password_hash, token, pin_*
+    Reconnect ReconnectSection `toml:"reconnect"`  // cache_ttl_seconds, require_same_auth
     // Audio + Input added when those modules are un-deferred
+    // Per-addon sections ([addon_module_*]) are parsed dynamically by each
+    // add-on's init config reader -- they do not appear as static struct fields.
 }
 
 // Load parses + validates the config at path, applies defaults, and returns

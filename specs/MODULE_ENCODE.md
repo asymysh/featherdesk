@@ -74,15 +74,20 @@ type ConfigurableEncoder interface {
     UpdateStreamParams(p stream.Params) error
 }
 
-// Converter handles RGBA -> I420 color space conversion.
+// Converter handles pixel format -> I420 color space conversion.
 // Required by the software path because every SW encoder accepts I420.
 // HW encoders bypass this entirely (they consume GPU surface handles).
-type Converter interface {
-    // Convert transforms RGBA pixels to I420.
-    // Returned *I420Frame is reused on next call (zero-alloc steady state).
-    Convert(rgba []byte) *I420Frame
-    Close()
+type Converter struct {
+    // Not an interface — single implementation in internal/encode/convert/.
+    // Selects libyuv conversion function based on input pixel format:
+    //   PixelBGRA (macOS/Windows) → libyuv ARGBToI420
+    //   PixelRGBA (Linux GL)      → libyuv ABGRToI420
 }
+
+// Convert transforms pixel data to I420 based on the frame's PixelFmt.
+// Returned *I420Frame is reused on next call (zero-alloc steady state).
+func (c *Converter) Convert(f *capture.Frame) *I420Frame
+func (c *Converter) Close()
 ```
 
 ### NAL Output Contract
@@ -118,14 +123,17 @@ or GPU surfaces (zero-copy HW path). For the SW path, BGRA must be converted
 to I420 via libyuv:
 
 ```
-RGBA []byte → C.ABGRToI420() → Y/U/V planes (Converter)
+BGRA []byte → libyuv ARGBToI420() → Y/U/V planes   (macOS, Windows)
+RGBA []byte → libyuv ABGRToI420() → Y/U/V planes   (Linux GL)
 ```
 
 - Links: `-lyuv`
 - SIMD-optimized (SSE2/AVX2/NEON depending on platform)
 - Pre-allocated output buffers (zero per-frame allocation)
 - Color matrix: BT.601 limited range
-- Note: libyuv's "ABGR" = memory byte order R,G,B,A (matches GL_RGBA output)
+- libyuv naming convention: names are by 32-bit register value (big-endian),
+  NOT memory byte order. So BGRA-in-memory = libyuv "ARGB", RGBA-in-memory
+  = libyuv "ABGR". The Converter selects based on `Frame.PixelFmt`.
 
 The Converter is **shared across all SW encoder add-ons** — it lives in
 `internal/encode/convert/` and is built unconditionally when any SW encoder

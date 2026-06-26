@@ -38,16 +38,10 @@ package hwencode
 // This is the SAME struct as capture.FBInfo, exported here for clarity.
 type SurfaceHandle = capture.FBInfo
 
-// EncodedFrame is what a HardwareEncoder produces — identical to what an
-// encode.Encoder (SW) produces, so the pipeline doesn't care which path
-// produced the bitstream.
-type EncodedFrame struct {
-    NALs      [][]byte // Annex B H.264 NAL units
-    Width     uint16
-    Height    uint16
-    Timestamp uint64   // CLOCK_MONOTONIC ns, carried through from capture
-    Keyframe  bool     // True if this access unit contains SPS+PPS+IDR
-}
+// EncodedFrame lives in the stream package (pkg/stream/frame.go) — both
+// SW and HW encoders produce the same type so the pipeline is path-agnostic.
+// Re-exported here for documentation clarity:
+//   type EncodedFrame = stream.EncodedFrame
 
 // HardwareEncoder is the contract every HW encoder add-on must satisfy.
 type HardwareEncoder interface {
@@ -88,10 +82,11 @@ type ConfigurableHardwareEncoder interface {
     UpdateStreamParams(p stream.Params) error
 }
 
-// ErrFallbackToSoftware is returned when the HW encoder cannot proceed
-// (surface import failure, driver constraint, GPU reset). The pipeline
-// catches this once per session and switches to the SW path permanently.
-var ErrFallbackToSoftware = errors.New("hardware encode unavailable; fall back to SW")
+// ErrFallbackToSoftware lives in the stream package (not hwencode) to
+// avoid import cycles -- capture add-ons also need to return it when
+// GPU surface export fails.
+// Defined at: stream.ErrFallbackToSoftware
+// See MODULE_STREAM_PARAMS.md for all error sentinels.
 ```
 
 ### NAL Output Contract
@@ -108,7 +103,7 @@ Identical to the SW path (see MODULE_ENCODE):
 ```
 Capture add-on              Hardware encoder add-on
 ┌──────────────────┐        ┌────────────────────────┐
-│ NextDMABuf()     │───────>│ EncodeSurface(handle)  │
+│ NextSurface()    │───────>│ EncodeSurface(handle)  │
 │                  │ handle │                        │
 │ Returns          │        │ Imports GPU resource   │
 │ SurfaceHandle    │        │ encodes on-GPU         │
