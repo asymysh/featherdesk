@@ -235,7 +235,7 @@ When adding a new vendor-specific encoder:
 1. Write the spec at `ADD-ON-SPECS/{Platform}/encoders/{NAME}_SPEC.md`
 2. Add a row to the relevant table in **this** section of CENTRAL_SPEC.md
 3. Add a row to the compat matrix in `ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`
-4. Implement under `internal/hwencode/{name}/` with a Go build tag
+4. Implement under `internal/encode/{name}/` with a Go build tag
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`
 
 ---

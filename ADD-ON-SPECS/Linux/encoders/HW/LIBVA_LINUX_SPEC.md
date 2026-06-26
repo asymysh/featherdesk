@@ -225,7 +225,7 @@ VASurfaceAttrib attrs[2] = {
 vaCreateSurfaces(display, VA_RT_FORMAT_RGB32, w, h, &surface, 1, attrs, 2);
 ```
 
-**Deliverable:** DMA-BUF from `KMSCapturer.NextDMABuf()` → `EncodeDMABuf()` → NALs with zero CPU pixel copies. Validate with `iotop` showing no memory bus traffic during encode.
+**Deliverable:** DMA-BUF from `KMSCapturer.NextSurface()` → `EncodeSurface()` → NALs with zero CPU pixel copies. Validate with `iotop` showing no memory bus traffic during encode.
 
 ---
 
@@ -310,7 +310,7 @@ import "C"
 internal/encode/libva/
 ├── probe.go          // Phase 1: VAAPICapabilities, ProbeVAAPI()
 ├── encoder.go        // Phases 2+4: VAAPIEncoder struct, NewVAAPIEncoder(), Encode(), Close()
-├── dmabuf.go         // Phase 5: EncodeDMABuf() zero-copy path
+├── surface.go         // Phase 5: EncodeSurface() zero-copy path
 ├── ratecontrol.go    // Phase 6: QP / CBR rate control
 ├── vaapi.c           // CGo preamble: bitstream + SPS/PPS + VA-API wrappers
 │                     // (keep C in a .c file for better IDE support and build isolation)
@@ -329,7 +329,7 @@ internal/encode/libva/
 | `TestProbeVAAPI` | ProbeVAAPI() returns non-nil, H264Encode=true | VA-API GPU |
 | `TestEncoderInit` | NewVAAPIEncoder() doesn't error | VA-API GPU |
 | `TestEncodeSynthetic` | 300 frames encoded, NALs parseable by ffprobe | VA-API GPU |
-| `TestDMABufEncode` | DMA-BUF from real KMS → NALs (zero-copy verified) | Root + GPU |
+| `TestSurfaceEncode` | DMA-BUF from real KMS → NALs (zero-copy verified) | Root + GPU |
 | `TestForceKeyframe` | IDR produced on demand | VA-API GPU |
 | `BenchmarkEncode1080p` | Latency p50/p95/p99, fps ceiling | VA-API GPU |
 | `BenchmarkEncode1440p` | Same at 1440p | VA-API GPU |
@@ -371,7 +371,7 @@ Runtime (user must have installed):
 | Module | Relationship |
 |--------|-------------|
 | `MODULE_HARDWARE_ENCODE.md` | Defines the `HardwareEncoder` interface this implements |
-| `MODULE_CAPTURE.md` | `DMABufCapturer.NextDMABuf()` provides the fd for Phase 5 |
+| `MODULE_CAPTURE.md` | `SurfaceCapturer.NextSurface()` provides the fd for Phase 5 |
 | `MODULE_PIPELINE.md` | Selects this encoder when `caps.H264Encode == true` |
 | `MODULE_ENCODE.md` | Software fallback when this module returns `ErrFallbackToSoftware` |
 

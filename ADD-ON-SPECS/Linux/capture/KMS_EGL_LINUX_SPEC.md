@@ -154,7 +154,7 @@ The capturer implements both `Capturer` interfaces from `pkg/capture`:
 | Interface | Method | Output | Use case |
 |-----------|--------|--------|----------|
 | `Capturer` (CPU readback) | `NextFrame()` | RGBA `[]byte` | Pair with SW encoder (OpenH264) |
-| `DMABufCapturer` (zero-copy) | `NextDMABuf()` | `FBInfo{ DMAFD, W, H, Stride, Format, Modifier, Timestamp }` | Pair with HW encoder (libva, NVENC, Vulkan) |
+| `SurfaceCapturer` (zero-copy) | `NextSurface()` | `FBInfo{ DMAFD, W, H, Stride, Format, Modifier, Timestamp }` | Pair with HW encoder (libva, NVENC, Vulkan) |
 
 The pipeline picks the right method based on what encoder add-on is paired.
 
