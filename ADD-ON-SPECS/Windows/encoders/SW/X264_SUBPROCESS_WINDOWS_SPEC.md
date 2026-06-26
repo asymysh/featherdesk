@@ -198,3 +198,15 @@ Use OpenH264 instead when:
 (12 threads) on Ryzen 9 5900X. Persistent subprocess bridge (single ffmpeg
 process per session) to be implemented. Repo split (GPL subprocess → separate
 repo) deferred.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_x264]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

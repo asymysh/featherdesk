@@ -435,3 +435,15 @@ every HW encoder.
 📋 **Specced.** Capture benchmarked on GTX 1080 Ti + RX 6800 XT with
 measured sub-microsecond raw overhead. IddCx headless integration specced
 but not yet implemented. Encoder pipeline benchmarks pending.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_dxgi_dd]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

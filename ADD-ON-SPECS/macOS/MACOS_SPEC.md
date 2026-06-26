@@ -94,10 +94,11 @@ add-on. The full set:
 ```
 encoders/
 ├── SW/
-│   └── VIDEOTOOLBOX_SW_MACOS_SPEC.md   ← Apple's tuned SW H.264/HEVC
-│   └── (OpenH264 CGo also works — same spec as Linux/SW)
+│   ├── OPENH264_CGO_MACOS_SPEC.md     ← BSD-licensed Cisco SW (commercial use, cross-platform)
+│   ├── X264_SUBPROCESS_MACOS_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
+│   └── VIDEOTOOLBOX_SW_MACOS_SPEC.md  ← Apple's tuned SW H.264/HEVC (macOS-native)
 └── HW/
-    └── VIDEOTOOLBOX_HW_MACOS_SPEC.md   ← unified HW: Intel QS + AMD VCE + Apple Media Engine
+    └── VIDEOTOOLBOX_HW_MACOS_SPEC.md  ← unified HW: Intel QS + AMD VCE + Apple Media Engine
 ```
 
 See [`encoders/README.md`](./encoders/README.md) for recommended combinations.
@@ -106,8 +107,10 @@ See [`encoders/README.md`](./encoders/README.md) for recommended combinations.
 
 | Deployment | Add-ons | Why |
 |-----------|---------|-----|
-| Any Mac (default) | `vt_sw` + `vt_hw` | One HW API covers every Mac via VideoToolbox |
-| Cross-platform binary | `openh264` + `vt_hw` | Same SW encoder as Linux + Windows |
+| Any Mac (commercial default) | `vt_sw` + `vt_hw` | One HW API covers every Mac via VideoToolbox |
+| Apple Silicon (peak HW) | `vt_hw` only | Apple Media Engine is the entire path |
+| Cross-platform binary, commercial | `openh264` + `vt_hw` | Same SW encoder as Linux + Windows (BSD) |
+| Cross-platform binary, home / OSS | `x264` + `vt_hw` | 2× faster SW, GPL-isolated subprocess |
 
 ### Codec Decision (Confirmed)
 
@@ -143,8 +146,9 @@ advertised in the Config handshake.
      → Same Config codec string: "avc1.42E01E"
 ```
 
-VideoToolbox is the **single encoder API** for all three tiers on macOS — HW and SW.
-OpenH264 CGo (used on Linux and Windows) is not used on macOS.
+VideoToolbox is the **primary encoder API** for all three tiers on macOS — HW and SW.
+OpenH264 CGo or x264 subprocess can be used as alternative SW paths for cross-platform
+binary consistency or to leverage the BSD/GPL licensing differentiation.
 
 **No software HEVC fallback.** If HEVC hardware is unavailable, fall straight to
 H.264 — never to libx265 (triple patent pool exposure).

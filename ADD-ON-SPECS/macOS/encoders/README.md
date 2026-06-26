@@ -8,10 +8,11 @@ build-tagged add-on. Users compile in exactly the encoders they want.
 ```
 ADD-ON-SPECS/macOS/encoders/
 ├── SW/
-│   └── VIDEOTOOLBOX_SW_MACOS_SPEC.md   ← Apple's tuned SW H.264/HEVC (preferred on Apple Silicon)
-│   └── (OpenH264 CGo also works — see Linux/SW spec)
+│   ├── OPENH264_CGO_MACOS_SPEC.md     ← BSD-licensed Cisco SW (commercial, cross-platform)
+│   ├── X264_SUBPROCESS_MACOS_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
+│   └── VIDEOTOOLBOX_SW_MACOS_SPEC.md  ← Apple's tuned SW (macOS-native, best on Apple Silicon)
 └── HW/
-    └── VIDEOTOOLBOX_HW_MACOS_SPEC.md   ← unified HW for Intel QS, AMD VCE, Apple Media Engine
+    └── VIDEOTOOLBOX_HW_MACOS_SPEC.md  ← unified HW for Intel QS, AMD VCE, Apple Media Engine
 ```
 
 ---
@@ -20,60 +21,61 @@ ADD-ON-SPECS/macOS/encoders/
 
 | Deployment | Recommended add-on set | Binary |
 |-----------|-----------------------|--------|
-| Generic Mac (any year) | `vt_sw` + `vt_hw` | `viewport-rds-macos-default` |
-| Apple Silicon M1+ | `vt_sw` + `vt_hw` | `viewport-rds-macos-arm64` |
+| Generic Mac (commercial default) | `vt_sw` + `vt_hw` | `viewport-rds-macos-default` |
+| Apple Silicon M1+ | `vt_hw` only | `viewport-rds-macos-arm64` |
 | Intel Mac | `vt_sw` + `vt_hw` | `viewport-rds-macos-x86_64` |
-| Cross-platform binary parity | `openh264` instead of `vt_sw` | `viewport-rds-macos-universal-codec` |
+| Cross-platform binary, commercial | `openh264` + `vt_hw` | `viewport-rds-macos-cross-bsd` |
+| Cross-platform binary, home / OSS | `x264` + `vt_hw` | `viewport-rds-macos-cross-gpl` |
 
 The build tags compose:
 ```bash
-go build -tags "vt_sw,vt_hw" -o viewport-rds-macos ./cmd/server
+go build -tags "vt_sw,vt_hw,openh264" -o viewport-rds-macos ./cmd/server
 ```
 
 ---
 
-## Why so few add-ons on macOS
+## Why so few HW add-ons on macOS
 
-Unlike Linux (4 HW add-ons) and Windows (5 HW add-ons), macOS has **one HW encoder API**:
-VideoToolbox. Apple controls the entire graphics stack from Metal up. There is no
-vendor fragmentation — every Mac, whether Intel + AMD discrete, Intel integrated,
-or Apple Silicon, exposes its hardware encoder through the same `VTCompressionSession`
-API.
+Unlike Linux (3 HW add-ons) and Windows (4 HW add-ons), macOS has **one HW encoder
+API**: VideoToolbox. Apple controls the entire graphics stack from Metal up.
+There is no vendor fragmentation — every Mac, whether Intel + AMD discrete,
+Intel integrated, or Apple Silicon, exposes its hardware encoder through the
+same `VTCompressionSession` API.
 
-The add-on split (`vt_sw` vs `vt_hw`) is purely for build modularity — they share
-the same CGo file, just different configuration at runtime.
+The add-on split (`vt_sw` vs `vt_hw`) is purely for build modularity — they
+share the same CGo file, just different configuration at runtime.
 
 ---
 
-## OpenH264 CGo on macOS
+## SW encoder choice on macOS
 
-OpenH264 CGo works on macOS too (we verified during benchmark sessions). It can
-be used as the SW encoder on macOS instead of VT SW for cross-platform consistency
-(same Go code as Linux + Windows). However:
+Three options for software H.264 encoding:
 
-- On Apple Silicon: VT SW is ~30% faster than OpenH264 CGo (Apple's ARM tuning is better)
-- On Intel Macs: VT SW and OpenH264 CGo are roughly equivalent
+| Encoder | License | Performance on Apple Silicon | Performance on Intel Mac | When to use |
+|---------|---------|-----------------------------|-------------------------|-------------|
+| **VT SW** (Apple) | macOS system | Best (Apple's ARM-tuned) | Good | macOS-only deployment |
+| **OpenH264** (Cisco) | BSD-2 | Slightly slower than VT SW | Equivalent to VT SW | Cross-platform commercial deployment |
+| **x264** (subprocess) | GPL-2 (isolated) | 2× faster than OpenH264 | 2× faster than OpenH264 | Home / OSS / cross-platform with GPL OK |
 
-The macOS-preferred SW path is VT SW. OpenH264 CGo is a valid alternative when
-cross-platform binary consistency matters more than peak performance. See
-[`../../Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../../Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md)
-— the same spec applies on macOS with the documented CGo pointer indirection
-adjustments.
+See:
+- [`SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](./SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) — macOS-native
+- [`SW/OPENH264_CGO_MACOS_SPEC.md`](./SW/OPENH264_CGO_MACOS_SPEC.md) — BSD cross-platform
+- [`SW/X264_SUBPROCESS_MACOS_SPEC.md`](./SW/X264_SUBPROCESS_MACOS_SPEC.md) — GPL-isolated, 2× faster
 
 ---
 
 ## Codec fallback order at runtime
 
-When both `vt_hw` and `vt_sw` are compiled in:
+When multiple encoders are compiled in:
 
 ```
 1. VT HW (HEVC available)?  → use HEVC HW (announce hvc1.1.6.L93.B0)
 2. VT HW (H.264 available)? → use H.264 HW (announce avc1.42E01E)
-3. VT SW (H.264)?           → use H.264 SW
-4. None?                    → fatal: no encoder add-on installed
+3. x264 subprocess?         → use x264 (GPL builds only — 2× faster than alternatives)
+4. VT SW?                   → use VT SW (macOS-native fallback)
+5. OpenH264?                → use OpenH264 (cross-platform BSD fallback)
+6. None?                    → fatal: no encoder add-on installed
 ```
 
-No software HEVC — VT HEVC SW exists but is too slow for real-time streaming
-(~30ms p50 at 1080p), and software HEVC has triple patent pool concerns when
-shipped (though Apple's framework license covers VT HEVC SW, the encoder is too
-slow to be useful anyway).
+No software HEVC anywhere — even VT HEVC SW is too slow for real-time streaming
+(~30ms p50 at 1080p) and software HEVC has triple patent pool concerns.

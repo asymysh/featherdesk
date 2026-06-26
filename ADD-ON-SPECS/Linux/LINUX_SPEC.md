@@ -88,10 +88,12 @@ runtime probe order, and rationale.
 
 | Deployment | Add-ons | Why |
 |-----------|---------|-----|
-| Generic Linux server | `openh264` + `libva` | Universal coverage, smallest add-on set |
-| NVIDIA workstation | `openh264` + `nvenc` | REF_FRAMES_INVALIDATION for lossy networks |
+| Generic Linux server, commercial | `openh264` + `libva` | Universal coverage, smallest BSD add-on set |
+| Generic Linux server, home / OSS | `x264` + `libva` | 2× faster SW path (GPL on subprocess) |
+| NVIDIA workstation | `openh264` + `nvenc` | Vendor-specific NVIDIA tuning |
 | AMD workstation | `openh264` + `libva` + `amf_rocm` | AMD-specific tuning + universal fallback |
-| Container / no GPU | `openh264` only | SW-only, smallest binary |
+| Container / no GPU, commercial | `openh264` only | SW-only BSD, smallest binary |
+| Container / no GPU, home / OSS | `x264` only | SW-only, fastest CPU encode |
 
 ### How vendor APIs map to Linux
 

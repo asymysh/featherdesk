@@ -174,3 +174,15 @@ Skip when:
 📋 Specced — implementation exists today as the default SW encoder in
 `internal/encode/openh264.go`. Refactor moves it to `internal/encode/openh264/`
 under a Go build tag, with Windows-specific DLL vendoring added.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_openh264]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

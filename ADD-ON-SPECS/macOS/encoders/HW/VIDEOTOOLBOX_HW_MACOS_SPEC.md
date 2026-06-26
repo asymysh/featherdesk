@@ -225,3 +225,15 @@ Skip when:
 
 📋 Specced — not yet implemented. The current featherdesk codebase has no macOS
 target. This add-on becomes the macOS HW path during the platform port.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_vt_hw]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

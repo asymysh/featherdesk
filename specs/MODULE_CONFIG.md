@@ -177,7 +177,11 @@ bitrate_max_multiplier = 1.5      # When rate_control = bitrate, max_bitrate = b
 [addon_module_x264]
 # libx264 via ffmpeg subprocess — GPL isolated. For home / personal / OSS.
 # Requires ffmpeg in PATH or bundled.
-ffmpeg_path  = ""                 # "" = search PATH, ./ffmpeg, then VIEWPORT_FFMPEG_PATH env
+ffmpeg_path  = ""                 # "" = auto-discover in this order:
+                                  #   1. $VIEWPORT_FFMPEG_PATH env var (if set)
+                                  #   2. ffmpeg / ffmpeg.exe in PATH
+                                  #   3. ./ffmpeg / ./ffmpeg.exe next to the binary (bundled deploy)
+                                  # Set explicitly to an absolute path to skip auto-discovery.
 threads      = 0                  # 0 = auto (cpu_count, capped at 12 for diminishing returns)
                                   # Range: 1–32.  Sweet spot is 8 on most CPUs.
 preset       = "ultrafast"        # "ultrafast" | "superfast" | "veryfast" | "faster" | "fast" | "medium"
@@ -211,13 +215,22 @@ profile          = "high"         # "baseline" | "main" | "high" — high recomm
 multipass        = "disabled"     # "disabled" | "qres" | "fullres" — disabled for low latency
 
 [addon_module_amf]
-# AMD AMF SDK. Linux (ROCm) + Windows.
+# AMD AMF SDK on Windows. (Linux uses [addon_module_amf_rocm] — same keys, different build tag.)
 usage            = "lowlatency"   # "transcoding" | "ultralowlatency" | "lowlatency" | "webcam"
 quality          = "speed"        # "speed" | "balanced" | "quality"
 rate_control     = "cqp"          # "cqp" | "cbr" | "vbr"
 qp_i             = 26
 qp_p             = 26
 profile          = "high"         # "baseline" | "main" | "high"
+
+[addon_module_amf_rocm]
+# AMD AMF SDK on Linux via ROCm runtime. Same keys as [addon_module_amf].
+usage            = "lowlatency"
+quality          = "speed"
+rate_control     = "cqp"
+qp_i             = 26
+qp_p             = 26
+profile          = "high"
 
 # ─────────────────────────────────────────────────────────────────────────
 # HW encoder add-ons (Windows)
@@ -260,6 +273,12 @@ allow_frame_reordering = false    # false = lower latency (no B-frames)
 # Linux KMS+EGL DMA-BUF capture.
 drm_card         = ""             # "" = auto-discover. e.g. "/dev/dri/card0"
 cursor_plane     = true           # Capture cursor plane separately for client-side compositing
+
+[addon_module_nvfbc]
+# NVIDIA NvFBC capture. Linux only (Windows uses DXGI DD).
+output_index     = 0              # Which NVIDIA output to capture
+capture_type     = "to_cuda"      # "to_cuda" | "to_sys" | "to_gl" — CUDA for direct NVENC pairing
+with_cursor      = false          # false = cursor captured separately
 
 [addon_module_dxgi_dd]
 # Windows DXGI Desktop Duplication.

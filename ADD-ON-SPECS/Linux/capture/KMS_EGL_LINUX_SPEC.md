@@ -268,3 +268,15 @@ Skip when:
 verified on Intel HD 630 at 2560×1440 with measured performance numbers. The
 refactor moves it to `internal/capture/kms/` under a `kms_egl` build tag without
 changing the underlying capture logic.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_kms_egl]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

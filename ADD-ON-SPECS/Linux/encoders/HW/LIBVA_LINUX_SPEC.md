@@ -362,3 +362,15 @@ Runtime (user must have installed):
 | `MODULE_CAPTURE.md` | `DMABufCapturer.NextDMABuf()` provides the fd for Phase 5 |
 | `MODULE_PIPELINE.md` | Selects this encoder when `caps.H264Encode == true` |
 | `MODULE_ENCODE.md` | Software fallback when this module returns `ErrFallbackToSoftware` |
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_libva]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

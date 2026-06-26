@@ -178,3 +178,15 @@ Skip when:
 
 📋 Specced — not yet implemented. The current featherdesk codebase uses OpenH264
 CGo on all platforms. This add-on will be the macOS-preferred SW encoder once built.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_vt_sw]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

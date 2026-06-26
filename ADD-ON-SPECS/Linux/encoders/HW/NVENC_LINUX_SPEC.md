@@ -289,3 +289,15 @@ Stick with default VA-API binary when:
 
 📋 Specced — not yet built. Implementation order: probe → session init → per-frame
 encode → reference frame invalidation → CUDA interop zero-copy.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_nvenc]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

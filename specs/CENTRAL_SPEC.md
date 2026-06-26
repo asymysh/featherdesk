@@ -111,9 +111,9 @@ for where any platform or add-on document lives — never duplicate specs, alway
 | Platform | Spec | Capture add-on(s) | Encoder add-on(s) |
 |----------|------|------------------|-------------------|
 | **Cross-platform compat** | [`ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`](../ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md) | — | — |
-| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `libva`, `nvenc`, `amf` |
-| **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | `sck` | `vt_sw`, `vt_hw`, `openh264` |
-| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | `dxgi_dd` | `openh264`, `mf_hw`, `nvenc`, `amf`, `qsv` |
+| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `x264`, `libva`, `nvenc`, `amf` |
+| **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | `sck` | `openh264`, `x264`, `vt_sw`, `vt_hw` |
+| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | `dxgi_dd` | `openh264`, `x264`, `mf_hw`, `nvenc`, `amf`, `qsv` |
 
 > **Default binary on every platform contains zero capture backends and zero
 > encoders.** Every backend is an opt-in build-tagged add-on. Users compose the
@@ -143,16 +143,20 @@ for the full rationale.
 
 ### Linux encoder add-on specs
 
-| Add-on | Path | Spec | Hardware | Status |
-|--------|------|------|---------|--------|
-| OpenH264 CGo | SW | [`Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
-| libva direct | HW | [`Linux/encoders/HW/LIBVA_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
-| NVENC direct | HW | [`Linux/encoders/HW/NVENC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
-| AMF on ROCm | HW | [`Linux/encoders/HW/AMF_ROCM_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
+| Add-on | Path | License | Spec | Hardware | Status |
+|--------|------|---------|------|---------|--------|
+| OpenH264 CGo | SW | BSD-2 (Cisco) | [`Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
+| x264 subprocess | SW | GPL-2 (isolated) | [`Linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
+| libva direct | HW | MIT | [`Linux/encoders/HW/LIBVA_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
+| NVENC direct | HW | NVIDIA SDK | [`Linux/encoders/HW/NVENC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
+| AMF on ROCm | HW | Apache 2.0 | [`Linux/encoders/HW/AMF_ROCM_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
 
-
-> **Intel on Linux is not a separate add-on** — Intel Quick Sync is exposed exclusively
-> through VA-API. The `libva` add-on covers Intel Sandy Bridge through Arc.
+> **SW encoder choice:** OpenH264 for commercial deployments (BSD).
+> x264 for home / OSS — 2× faster on multi-core CPUs but GPL contamination
+> on the ffmpeg subprocess.
+>
+> **Intel on Linux is not a separate HW add-on** — Intel Quick Sync is exposed
+> exclusively through VA-API. The `libva` add-on covers Intel Sandy Bridge through Arc.
 
 ### macOS capture add-on specs
 
@@ -164,16 +168,19 @@ for the explanation. SCK is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
 
 ### macOS encoder add-on specs
 
-| Add-on | Path | Spec | Hardware | Status |
-|--------|------|------|---------|--------|
-| VideoToolbox SW | SW | [`macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
-| VideoToolbox HW | HW | [`macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC), M2+ (HW AV1) | 📋 Specced |
+| Add-on | Path | License | Spec | Hardware | Status |
+|--------|------|---------|------|---------|--------|
+| OpenH264 CGo | SW | BSD-2 (Cisco) | [`macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
+| x264 subprocess | SW | GPL-2 (isolated) | [`macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | Any CPU; needs ffmpeg | 📋 Specced |
+| VideoToolbox SW | SW | Apple system | [`macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
+| VideoToolbox HW | HW | Apple system | [`macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC), M2+ (HW AV1) | 📋 Specced |
 
-> **No vendor-specific add-ons on macOS** — Apple controls the entire graphics stack.
+> **No vendor-specific HW add-ons on macOS** — Apple controls the entire graphics stack.
 > VideoToolbox is the single API for Intel Quick Sync, AMD VCE, and Apple Media Engine.
-> The SW/HW split is purely build-modularity (same CGo file, different config).
-> The Linux SW add-on (`openh264`) also works on macOS for cross-platform binary
-> consistency.
+>
+> **For maximum HW performance on macOS, use VideoToolbox.** For cross-platform
+> binary consistency with Linux/Windows, OpenH264 or x264 can be used as SW
+> fallback (especially useful for the GPL/BSD licensing differentiation).
 
 ### Windows capture add-on specs
 
@@ -199,14 +206,14 @@ for the full rationale, recommended combinations, and headless install flow.
 
 ### Windows encoder add-on specs
 
-| Add-on | Path | Spec | Hardware | Status |
-|--------|------|------|---------|--------|
-| OpenH264 CGo | SW | [`Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | 📋 Specced |
-
-| MediaFoundation HW | HW | [`Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | 📋 Specced |
-| NVENC | HW | [`Windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
-| AMF | HW | [`Windows/encoders/HW/AMF_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/AMF_WINDOWS_SPEC.md) | AMD GCN+ | 📋 Specced |
-| QSV (oneVPL) | HW | [`Windows/encoders/HW/QSV_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/QSV_WINDOWS_SPEC.md) | Intel Sandy Bridge+ (covers Arc) | 📋 Specced |
+| Add-on | Path | License | Spec | Hardware | Status |
+|--------|------|---------|------|---------|--------|
+| OpenH264 CGo | SW | BSD-2 (Cisco) | [`Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | ✅ Benchmarked |
+| x264 subprocess | SW | GPL-2 (isolated) | [`Windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
+| MediaFoundation HW | HW | Microsoft system | [`Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | ✅ Benchmarked |
+| NVENC | HW | NVIDIA SDK | [`Windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | ✅ Benchmarked |
+| AMF | HW | Apache 2.0 | [`Windows/encoders/HW/AMF_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/AMF_WINDOWS_SPEC.md) | AMD GCN+ | ✅ Benchmarked |
+| QSV (oneVPL) | HW | MIT | [`Windows/encoders/HW/QSV_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/QSV_WINDOWS_SPEC.md) | Intel Sandy Bridge+ (covers Arc) | 📋 Specced |
 
 
 > **MediaFoundation HW is the recommended cross-vendor default for Windows** —

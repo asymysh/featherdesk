@@ -272,3 +272,15 @@ Skip only if:
 Apple Silicon hardware not yet measured but expected to be 2–4× faster. The
 refactor moves the existing Objective-C SCK wrapper to `internal/capture/sck/`
 under the `sck` build tag without changing the underlying capture logic.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_sck]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+

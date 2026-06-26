@@ -263,3 +263,15 @@ By shipping AMF as an opt-in add-on:
 
 📋 Specced — not yet built. Lower priority than NVENC because Mesa VA-API already
 covers AMD well; this is for power users who need AMD-specific tuning.
+
+---
+
+## Configuration
+
+This add-on reads its tuning knobs from the `[addon_module_amf_rocm]` section
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+
+If the section is absent, the add-on uses its built-in defaults. The section is
+strictly validated only when this add-on is compiled into the binary`;` unknown
+keys in this section will cause startup to fail.
+
