@@ -129,7 +129,7 @@ int dmabuf_fd;
 drmPrimeHandleToFD(drm_fd, fb2->handles[0], DRM_CLOEXEC, &dmabuf_fd);
 
 // 4. Path A: Zero-copy direct to HW encoder
-// Pass dmabuf_fd to libva / NVENC / Vulkan Video — no GPU→CPU copy
+// Pass dmabuf_fd to libva / NVENC / AMF — no GPU→CPU copy
 return EncodedFrame{ DMAFD: dmabuf_fd, Width: w, Height: h, ... };
 
 // 4. Path B: CPU readback for SW encoder

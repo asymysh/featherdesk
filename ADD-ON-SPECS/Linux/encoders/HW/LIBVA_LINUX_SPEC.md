@@ -32,7 +32,8 @@ The same binary works on all of these — the driver handles vendor differences.
 | Intel Skylake–Ice Lake (2015–2019) | `i915` | `iHD` (intel-media-driver) | ✅ | ✅ | ❌ |
 | Intel Xe / Arc (2021+) | `xe` / `i915` | `iHD` | ✅ | ✅ | ✅ |
 | AMD GCN / RX 400+ (2016+) | `amdgpu` | Mesa `radeonsi` | ✅ | ✅ | ❌ |
-| AMD RDNA2 / RX 6000+ (2020+) | `amdgpu` | Mesa | ✅ | ✅ | ✅ |
+| AMD RDNA2 / RX 6000+ (2020+) | `amdgpu` | Mesa | ✅ | ✅ | ❌ decode only |
+| AMD RDNA3+ / RX 7000+ (2023+) | `amdgpu` | Mesa | ✅ | ✅ | ✅ |
 | AMD RDNA3 / RX 7000+ (2022+) | `amdgpu` | Mesa | ✅ | ✅ | ✅ |
 | NVIDIA (unofficial path) | `nvidia` | `nvidia-vaapi-driver` | ✅ wraps NVENC | ✅ | ❌ |
 | Qualcomm (some ARM Linux SoCs) | varies | `msm` / `freedreno` | device-specific | ❌ typically | ❌ |

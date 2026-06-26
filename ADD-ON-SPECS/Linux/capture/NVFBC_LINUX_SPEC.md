@@ -156,9 +156,9 @@ This is the same zero-copy GPU-resident pipeline Sunshine uses for NVIDIA stream
 Total bus bandwidth per frame: ~30KB compressed NALs only. Sub-2ms total capture +
 encode latency on RTX 3060+.
 
-If NvFBC is paired with VA-API or Vulkan Video instead, an extra GPU→GPU copy is
-needed to bridge CUDA → VA-API/Vulkan. Still better than KMS+EGL but loses the
-purest zero-copy story. For NVIDIA deployments, **ship NvFBC and NVENC together**.
+If NvFBC is paired with VA-API instead, an extra GPU→GPU copy is needed to
+bridge CUDA → VA-API. Still better than KMS+EGL but loses the purest zero-copy
+story. For NVIDIA deployments, **ship NvFBC and NVENC together**.
 
 ---
 
@@ -206,10 +206,8 @@ func ProbeNvFBC() (*NvFBCCapabilities, error) {
 Pipeline probes capture in this order on Linux:
 ```
 NvFBC available AND on NVIDIA?      → use NvFBC (this add-on)
-wlr-screencopy add-on AND wlroots?  → use wlr-screencopy
-KMS+EGL with root?                  → use KMS+EGL (default)
-PipeWire portal on Wayland?         → use PipeWire (default)
-X11grab via ffmpeg?                 → use X11grab (default)
+KMS+EGL with root / CAP_SYS_ADMIN?  → use KMS+EGL
+None?                                → fatal: no capture add-on configured
 ```
 
 ---

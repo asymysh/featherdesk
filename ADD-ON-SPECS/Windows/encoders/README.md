@@ -2,20 +2,19 @@
 
 ## Pluggable architecture: every encoder is an opt-in add-on
 
-The Windows default binary contains **no encoders**. Every encoder is a separate
-build-tagged add-on. Users compile in exactly the encoders they want.
+The default Windows binary contains zero encoders. Each encoder is a separate
+Go build-tagged add-on. Mix and match exactly what you need.
 
 ```
-ADD-ON-SPECS/Windows/encoders/
+encoders/
 ├── SW/
-│   ├── OPENH264_CGO_WINDOWS_SPEC.md          ← cross-platform SW (same code as Linux + macOS)
-│   └── MEDIAFOUNDATION_SW_WINDOWS_SPEC.md    ← Windows-native SW (no third-party DLLs)
+│   ├── OPENH264_CGO_WINDOWS_SPEC.md          ← BSD-licensed Cisco SW (commercial use)
+│   └── X264_SUBPROCESS_WINDOWS_SPEC.md       ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 └── HW/
     ├── MEDIAFOUNDATION_HW_WINDOWS_SPEC.md    ← cross-vendor HW via MFT routing (NVIDIA + AMD + Intel + Qualcomm)
-    ├── NVENC_WINDOWS_SPEC.md                 ← NVIDIA direct (REF_FRAMES_INVALIDATION)
-    ├── AMF_WINDOWS_SPEC.md                   ← AMD direct (Pre-Analysis, Apache 2.0)
-    ├── QSV_WINDOWS_SPEC.md                   ← Intel direct via oneVPL (covers Arc)
-    └── VULKAN_VIDEO_WINDOWS_SPEC.md          ← cross-vendor royalty-free, future-facing
+    ├── NVENC_WINDOWS_SPEC.md                 ← NVIDIA direct
+    ├── AMF_WINDOWS_SPEC.md                   ← AMD direct (Apache 2.0)
+    └── QSV_WINDOWS_SPEC.md                   ← Intel direct via oneVPL (covers Arc)
 ```
 
 ---
@@ -24,17 +23,43 @@ ADD-ON-SPECS/Windows/encoders/
 
 | Deployment | Recommended add-on set | Binary |
 |-----------|-----------------------|--------|
-| Generic Windows (any GPU) | `openh264` + `mf_hw` | `viewport-rds-windows-default` |
-| ARM Snapdragon (Copilot+ PC) | `mf_sw` + `mf_hw` | `viewport-rds-windows-arm64` |
+| Generic Windows (any GPU, commercial) | `openh264` + `mf_hw` | `viewport-rds-windows-default` |
+| Home / personal (any GPU, fastest SW) | `x264` + `mf_hw` | `viewport-rds-windows-home` |
 | NVIDIA-only (low latency priority) | `openh264` + `nvenc` | `viewport-rds-windows-nvenc` |
 | AMD-only (quality priority) | `openh264` + `amf` | `viewport-rds-windows-amf` |
 | Intel-only (low power) | `openh264` + `qsv` | `viewport-rds-windows-qsv` |
-| Cross-vendor + forward-looking | `openh264` + `vulkan_video` | `viewport-rds-windows-vulkan` |
+| Maximum flexibility | `openh264,x264,mf_hw,nvenc,amf,qsv` | `viewport-rds-windows-full` |
 
 The build tags compose; stack any combination:
 ```bash
 go build -tags "openh264,mf_hw,nvenc" -o viewport-rds-windows-full ./cmd/server
 ```
+
+---
+
+## SW encoder choice: OpenH264 vs x264
+
+Both produce H.264 — same codec, different implementations, different licenses.
+
+| Aspect | OpenH264 (BSD, Cisco) | x264 (GPL, subprocess) |
+|--------|----------------------|------------------------|
+| License | BSD-2-Clause | GPL-2.0+ (isolated via ffmpeg subprocess) |
+| 1080p P50 @ 12T | 7.4ms | **3.3ms** (2.2× faster) |
+| 1440p P50 @ 12T | 13.4ms | **5.8ms** (2.3× faster) |
+| Integration | CGo in-process | ffmpeg subprocess + pipe |
+| Royalties | Cisco pays MPEG-LA | None — patent expired in most regions |
+| Deployment | Commercial-safe | Home / OSS / accept GPL on subprocess |
+| Bundled | ~1 MB DLL | Requires ffmpeg in PATH or bundled |
+
+**For commercial deployment:** ship `openh264`. The BSD license and Cisco's
+royalty arrangement keep the binary fully proprietary.
+
+**For home / personal / OSS:** ship `x264`. It's 2× faster and the GPL
+contamination is isolated to the ffmpeg subprocess (your main binary stays
+under your chosen license).
+
+See [`SW/OPENH264_CGO_WINDOWS_SPEC.md`](./SW/OPENH264_CGO_WINDOWS_SPEC.md)
+and [`SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](./SW/X264_SUBPROCESS_WINDOWS_SPEC.md).
 
 ---
 
@@ -69,11 +94,10 @@ When multiple encoders are compiled in, the pipeline probes in this order:
 1. NVENC available (hardware + add-on)?      → use NVENC
 2. AMF available?                            → use AMF
 3. QSV available?                            → use QSV
-4. Vulkan Video mature on this GPU?          → use Vulkan Video
-5. MF HW (any vendor MFT registered)?        → use MF HW (cross-vendor default)
-6. MF SW?                                    → use MF SW (Windows-built-in fallback)
-7. OpenH264 CGo?                             → cross-platform SW fallback
-8. None?                                     → fatal: no encoder add-on installed
+4. MF HW (any vendor MFT registered)?        → use MF HW (cross-vendor default)
+5. x264 available (ffmpeg in PATH)?          → use x264 subprocess (GPL builds only)
+6. OpenH264 CGo?                             → universal SW fallback
+7. None?                                     → fatal: no encoder add-on installed
 ```
 
 For each available encoder, the pipeline then picks codec by preference:
@@ -85,14 +109,19 @@ No software HEVC — libx265's triple patent pool exposure is rejected.
 
 ---
 
-## Why split MF into SW and HW add-ons
+## Why no Vulkan Video on Windows
 
-MediaFoundation supports both software and hardware modes through the same
-`IMFTransform` interface. We split them into separate add-ons for **modularity**:
+Vulkan Video encode was considered but rejected as of 2026:
+- Driver support immature on AMD and Intel
+- No measurable performance advantage over vendor-direct SDKs
+- MediaFoundation HW already provides cross-vendor abstraction with mature drivers
 
-- `mf_sw` build tag: enables `MFTEnumEx` with `MFT_ENUM_FLAG_LOCALMFT` (SW only),
-  no D3D11 setup, smaller binary
-- `mf_hw` build tag: enables `MFTEnumEx` with `MFT_ENUM_FLAG_HARDWARE`, requires
-  D3D11 device manager, brings in DXGI interop
+Decision may be revisited when AMD/Intel driver support matures.
 
-Each add-on does one thing. Users opt into what they need.
+---
+
+## Why no MediaFoundation SW
+
+MediaFoundation's H.264 software MFT cannot be forced when any hardware MFT is
+registered — Windows always picks HW when available. On any deployment machine
+with a GPU, MF SW is unreachable. Use `openh264` or `x264` for the SW path.

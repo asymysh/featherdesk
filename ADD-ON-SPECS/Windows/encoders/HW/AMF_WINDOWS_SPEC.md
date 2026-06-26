@@ -10,7 +10,7 @@ Bypasses MediaFoundation to unlock AMF-specific features:
 - **Pre-Analysis (PA)** — better quality per bit (~10% smaller frames at same quality)
 - **AMF Smart Access Video (SAV)** — RDNA2+ low-latency mode
 - Direct rate-control tuning beyond what MF exposes
-- AV1 encode on RDNA2+ with full AMF tuning
+- AV1 encode on RDNA3+ (RX 7000+) with full AMF tuning
 
 For AMD-only Windows deployments where quality and tuning matter, this is the
 preferred encoder.
@@ -39,7 +39,8 @@ be redistributed without restriction.
 | Polaris (RX 400/500) | ✅ | ✅ | ❌ | 1.4+ |
 | Vega | ✅ | ✅ | ❌ | 1.4+ |
 | RDNA 1 (RX 5000) | ✅ | ✅ | ❌ | 1.4+ |
-| RDNA 2 (RX 6000) | ✅ | ✅ | ✅ | 1.4+ |
+| RDNA 2 (RX 6000) | ✅ | ✅ | ❌ decode only | 1.4+ |
+| RDNA 3+ (RX 7000+) | ✅ | ✅ | ✅ | 1.4+ |
 | RDNA 3 (RX 7000) | ✅ | ✅ | ✅ | 1.4+ |
 | RDNA 4 (RX 9000) | ✅ | ✅ | ✅ | 1.4+ |
 
@@ -159,7 +160,7 @@ internal/encode/amf/
 Use this add-on when:
 - AMD-only deployment
 - Quality at given bitrate matters (Pre-Analysis advantage)
-- RDNA2+ with AV1 needs full AMF tuning (not just MF defaults)
+- RDNA3+ with AV1 needs full AMF tuning (not just MF defaults). RDNA 2 has no AV1 encode.
 
 Skip when:
 - Heterogeneous fleet (use MF HW for cross-vendor in one binary)

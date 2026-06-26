@@ -73,12 +73,12 @@ want. The full set:
 ```
 encoders/
 ├── SW/
-│   └── OPENH264_CGO_LINUX_SPEC.md    ← cross-platform SW H.264 (Cisco, BSD-2)
+│   ├── OPENH264_CGO_LINUX_SPEC.md     ← BSD-licensed Cisco SW (commercial use)
+│   └── X264_SUBPROCESS_LINUX_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 └── HW/
     ├── LIBVA_LINUX_SPEC.md            ← Intel + AMD + NVIDIA via VA-API (MIT)
-    ├── NVENC_LINUX_SPEC.md            ← NVIDIA direct (REF_FRAMES_INVALIDATION)
-    ├── AMF_ROCM_SPEC.md               ← AMD direct via ROCm (Apache 2.0)
-    └── VULKAN_VIDEO_LINUX_SPEC.md     ← cross-vendor royalty-free, future-facing
+    ├── NVENC_LINUX_SPEC.md            ← NVIDIA direct
+    └── AMF_ROCM_SPEC.md               ← AMD direct via ROCm (Apache 2.0)
 ```
 
 See [`encoders/README.md`](./encoders/README.md) for recommended combinations,
@@ -132,7 +132,8 @@ Advance, Velos Media). If HEVC hardware is unavailable, fall straight to H.264.
 | Intel Skylake–Ice Lake (2015–2019) | `iHD` | ✅ | ✅ | ❌ |
 | Intel Tiger Lake / Xe / Arc (2020+) | `iHD` | ✅ | ✅ 10-bit | ✅ Arc+ |
 | AMD GCN / RX 400+ (2016+) | Mesa | ✅ | ✅ | ❌ |
-| AMD RDNA2 / RX 6000+ (2020+) | Mesa | ✅ | ✅ 10-bit | ✅ |
+| AMD RDNA2 / RX 6000+ (2020+) | Mesa | ✅ | ✅ 10-bit | ❌ (decode only) |
+| AMD RDNA3+ / RX 7000+ (2023+) | Mesa | ✅ | ✅ 10-bit | ✅ |
 | AMD RDNA3 / RX 7000+ (2022+) | Mesa | ✅ | ✅ 10-bit | ✅ |
 | NVIDIA *(via nvidia-vaapi-driver)* | unofficial | ✅ | ✅ | ❌ |
 | No GPU / CPU-only | — | ❌ | ❌ | ❌ → OpenH264 SW |

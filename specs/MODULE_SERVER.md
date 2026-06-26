@@ -64,7 +64,7 @@ type Config struct {
     Port     int    // HTTPS port (default: 30084)
     Bind     string // Bind address (default: "0.0.0.0")
     Token    string // Session auth token (empty = generate random at startup)
-    Log      Logger
+    Log      *slog.Logger
     ClientFS fs.FS  // Embedded web client filesystem
 }
 ```

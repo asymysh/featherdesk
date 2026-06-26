@@ -48,7 +48,7 @@ type FBInfo struct {
 type CaptureConfig struct {
     FPS        int             // Target capture framerate
     Backend    CaptureBackend  // Requested backend (or Auto)
-    Logger     Logger          // Logger interface
+    Logger     *slog.Logger    // stdlib log/slog
 }
 
 type CaptureBackend int

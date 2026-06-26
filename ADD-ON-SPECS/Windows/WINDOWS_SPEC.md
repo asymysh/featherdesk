@@ -8,64 +8,74 @@ Windows is a primary target for FeatherDesk. The use case covers both **remote c
 
 ## Capture
 
-### Every capture backend is an add-on (pluggable architecture)
+### Single capture path: DXGI Desktop Duplication
 
-The Windows default binary contains **no capture backends**. Every capture path
-is a build-tagged add-on, mirroring the Linux and macOS structure. Users
-compile in exactly the capture method(s) they need.
+Windows uses **one** capture mechanism — DXGI Desktop Duplication — for all
+GPU vendors and all deployment scenarios (with or without a physical display).
+
+Benchmarking proved DXGI DD's raw capture overhead is **sub-microsecond** on
+both NVIDIA and AMD GPUs. Vendor-specific capture APIs (NvFBC, AMF Display
+Capture) were considered and rejected — they cannot improve on near-zero
+overhead, and adding them would double maintenance for no measurable benefit.
 
 ```
 capture/
-├── DXGI_DD_WINDOWS_SPEC.md       ← default recommended add-on, all GPU vendors
-├── NVFBC_WINDOWS_SPEC.md         ← NVIDIA proprietary, lowest-latency on NVIDIA
-├── AMF_CAPTURE_WINDOWS_SPEC.md   ← AMD proprietary, native zero-copy with AMF encoder
-└── README.md                     ← runtime probe order + recommended combinations
+├── DXGI_DD_WINDOWS_SPEC.md       ← the only capture add-on
+└── README.md                     ← runtime details, headless setup
 ```
 
 ### Add-on summary
 
-| Add-on | Build tag | Hardware | Spec | When to use |
-|--------|-----------|----------|------|------------|
-| **DXGI Desktop Duplication** | `dxgi_dd` | Any GPU (WDDM 1.2+, Win 8+) | [`capture/DXGI_DD_WINDOWS_SPEC.md`](./capture/DXGI_DD_WINDOWS_SPEC.md) | Universal default — ~2–4ms, no elevation |
-| **NvFBC for Windows** | `nvfbc_win` | NVIDIA proprietary driver | [`capture/NVFBC_WINDOWS_SPEC.md`](./capture/NVFBC_WINDOWS_SPEC.md) | ~50% lower latency than DXGI DD on NVIDIA; pairs with NVENC |
-| **AMD AMF Display Capture** | `amf_capture` | AMD Polaris+ (Adrenalin 21.5+) | [`capture/AMF_CAPTURE_WINDOWS_SPEC.md`](./capture/AMF_CAPTURE_WINDOWS_SPEC.md) | Same AMFContext as `amf` encoder; native zero-copy; Apache 2.0 |
+| Add-on | Build tag | Hardware | Spec | Headless support |
+|--------|-----------|----------|------|------------------|
+| **DXGI Desktop Duplication** | `dxgi_dd` | Any GPU (WDDM 1.2+, Win 8+) | [`capture/DXGI_DD_WINDOWS_SPEC.md`](./capture/DXGI_DD_WINDOWS_SPEC.md) | Integrated IddCx virtual display driver auto-installs on first launch when no physical display detected |
 
-All three produce D3D11-backed surfaces (ID3D11Texture2D), so they're all
-compatible with every Windows HW encoder add-on (MF HW, NVENC, AMF, QSV).
-Vendor-specific add-ons simply integrate more tightly with their matching
-encoder.
+Output: `ID3D11Texture2D` — directly consumable by every Windows HW encoder
+(MF HW, NVENC, AMF, QSV) with zero-copy.
+
+### Headless support (integrated)
+
+On machines with no physical display (servers, headless workstations, VMs),
+the `dxgi_dd` add-on bundles a **pre-signed IddCx virtual display driver**
+and auto-installs it on first launch via `pnputil` (one-time UAC). After
+install, the virtual display appears as a normal DXGI output and DXGI DD
+captures it like any physical monitor.
+
+See [`capture/DXGI_DD_WINDOWS_SPEC.md`](./capture/DXGI_DD_WINDOWS_SPEC.md#headless-support-integrated-iddcx-virtual-display)
+for the full auto-install flow.
 
 ### What was rejected
 
 | API | Why rejected |
 |-----|-------------|
 | Windows.Graphics.Capture (WGC) | Only advantage was per-window capture, which is out of scope. Full-desktop WGC is slower than DXGI DD. |
-| GDI BitBlt | ~30–50ms, misses hardware-accelerated content. Benchmarked at 16.7ms p50 on Parsec virtual display — but fails on real DirectX apps. |
+| NvFBC for Windows | DXGI DD overhead already sub-microsecond — no measurable gain. Would add NVIDIA driver patcher concerns on GeForce. |
+| AMF Display Capture | Same reason — no measurable improvement over DXGI DD for full-desktop capture. |
+| GDI BitBlt | ~30–50ms, misses hardware-accelerated content (DirectX games, modern apps). |
 | Magnification API | ~15–30ms, CPU-only. Niche. |
 | DirectShow / MF screen capture | Wrappers around DXGI DD. No benefit. |
 
 ### Runtime probe order
 
 ```
-1. nvfbc_win compiled in AND NVIDIA GPU present AND probe succeeds?  → use NvFBC
-2. amf_capture compiled in AND AMD GPU present?                       → use AMF Display Capture
-3. dxgi_dd compiled in?                                                → use DXGI DD (universal)
-4. None of the above?                                                  → fatal: no capture
+1. dxgi_dd compiled in AND active display found?              → use DXGI DD
+2. dxgi_dd compiled in AND no display + admin?                → install IddCx VDD → use DXGI DD
+3. dxgi_dd compiled in AND no display + no admin?             → prompt for elevation, then continue
+4. None of the above?                                          → fatal: no capture add-on installed
 ```
 
-See [`capture/README.md`](./capture/README.md) for recommended add-on
-combinations and detailed rationale.
+### Measured benchmark (GTX 1080 Ti + RX 6800 XT)
 
-### Historical benchmark (GDI only — real DXGI DD pending hardware bench)
+| GPU | Display | Test | P50 | P95 | P99 |
+|-----|---------|------|-----|-----|-----|
+| GTX 1080 Ti | Real 60Hz | Blocking (vsync wait) | 16.4ms | 17.4ms | 18.1ms |
+| GTX 1080 Ti | Real 60Hz | **Polling (raw overhead)** | **<0.001ms** | **<0.001ms** | 0.5ms |
+| RX 6800 XT | Dummy HDMI | Blocking (vsync wait) | 16.5ms | 17.5ms | 18.2ms |
+| RX 6800 XT | Dummy HDMI | **Polling (raw overhead)** | **<0.001ms** | **<0.001ms** | <0.001ms |
 
-| Variant | FPS | p50 | p95 | p99 |
-|---------|-----|-----|-----|-----|
-| GDI bitblt_only | 58.0 | 16.7ms | 20.0ms | 32.6ms |
-| GDI bitblt_getdib | 53.9 | 16.9ms | 31.9ms | 35.8ms |
-
-> Tested on AMD Ryzen 9 5900X, Parsec virtual display, Windows 11. GDI
-> numbers are worst-case baseline only — DXGI DD expected: 1–5ms p50 on
-> real hardware. Full benchmark pass with NVIDIA + AMD GPUs pending.
+The blocking latency (~16.4ms) is purely the 60Hz refresh interval —
+unavoidable for any frame-based capture. Raw acquisition overhead is
+effectively zero.
 
 ---
 
@@ -80,14 +90,13 @@ want. The full set:
 ```
 encoders/
 ├── SW/
-│   ├── OPENH264_CGO_WINDOWS_SPEC.md           ← cross-platform SW (same code as Linux + macOS)
-│   └── MEDIAFOUNDATION_SW_WINDOWS_SPEC.md     ← Windows-native SW (no third-party DLL)
+│   ├── OPENH264_CGO_WINDOWS_SPEC.md           ← BSD-licensed Cisco SW (commercial use)
+│   └── X264_SUBPROCESS_WINDOWS_SPEC.md        ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 └── HW/
     ├── MEDIAFOUNDATION_HW_WINDOWS_SPEC.md     ← cross-vendor HW (NVIDIA + AMD + Intel + Qualcomm)
-    ├── NVENC_WINDOWS_SPEC.md                  ← NVIDIA direct (REF_FRAMES_INVALIDATION)
-    ├── AMF_WINDOWS_SPEC.md                    ← AMD direct (Pre-Analysis, Apache 2.0)
-    ├── QSV_WINDOWS_SPEC.md                    ← Intel direct via oneVPL (covers Arc)
-    └── VULKAN_VIDEO_WINDOWS_SPEC.md           ← cross-vendor royalty-free, future-facing
+    ├── NVENC_WINDOWS_SPEC.md                  ← NVIDIA direct
+    ├── AMF_WINDOWS_SPEC.md                    ← AMD direct (Apache 2.0)
+    └── QSV_WINDOWS_SPEC.md                    ← Intel direct via oneVPL (covers Arc)
 ```
 
 See [`encoders/README.md`](./encoders/README.md) for recommended combinations,
@@ -108,11 +117,12 @@ alongside MF HW.
 
 | Deployment | Add-ons |
 |-----------|---------|
-| Generic Windows (any GPU) | `openh264` + `mf_hw` |
-| ARM Snapdragon | `mf_sw` + `mf_hw` |
-| NVIDIA-only | `openh264` + `nvenc` |
-| AMD-only | `openh264` + `amf` |
-| Intel-only | `openh264` + `qsv` |
+| Generic Windows, commercial | `dxgi_dd` + `openh264` + `mf_hw` |
+| Generic Windows, home / OSS | `dxgi_dd` + `x264` + `mf_hw` |
+| ARM Snapdragon | `dxgi_dd` + `openh264` + `mf_hw` (OpenH264 has NEON path) |
+| NVIDIA-only | `dxgi_dd` + `openh264` + `nvenc` |
+| AMD-only | `dxgi_dd` + `openh264` + `amf` |
+| Intel-only | `dxgi_dd` + `openh264` + `qsv` |
 
 ---
 

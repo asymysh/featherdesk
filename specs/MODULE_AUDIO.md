@@ -58,7 +58,7 @@ type AudioConfig struct {
     BitDepth   int    // Default: 16 (S16LE)
     FrameSize  int    // Samples per chunk. Default: 960 (20ms at 48kHz)
     Target     string // PipeWire target node (empty = auto-detect)
-    Logger     Logger
+    Logger     *slog.Logger
 }
 
 // Constants

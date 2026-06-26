@@ -40,11 +40,11 @@ sends it in `FrameTypeConfig`. The client decodes whatever arrives.
 | Platform | Hardware | H.264 HW | HEVC HW | AV1 HW | SW Fallback |
 |----------|----------|---------|---------|--------|------------|
 | Linux | Intel (VA-API) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 CGo |
-| Linux | AMD (VA-API) | ✅ GCN+ | ✅ Polaris+ | ✅ RDNA2+ | OpenH264 CGo |
+| Linux | AMD (VA-API) | ✅ GCN+ | ✅ Polaris+ | ✅ RDNA3+ (RX 7000+) | OpenH264 CGo |
 | Linux | NVIDIA (via nvidia-vaapi-driver) | ✅ | ✅ | ❌ | OpenH264 CGo |
 | Linux | No GPU | ❌ | ❌ | ❌ | OpenH264 CGo |
 | Windows | NVIDIA (NVENC) | ✅ | ✅ | ✅ RTX40+ | OpenH264 CGo |
-| Windows | AMD (AMF) | ✅ | ✅ | ✅ RDNA2+ | OpenH264 CGo |
+| Windows | AMD (AMF) | ✅ | ✅ | ✅ RDNA3+ (RX 7000+) | OpenH264 CGo |
 | Windows | Intel (QSV) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 CGo |
 | Windows | No GPU | ❌ | ❌ | ❌ | OpenH264 CGo |
 | macOS | Apple Silicon M1 | ✅ | ✅ | ❌ encode | OpenH264 CGo* |
@@ -60,11 +60,17 @@ sends it in `FrameTypeConfig`. The client decodes whatever arrives.
 
 ## Capture — One Per Platform
 
-| Platform | Primary | Fallback | Last Resort |
-|----------|---------|---------|-------------|
-| **Linux** | KMS/DRM + EGL → zero-copy VA-API | PipeWire ScreenCast | X11grab (ffmpeg) |
-| **Windows** | DXGI Desktop Duplication | WGC | GDI BitBlt |
-| **macOS** | ScreenCaptureKit | ❌ none (all others removed in macOS 26) | ❌ |
+The default binary has **no capture backend** on any OS; capture is always
+an opt-in build-tagged add-on.
+
+| Platform | Build tag | Mechanism | Headless support |
+|----------|-----------|-----------|------------------|
+| **Linux** | `kms_egl` (+ optional `nvfbc`) | KMS/DRM + EGL DMA-BUF zero-copy | Xvfb / virtual display |
+| **Windows** | `dxgi_dd` | DXGI Desktop Duplication → ID3D11Texture2D | Integrated IddCx virtual display (auto-installed) |
+| **macOS** | `sck` | ScreenCaptureKit → CMSampleBuffer / IOSurface | Virtual display driver |
+
+No fallbacks in the default binary. PipeWire / X11grab / WGC / GDI / Magnification
+were all considered and rejected — see per-OS capture READMEs.
 
 ---
 
@@ -93,23 +99,24 @@ sends it in `FrameTypeConfig`. The client decodes whatever arrives.
 The wire protocol (`specs/MODULE_PROTOCOL.md`) is identical on all platforms:
 - 22-byte binary header (Version, Type, Sequence, Timestamp, W, H, PayloadSize)
 - `FrameTypeConfig` (type 6) as handshake — carries codec string, dims, cursorMode
-- `FrameTypeVideoH264` (type 1) or `FrameTypeVideoVP8` (type 5) for video
+- `FrameTypeVideoH264` (type 1) for video — slot 5 reserved (formerly VP8, rejected)
 - `FrameTypeAudioPCM` (type 4) for audio
 - JSON text frames for all client→server messages (input, keyframe request)
 
 The codec in the `Config` handshake is the **full WebCodecs codec string**:
 - H.264: `"avc1.42E01E"` (Constrained Baseline 3.0) — universal default
-- AV1: `"av01.0.04M.08"` — M2+ Mac, RTX40+ NVIDIA, RDNA2+ AMD
+- AV1: `"av01.0.04M.08"` — M2+ Mac, RTX 40+ NVIDIA (Ada Lovelace), RDNA3+ AMD (RX 7000+), Intel Arc
 
 ---
 
-## Feature Parity Gaps (current)
+## Implementation Status (current)
 
 | Feature | Linux | Windows | macOS |
 |---------|-------|---------|-------|
-| Capture | ✅ built | 🔧 GDI only | ❌ not built |
-| HW encode (zero-copy) | 📋 specced | ❌ not built | ❌ not built |
-| SW encode | ✅ VP8 (should be H.264) | ❌ not built | ❌ not built |
-| Audio | ✅ PipeWire | ❌ not built | ❌ not built |
-| Input | ✅ uinput | ❌ not built | ❌ not built |
+| Capture | ✅ KMS+EGL specced & working | ✅ DXGI DD specced & benchmarked | ✅ SCK specced & benchmarked |
+| HW encode | 📋 libva/NVENC/AMF specced | ✅ NVENC/AMF/MF/QSV specced & benchmarked | 📋 VideoToolbox specced (Hackintosh measured) |
+| SW encode (BSD) | 📋 OpenH264 specced | ✅ OpenH264 specced & benchmarked | 📋 OpenH264 specced |
+| SW encode (GPL) | 📋 x264 subprocess specced | ✅ x264 specced & benchmarked | 📋 x264 specced |
+| Audio | ⏸️ deferred | ⏸️ deferred | ⏸️ deferred |
+| Input | ⏸️ deferred | ⏸️ deferred | ⏸️ deferred |
 | Browser client | ✅ built | shared | shared |

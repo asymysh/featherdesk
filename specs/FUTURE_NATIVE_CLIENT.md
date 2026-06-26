@@ -198,7 +198,8 @@ current transport implementation, which is WebSocket".
 - Code signing pipeline
 - Distribution channels (App Store, direct download, package managers)
 - Native client codec decoder selection (FFmpeg vs platform native vs
-  Vulkan Video decode)
+  Vulkan Video decode — note: Vulkan Video *decode* is independent of the
+  Vulkan Video *encode* path which was rejected as immature for production)
 - Native client input device discovery (HID, gamepads, controllers)
 - Multi-display protocol extensions
 

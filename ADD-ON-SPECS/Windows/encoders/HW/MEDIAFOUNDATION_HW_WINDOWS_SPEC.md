@@ -41,7 +41,7 @@ No royalty concern. No SDK to ship. The vendor's driver brings the hardware path
 | Vendor | H.264 HW MFT | HEVC HW MFT | AV1 HW MFT |
 |--------|-------------|------------|-----------|
 | NVIDIA Kepler+ (driver 320+) | ✅ | ✅ Maxwell 2+ | ✅ Ada Lovelace+ |
-| AMD GCN+ (driver 16.x+) | ✅ | ✅ | ✅ RDNA2+ |
+| AMD GCN+ (driver 16.x+) | ✅ | ✅ | ✅ RDNA3+ (RX 7000+) |
 | Intel Sandy Bridge+ | ✅ | ✅ Skylake+ | ✅ Arc+ |
 | Qualcomm Snapdragon | ✅ | ✅ | ❌ |
 
@@ -186,7 +186,6 @@ Skip / prefer vendor add-ons when:
 ```
 internal/encode/mediafoundation/
 ├── mediafoundation.go
-├── mf_sw_cgo.go             // build tag: mf_sw  (sibling spec)
 ├── mf_hw_cgo.go             // build tag: mf_hw
 ├── d3d11_interop.go         // DXGI texture → IMFSample wrapping
 ├── probe.go

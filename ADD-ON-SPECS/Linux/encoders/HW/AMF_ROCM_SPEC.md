@@ -15,7 +15,7 @@ hasn't exposed yet.
 | Feature | Mesa VA-API | AMF on ROCm |
 |---------|------------|-------------|
 | H.264 / HEVC encode | ✅ | ✅ |
-| AV1 encode (RDNA2+) | ✅ | ✅ |
+| AV1 encode (RDNA3+ / RX 7000+) | ✅ | ✅ |
 | Pre-analysis (PA) | partial | ✅ — better quality per bit |
 | AMF Smart Access Video (SAV) | ❌ | ✅ |
 | AMD-specific HW-side B-frame ordering | ❌ | ✅ |
@@ -51,7 +51,8 @@ is a custom NVIDIA license, Intel is MIT). No royalties, fully redistributable.
 | GCN 4 / Polaris (RX 400/500) | Mesa or PRO | ⚠️ AMF works but unofficial |
 | GCN 5 / Vega | Mesa or PRO | ✅ AMF supported on PRO |
 | RDNA 1 (RX 5000) | Mesa or PRO | ✅ AMF supported |
-| RDNA 2 (RX 6000) | Mesa or PRO | ✅ AMF + AV1 encode |
+| RDNA 2 (RX 6000) | Mesa or PRO | ✅ AMF H.264/HEVC (no AV1 — decode only) |
+| RDNA 3+ (RX 7000+) | Mesa or PRO | ✅ AMF + AV1 encode |
 | RDNA 3 (RX 7000) | Mesa or PRO | ✅ AMF + AV1 + improved PA |
 | RDNA 4 (RX 9000) | Mesa or PRO | ✅ AMF latest |
 
@@ -209,9 +210,9 @@ Pipeline probes (Linux):
 ```
 NVENC?               → other add-on, NVIDIA only
 AMF (this add-on)?   → use AMF if available AND GPU is AMD
-Vulkan Video?        → other add-on, cross-vendor
-VA-API (default)?    → use VA-API (Mesa, the default for AMD)
-OpenH264 (default)?  → SW fallback
+VA-API?              → use VA-API (Mesa, the default for AMD)
+x264 subprocess?     → use x264 (GPL builds only)
+OpenH264?            → universal SW fallback
 ```
 
 ---

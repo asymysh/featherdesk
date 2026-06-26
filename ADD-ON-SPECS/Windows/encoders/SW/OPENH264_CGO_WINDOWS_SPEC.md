@@ -165,8 +165,7 @@ Use this add-on when:
 - Container deployments where MediaFoundation isn't reliable
 
 Skip when:
-- MediaFoundation SW add-on is acceptable — slightly slower but ships built into
-  Windows with no DLL distribution concern
+- x264 subprocess is acceptable (GPL isolation via ffmpeg subprocess) — 2× faster on multi-core CPUs (3.3ms vs 7.4ms at 1080p)
 
 ---
 

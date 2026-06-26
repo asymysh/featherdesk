@@ -68,7 +68,7 @@ users opt into vendor-specific performance gains.
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 10 plug-and-play modules. Each module has its own spec
+The system is decomposed into 8 plug-and-play modules. Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
@@ -83,9 +83,9 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 8 | **Config** | [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
 
 > **Encoder + capture implementations are not core modules.** Every encoder
-> (OpenH264 CGo, VideoToolbox, libva, NVENC, AMF, QSV, MediaFoundation, Vulkan
-> Video) and every capture backend (KMS+EGL, NvFBC, SCK, plus Windows TBD) is
-> a build-tagged add-on under
+> (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF, QSV,
+> MediaFoundation HW) and every capture backend (KMS+EGL, NvFBC, SCK, DXGI DD)
+> is a build-tagged add-on under
 > [`../ADD-ON-SPECS/{Platform}/{capture,encoders}/`](../ADD-ON-SPECS/).
 > The default binary ships with zero encoders and zero capture backends — users
 > compile in what they need. See the index below.
@@ -179,21 +179,23 @@ for the explanation. SCK is specced in `ADD-ON-SPECS/macOS/MACOS_SPEC.md`.
 
 | Add-on | Build tag | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
-| DXGI Desktop Duplication | `dxgi_dd` | [`ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md) | Any GPU (WDDM 1.2+, Win 8+) | 📋 Specced |
-| NvFBC for Windows | `nvfbc_win` | [`ADD-ON-SPECS/Windows/capture/NVFBC_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/NVFBC_WINDOWS_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
-| AMD AMF Display Capture | `amf_capture` | [`ADD-ON-SPECS/Windows/capture/AMF_CAPTURE_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/AMF_CAPTURE_WINDOWS_SPEC.md) | AMD Polaris+ (Adrenalin 21.5+) | 📋 Specced |
+| DXGI Desktop Duplication (with integrated IddCx headless install) | `dxgi_dd` | [`ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md) | Any GPU (WDDM 1.2+, Win 8+) | ✅ Benchmarked |
 
-> **DXGI DD is the recommended default capture add-on** — universal cross-vendor
-> coverage, ~2–4ms latency, produces D3D11 textures that every Windows HW encoder
-> accepts directly. NvFBC and AMF capture are vendor-specific add-ons for lower
-> latency when paired with their matching encoder (NvFBC→NVENC, AMF capture→AMF
-> encode).
+> **DXGI DD is the only Windows capture mechanism.** Benchmarking proved its
+> raw acquisition overhead is sub-microsecond on every GPU, leaving no room
+> for vendor-specific capture APIs (NvFBC, AMF Display Capture) to improve on.
+> Output is `ID3D11Texture2D`, directly consumable by every Windows HW encoder
+> (MF HW, NVENC, AMF, QSV) with zero-copy.
 >
-> **No elevation required for any Windows capture add-on.** Compare to Linux where
-> KMS+EGL requires `CAP_SYS_ADMIN`.
+> For **headless deployments** (no physical display), the add-on bundles a
+> pre-signed IddCx virtual display driver that auto-installs on first launch
+> via `pnputil` (one-time UAC). Same approach as Sunshine/Moonlight.
+>
+> **No elevation required for standard use.** First-launch driver install
+> needs one UAC prompt; subsequent runs need none.
 
 See [`ADD-ON-SPECS/Windows/capture/README.md`](../ADD-ON-SPECS/Windows/capture/README.md)
-for the full rationale, recommended combinations, and zero-copy surface path matrix.
+for the full rationale, recommended combinations, and headless install flow.
 
 ### Windows encoder add-on specs
 
@@ -280,7 +282,7 @@ PATH B — Hardware (zero-copy, GPU-resident)  [preferred]:
 PATH A — Software (CPU round-trip)  [fallback / --software]:
     capturer.NextFrame() → RGBA []byte (GPU→CPU: ~24MB at 1440p)
     → converter.Convert() → I420 (CPU, SIMD libyuv)
-    → encoder.Encode() → NALs (CPU; OpenH264 — VP8/libavcodec rejected)
+    → encoder.Encode() → NALs (CPU; OpenH264 CGo or x264 subprocess — VP8/libavcodec/in-process-x264 rejected)
     cursorMode = "embedded" (server-side blend) OR "separate"
 ```
 

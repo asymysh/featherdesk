@@ -230,9 +230,9 @@ Pipeline probes in this order on Linux:
 ```
 NVENC available?      → use NVENC (this add-on, if compiled in)
 AMF-ROCm available?   → use AMF (other add-on)
-Vulkan Video?         → use Vulkan (other add-on)
-VA-API (default)      → use VA-API
-OpenH264 (default)    → SW fallback
+VA-API (libva)?       → use VA-API
+x264 subprocess?      → use x264 (GPL builds only)
+OpenH264?             → universal SW fallback
 ```
 
 ---

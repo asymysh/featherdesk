@@ -287,7 +287,7 @@ dupl->ReleaseFrame();
 
 | Interface | Method | Output | Use case |
 |-----------|--------|--------|----------|
-| `Capturer` (CPU readback) | `NextFrame()` | BGRA `[]byte` via staging texture + Map | Pair with SW encoder (OpenH264, MF SW) |
+| `Capturer` (CPU readback) | `NextFrame()` | BGRA `[]byte` via staging texture + Map | Pair with SW encoder (OpenH264 or x264) |
 | `D3D11Capturer` (zero-copy) | `NextTexture()` | `*D3D11Texture2D` handle | Pair with HW encoder (MF HW, NVENC, AMF, QSV) |
 
 The pipeline picks the right method based on the paired encoder add-on.

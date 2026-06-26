@@ -150,7 +150,7 @@ func ProbeOpenH264() (*OpenH264Capabilities, error) {
 
 Pipeline probes (Linux, with this add-on compiled in):
 ```
-NVENC / Vulkan / libva HW add-ons available? → use HW
+NVENC / AMF / libva HW add-ons available? → use HW
 None available?                              → use OpenH264 CGo (this add-on)
 This add-on not compiled in either?          → fatal: no encoder
 ```

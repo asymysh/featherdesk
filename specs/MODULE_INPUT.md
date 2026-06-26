@@ -51,7 +51,7 @@ type InputHandler interface {
 type InputConfig struct {
     Width  int // Screen width (for absolute mouse positioning)
     Height int // Screen height (for absolute mouse positioning)
-    Logger Logger
+    Logger *slog.Logger
 }
 
 // InputMessage represents a parsed input event from the client.
