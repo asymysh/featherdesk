@@ -71,7 +71,7 @@ in code. See [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 13 plug-and-play modules. Each module has its own spec
+The system is decomposed into 15 plug-and-play modules. Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
@@ -89,6 +89,8 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 11 | **Clipboard** | [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
 | 12 | **File Transfer** | [`./MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder carried as QUIC bidirectional streams on the main WebTransport session (core) |
 | 13 | **Gamepad** | [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md) | Browser Gamepad-API redirection contract + rumble (virtual-controller injection is per-OS add-ons; casual-gaming-grade only) |
+| 14 | **Network** | [`./MODULE_NETWORK.md`](./MODULE_NETWORK.md) | v2 connectivity (NAT traversal / relay / signaling for the native client). Requirements + listener-provider contract documented; **mechanism not chosen** (tsnet vs pion vs other — evaluated at v2 start). |
+| 15 | **Native Client** | [`./MODULE_NATIVE_CLIENT.md`](./MODULE_NATIVE_CLIENT.md) | v2 native desktop client plan — same QUIC protocol, full-HID gamepad, reliable 4:4:4, sub-ms input. **Split final; impl deferred.** |
 
 > **Encoder, capture, and input implementations are not core modules.**
 > Every encoder (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF,

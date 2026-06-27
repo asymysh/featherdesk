@@ -69,12 +69,10 @@ The spec phase is complete and audited. The path from here:
    module spec; once a single frame round-trips, the remaining add-ons and
    features layer onto a proven pipeline.
 
-2. **Connectivity for v2 (`MODULE_NETWORK.md`) — UNDER EVALUATION.** A
-   listener-provider pattern: the server asks `network.GetListener()` and gets a
-   plain UDP listener by default, or an overlay-backed listener when a network
-   add-on is compiled in. The **mechanism is the open question** — Tailscale
-   `tsnet` is the leading candidate (one-click auth, Funnel, Headscale), but
-   open-source alternatives are being assessed before this is specced.
+2. **`MODULE_NETWORK.md` — connectivity for v2 (requirements documented, mechanism
+   OPEN).** The listener-provider contract and candidate mechanisms (tsnet+Headscale,
+   pion+TURN, DIY, Nebula) are captured in [`specs/MODULE_NETWORK.md`](specs/MODULE_NETWORK.md).
+   The mechanism is evaluated and locked when v2 native-client work begins.
 
 3. ✅ **`MODULE_NATIVE_CLIENT.md` — done (split is final).** The v1=browser /
    v2=native split is locked and the native-client plan is written (full-HID
