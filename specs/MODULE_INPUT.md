@@ -374,8 +374,8 @@ and all add-ons live under `internal/input/...`; the table is a single-direction
 import, no cycle. Public re-export to `pkg/input` is deferred until the native
 client lands and needs to share the table.) This is the platform-neutral input
 encoding required by
-[`FUTURE_NATIVE_CLIENT.md`](./FUTURE_NATIVE_CLIENT.md) — a future native client
-sends the same HID usages.
+[`MODULE_NATIVE_CLIENT.md`](./MODULE_NATIVE_CLIENT.md) — the v2 native client
+sends the same HID usages (byte-identical records).
 
 **Coverage (must be complete, generated from the HID usage tables):**
 letters, digits, F1-F24, modifiers (L/R Ctrl/Shift/Alt/Meta), navigation,
@@ -436,6 +436,9 @@ Input stream binary record (client → server)
                 KindGamepadState      → if gp != nil { gp.Update(state) } else drop
                 KindGamepadConnect    → if gp != nil { gp.Connect(index, id) } else drop
                 KindGamepadDisconnect → if gp != nil { gp.Disconnect(index) } else drop
+                  // Co-op: a `player` client's reader remaps the record's local
+                  // gamepad index → that client's assigned global slot before
+                  // injection (server-side; see MODULE_GAMEPAD/MODULE_SERVER).
             track pressed keys/buttons (for ReleaseAll on controller change/Close)
             return Seq
     → server emits InputAck(Seq, recvTimestamp) as [u16 RecLen=13][13-byte ack]

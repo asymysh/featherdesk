@@ -232,8 +232,36 @@ gamepad routing slots into the existing `byte[1]` switch:
 ```
 
 The pipeline wires the gamepad rumble emitter to a new
-`server.SendGamepadRumble(index, weak, strong, durationMs)` method which frames
-and broadcasts the rumble to the controller client.
+`server.SendGamepadRumble(index, weak, strong, durationMs)` method. The server
+routes the rumble datagram to the client that **owns gamepad slot `index`** —
+the controller for slot 0, or the player client for slots 1…N in co-op mode (see
+below). Single-controller mode is just the co-op case with one owner.
+
+---
+
+## Co-op: multiple players, one pad each (v1)
+
+Local couch co-op over the network: up to `max_controllers` people, each on their
+own client, each driving one virtual pad on the host. The virtual-pad add-ons
+(`vigem`/`uinput`/`gcvirtual`) already create up to 4 pads — the only addition is
+letting **multiple clients** own slots, via a **player-slot model** in the server.
+
+- **Roles** (auth message, see [`MODULE_AUTH.md`](./MODULE_AUTH.md)): `control`
+  (keyboard/mouse **+** gamepad slot 0), `player` (gamepad **only**, slots 1…N),
+  `view` (nothing). The `player` role is honored only when `[gamepad] allow_coop`.
+- **Slot ownership** is server-side. The controller reserves slot 0; each `player`
+  client claims the next free slot on connect (≤ `max_controllers` total). The
+  server **remaps** a client's local gamepad index to its assigned global slot and
+  routes its `GamepadState`/`Connect`/`Disconnect` records to `gamepad.Update(slot)`
+  etc. A player's keyboard/mouse/touch records are **ignored** (gamepad-only).
+- **Rumble** for slot N goes back to whichever client owns slot N.
+- **Disconnect** frees the slot and `Disconnect`s the virtual pad.
+- **One pad per player client** in v1 (the client's primary gamepad). A *single*
+  client driving several local pads (slots 0…N from one machine) remains the
+  non-co-op path. Multi-keyboard/mouse co-op is **out of scope** (single OS cursor).
+
+This is a server + auth change only — the wire format (gamepad records 0x40–0x4F,
+the input stream, rumble datagrams) is unchanged.
 
 ---
 
@@ -242,8 +270,9 @@ and broadcasts the rumble to the controller client.
 ```toml
 [gamepad]
 enabled        = false        # opt-in. Even with an add-on compiled in, off by default.
-max_controllers = 4           # 1..4 — XInput cap on Windows
+max_controllers = 4           # 1..4 — XInput cap on Windows; also the co-op player cap
 allow_rumble   = true         # forward host vibration requests to the client
+allow_coop     = false        # opt-in: let `player`-role clients each claim a pad slot
 ```
 
 Per-add-on tuning lives in `[addon_module_<tag>]` (see each add-on spec).
@@ -252,10 +281,11 @@ Per-add-on tuning lives in `[addon_module_<tag>]` (see each add-on spec).
 
 ## Security Considerations
 
-- **Controller-only** like every other input. Gamepad records from viewers
-  reach the server only because the server routes binary frames by role; the
-  server drops binary frames from viewers before the dispatcher (see
-  [`MODULE_SERVER.md`](./MODULE_SERVER.md)).
+- **Input-role-gated.** Gamepad records are accepted only from the `control`
+  client and (when `allow_coop`) `player` clients; the server drops binary frames
+  from `view` clients before the dispatcher (see [`MODULE_SERVER.md`](./MODULE_SERVER.md)).
+  A `player` client's non-gamepad records (keyboard/mouse/touch) are dropped too —
+  players drive only their assigned pad slot.
 - **Bounded state.** `Update` validates Index < max_controllers, refuses
   buttons-bitfield bits ≥ 17, clamps axes/triggers. A malformed snapshot is
   rejected before it touches the OS device.

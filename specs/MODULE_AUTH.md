@@ -299,7 +299,8 @@ headers on the WebTransport constructor, so role travels in-band with the token.
 
 | Auth message | Role | Permissions |
 |-----|------|------------|
-| `{"type":"auth","token":…,"role":"control"}` | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, file-transfer streams, gamepad |
+| `{"type":"auth","token":…,"role":"control"}` | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, file-transfer streams, gamepad slot 0 |
+| `{"type":"auth","token":…,"role":"player"}` | Player (co-op) | **Gamepad only** — claims one virtual-pad slot. Honored only when `[gamepad] allow_coop`; otherwise treated as `view`. See MODULE_GAMEPAD "Co-op". |
 | `{"type":"auth","token":…,"role":"view"}` | Viewer | Receive video/audio/cursor/clipboard-pushes only |
 | `{"type":"auth","token":…}` (role omitted) | Auto: first connection = controller, rest = viewer | — |
 

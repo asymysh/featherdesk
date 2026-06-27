@@ -79,7 +79,7 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 1 | **Capture** | [`./MODULE_CAPTURE.md`](./MODULE_CAPTURE.md) | Cross-platform `Capturer` interface contract (concrete impls are add-ons per OS) |
 | 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software encoder interface contract (concrete impls are add-ons) |
 | 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface contract (concrete impls are add-ons) |
-| 4 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) — transport-agnostic; see also [`./FUTURE_NATIVE_CLIENT.md`](./FUTURE_NATIVE_CLIENT.md) |
+| 4 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) — transport-agnostic; shared by the browser (v1) and native (v2) clients, see [`./MODULE_NATIVE_CLIENT.md`](./MODULE_NATIVE_CLIENT.md) |
 | 5 | **Transport** | [`./MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) | HTTP/3 + WebTransport (QUIC); datagrams + reliable streams; auth handshake |
 | 6 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | HTTP/3 + WebTransport transport, session management, TLS 1.3 |
 | 7 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs) |
@@ -109,11 +109,16 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 >   level, output) is set via the `[log]` config section.
 
 > **Deferred to future versions:**
+> - **Native client (v2)** — the v1=browser / v2=native split is **final**; the
+>   native client speaks the identical wire protocol (via `quic-go` directly) and
+>   adds full-HID gamepad, reliable 4:4:4, and sub-ms input. Design plan in
+>   `MODULE_NATIVE_CLIENT.md`; implementation deferred to v2. Connectivity
+>   (Tailscale `tsnet` vs alternatives) is the one open item there.
 > - **Audio** — **design LOCKED** (host→client system audio, pluggable per-OS
->   capture add-ons, pluggable Opus/PCM codec, realtime **audio-master** A/V sync;
->   see `MODULE_AUDIO.md`). **Implementation** is deferred behind the same trigger
->   (video capture+encode working end-to-end on all three OSes). Client→host mic
->   is out of scope.
+>   capture add-ons, pluggable Opus/PCM codec, stereo / 5.1 / 7.1, realtime
+>   **audio-master** A/V sync; see `MODULE_AUDIO.md`). **Implementation** is
+>   deferred behind the same trigger (video capture+encode working end-to-end on
+>   all three OSes). Client→host mic is out of scope.
 > - **Webcam redirection (client→host virtual camera)** — stripped from v1 to
 >   keep scope tight. Open questions before re-introduction: server-side decoder
 >   choice (recommend OpenH264 decoder, reusing the existing encoder add-on's

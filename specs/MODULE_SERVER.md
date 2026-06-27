@@ -84,11 +84,12 @@ type Server interface {
     // (JSON {"type":"keyframe"}). The server rate-limits before invoking.
     SetKeyframeRequestCallback(fn func())
 
-    // SendGamepadRumble frames + sends a FrameTypeGamepadRumble (type 15) to
-    // the current controller client. Called by the pipeline when the active
-    // gamepad add-on receives a vibration request from the host game (see
-    // MODULE_GAMEPAD.md). No-op if [gamepad] allow_rumble = false or there
-    // is no controller connected.
+    // SendGamepadRumble frames + sends a FrameTypeGamepadRumble (type 15) to the
+    // client that OWNS gamepad slot `index` (the controller for slot 0; a player
+    // client for slots 1…N in co-op — see Controller Model). Called by the
+    // pipeline when the active gamepad add-on gets a vibration request from the
+    // host game (MODULE_GAMEPAD.md). No-op if [gamepad] allow_rumble = false or
+    // no client owns that slot.
     SendGamepadRumble(index uint8, weak, strong uint16, durationMs uint32)
 }
 
@@ -225,6 +226,8 @@ your proxy's QUIC support before deploying.
         {"type":"keyframe"}    → rate-limited keyframe-request callback
         {"type":"pong"}        → record RTT
         {"type":"stats"}       → record client telemetry
+        {"type":"chroma_unsupported"} → stream.Manager downgrades chroma to "420";
+                                 server re-sends config + forces a keyframe
     (Clipboard is NOT here — it rides the clipboard stream from step 15.)
 18. Datagram-in loop: ReadDatagram blocks until the client sends one.
     In v1 there are no C→S datagrams (reserved); any datagram received is
@@ -374,13 +377,20 @@ transition (see protocol "Fast-Join").
 - The server coalesces requests: at most **one forced keyframe per 500 ms**,
   regardless of how many clients ask.
 
-### Controller Model
+### Controller Model (+ gamepad co-op)
 
-- Single controller slot (`atomic.Pointer[Client]`)
-- First client whose auth message carries `"role":"control"` claims the slot via CAS
-- Controller receives all input events (keyboard/mouse/wheel)
-- Other clients are passive viewers (no input)
-- When controller disconnects, slot becomes available for the next `"role":"control"` client
+- **Single keyboard/mouse controller.** One controller slot (`atomic.Pointer[Client]`);
+  the first client whose auth message carries `"role":"control"` claims it via CAS.
+  It receives all keyboard/mouse/wheel input and gamepad **slot 0**. When it
+  disconnects the slot reopens for the next `"role":"control"` client.
+- **Player slots (co-op, `[gamepad] allow_coop`).** Additional `"role":"player"`
+  clients each claim one **gamepad slot** (1…`max_controllers-1`). The server keeps
+  a `playerSlots map[*Session]int` (client → global pad index), reads each player's
+  **input stream for gamepad records only** (keyboard/mouse/touch from players are
+  dropped), and routes them to `input.Dispatcher` for that slot. Rumble for slot N
+  is sent back to the owning client. On disconnect the slot is freed and the virtual
+  pad `Disconnect`ed.
+- `view` clients send no input. KB/mouse co-op (multiple cursors) is out of scope.
 
 ---
 

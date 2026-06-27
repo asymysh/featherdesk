@@ -55,7 +55,7 @@ Plus deferred specs (`MODULE_AUDIO`) and the [`ADD-ON-SPECS/`](./ADD-ON-SPECS/) 
 |---|---|
 | **v1** | Browser client over HTTP/3 + WebTransport (QUIC). No Tailscale. WSS / fallbacks are NOT supported — modern browsers only (Chrome 107+, Edge 98+, Firefox 130+, Safari 18.2+; the
 floor is set by WebCodecs availability — Chrome 107 / Firefox 130 — not just WebTransport). Connectivity is the user's network problem (LAN, port forward, or their own Tailscale / Cloudflare Tunnel). |
-| **v2** | Native FeatherDesk client (Windows / macOS / Linux). Built around WebTransport (QUIC) for transport. Embeds `tsnet`. The auth-key paste flow ships here — host generates a single sharing key that bundles a Tailscale pre-auth key + FeatherDesk session token + host address; client pastes it once and is connected to the tailnet AND the FeatherDesk host in one step. |
+| **v2** | Native FeatherDesk client (Windows / macOS / Linux) — same QUIC wire protocol via `quic-go` directly. Adds **full-HID gamepad** (gyro/touchpad/triggers/LED), **reliable 4:4:4**, and **sub-ms input**. The browser stays the casual client; native is the power-user client (see [`specs/MODULE_NATIVE_CLIENT.md`](specs/MODULE_NATIVE_CLIENT.md)). **Connectivity (P2P/NAT traversal) is under evaluation** — Tailscale `tsnet` is the leading candidate (one-paste auth-key flow), pending the open discussion. |
 | **v3+** | Mobile clients (iOS / Android) with the same auth-key paste flow. |
 
 ## Roadmap (next steps)
@@ -69,19 +69,17 @@ The spec phase is complete and audited. The path from here:
    module spec; once a single frame round-trips, the remaining add-ons and
    features layer onto a proven pipeline.
 
-2. **`MODULE_NETWORK.md` — Tailscale add-on (v2 enabler).** Spec the
-   listener-provider pattern: the server asks `network.GetListener()` and gets
-   a plain TCP/UDP listener by default, or a Tailscale-backed (`tsnet`) listener
-   when the `tailscale` add-on is compiled in. Includes the one-click auth flow,
-   Funnel (public exposure) as a config flag, Headscale support, and the
-   binary-size note. This is the connectivity half of the v2 story.
+2. **Connectivity for v2 (`MODULE_NETWORK.md`) — UNDER EVALUATION.** A
+   listener-provider pattern: the server asks `network.GetListener()` and gets a
+   plain UDP listener by default, or an overlay-backed listener when a network
+   add-on is compiled in. The **mechanism is the open question** — Tailscale
+   `tsnet` is the leading candidate (one-click auth, Funnel, Headscale), but
+   open-source alternatives are being assessed before this is specced.
 
-3. **`MODULE_NATIVE_CLIENT.md` (promote `FUTURE_NATIVE_CLIENT.md`).** When v2
-   work begins, promote the historical doc to a live module spec and add the
-   **auth-key paste flow**: host generates one sharing key (Tailscale pre-auth
-   key + FeatherDesk session token + host address, base64-bundled); the native
-   client decodes it, joins the tailnet via embedded `tsnet`, and connects to
-   the host in a single paste. This is the transport + UX half of the v2 story.
+3. ✅ **`MODULE_NATIVE_CLIENT.md` — done (split is final).** The v1=browser /
+   v2=native split is locked and the native-client plan is written (full-HID
+   gamepad, reliable 4:4:4, sub-ms input, same QUIC protocol). The auth-key paste
+   flow and the connectivity mechanism are finalized once step 2 resolves.
 
 ## License
 
