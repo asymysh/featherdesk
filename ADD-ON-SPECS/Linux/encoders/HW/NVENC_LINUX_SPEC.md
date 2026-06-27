@@ -68,7 +68,7 @@ the cap rarely matters.
 ### Go build tag
 
 ```bash
-go build -tags nvenc -o viewport-rds-linux-nvenc ./cmd/server
+go build -tags nvenc -o featherdesk-linux-nvenc ./cmd/server
 ```
 
 The `nvenc` build tag pulls in `internal/encode/nvenc/` package. Without the tag the

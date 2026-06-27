@@ -29,15 +29,24 @@ package encode
 // Encoder is the contract every software encoder add-on must satisfy.
 type Encoder interface {
     // Encode takes a YUV I420 frame and returns the encoded bitstream as
-    // contiguous Annex B bytes (start codes retained). The server sends
-    // this directly -- NO per-NAL splitting.
-    // Returns nil, nil if the frame was intentionally skipped (rate control).
-    // The returned buffer is from a sync.Pool and must not be retained
-    // after the next Encode() call (caller copies into the WS message).
-    Encode(frame *I420Frame) ([]byte, error)
+    // contiguous Annex B bytes (start codes retained) plus a keyframe flag.
+    // The data is ONE complete access unit -- NO per-NAL splitting (the
+    // [][]byte per-NAL contract is rejected).
+    //
+    // keyframe is set by the encoder itself (it knows when it emitted an
+    // IDR/IRAP) — the server does NOT re-scan the bitstream. This flag becomes
+    // stream.EncodedFrame.Keyframe, driving the IDR cache + bootstrap stream.
+    //
+    // Returns nil, false, nil if the frame was intentionally skipped (rate
+    // control). The returned buffer is from a sync.Pool and must not be
+    // retained after the next Encode() call (the caller copies it into the
+    // broadcast access unit before re-calling).
+    Encode(frame *I420Frame) (data []byte, keyframe bool, err error)
 
-    // ForceKeyframe requests that the next encoded frame be an IDR.
-    // Thread-safe. May be called from any goroutine.
+    // ForceKeyframe requests that the next encoded frame be an IDR. This is the
+    // ONLY method safe to call concurrently with Encode: implementations set an
+    // atomic flag that the frame loop reads at the next Encode. All other
+    // mutations go through UpdateStreamParams on the frame-loop goroutine.
     ForceKeyframe()
 
     // Close releases all encoder resources (including subprocesses for
@@ -72,8 +81,11 @@ type EncoderConfig struct {
 type ConfigurableEncoder interface {
     Encoder
     // UpdateStreamParams applies new parameters to the running encoder.
-    // Returns stream.ErrRequiresRestart if the requested change cannot
-    // be applied mid-stream (caller will tear down and recreate).
+    // Called ONLY on the frame-loop goroutine, serialized with Encode via the
+    // pipeline's param-change channel (MODULE_PIPELINE) — so implementations
+    // need no locking between Encode and UpdateStreamParams. Returns
+    // stream.ErrRequiresRestart if the change cannot be applied mid-stream
+    // (caller tears down and recreates the encoder).
     UpdateStreamParams(p stream.Params) error
 }
 
@@ -96,11 +108,12 @@ func (c *Converter) Close()
 ### Bitstream Output Contract
 
 `Encode()` returns a **contiguous Annex B bitstream** (start codes `00 00 00 01`
-retained). A keyframe contains SPS + PPS + IDR in order. The output is NOT split
-per-NAL -- this avoids the decompose/recompose copy overhead. The server
-prepends the 22-byte protocol header and sends the bitstream directly into
-one server-side frame (then fragmented into datagrams by the server). The buffer is from a `sync.Pool` -- steady-state
-encoding is zero-alloc after warmup.
+retained) and a `keyframe bool`. A keyframe access unit contains SPS + PPS + IDR
+(H.264) or VPS + SPS + PPS + IDR (HEVC, e.g. VideoToolbox SW on macOS 12+) in
+order. The output is NOT split per-NAL -- this avoids the decompose/recompose
+copy overhead. The server prepends the 22-byte `FrameHeader` and queues the
+bitstream as one whole access unit (the datagram pump fragments it later). The
+buffer is from a `sync.Pool` -- steady-state encoding is zero-alloc after warmup.
 
 ---
 
@@ -172,8 +185,11 @@ Encode module deliberately excludes:
 - **No codec parameters beyond `EncoderConfig`.** Per-add-on tuning (x264
   preset, OpenH264 slice count, VT realtime flag) lives in
   `[addon_module_<tag>]` TOML sections.
-- **No NAL parsing.** Encoders return Annex B slices; the server's keyframe
-  detection (scanning for type 5 IDR NAL) lives in MODULE_SERVER.
+- **No server-side NAL parsing.** Encoders return one Annex B access unit **plus
+  a `keyframe bool`** (the encoder knows when it produced an IDR/IRAP). The
+  server trusts that flag for IDR caching + the bootstrap stream and never
+  re-scans NALs. (The client independently inspects the first VCL NAL only to
+  set the WebCodecs key/delta hint — see MODULE_PROTOCOL "Video Payload Framing".)
 - **No rate control switching.** Each add-on implements its own RC mode
   selection from `EncoderConfig.InitialParams.BitrateBps` (0 = QP mode)
   and its own TOML section.

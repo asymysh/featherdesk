@@ -3,9 +3,12 @@
 ## Overview
 
 FeatherDesk runs over **HTTP/3 + WebTransport (QUIC)**. There is **no WebSocket
-fallback**. The architecture targets modern browsers (Chrome 97+, Edge 98+,
-Firefox 114+, Safari 18.2+) and the substantial performance + protocol benefits
-of QUIC justify dropping legacy fallbacks.
+fallback**. The effective browser floor is **Chrome 107+, Edge 98+, Firefox
+130+, Safari 18.2+** — WebTransport ships earlier (Chrome 97 / Firefox 114), but
+the client also needs WebCodecs, which raises the floor to Chrome 107 / Firefox
+130 (see [`MODULE_CLIENT.md`](./MODULE_CLIENT.md) → "Supported browsers"). The
+substantial performance + protocol benefits of QUIC justify dropping legacy
+fallbacks.
 
 This module defines:
 
@@ -41,7 +44,7 @@ it. At 1% packet loss the user experience degrades visibly; at 2% it's unusable.
 | Single connection carries everything | Video + audio + input + control + file transfer share one auth, one TLS context, one congestion controller |
 
 **What we give up:** ubiquity (some corporate firewalls block UDP), older
-browsers (Safari 16/17, Firefox <114). Both deemed acceptable; the
+browsers (Safari 16/17, Firefox <130). Both deemed acceptable; the
 modern-browsers floor is documented up front. Networks that block UDP/443 are
 documented as unsupported environments — the user's network is their problem,
 not FeatherDesk's.
@@ -78,29 +81,30 @@ type Session interface {
     // RemoteAddr returns the client's network address (for logging only).
     RemoteAddr() net.Addr
 
-    // OpenControlStream is called by the server right after Accept; returns
-    // the first bidirectional stream the client opened. Auth + control
-    // messages flow on this stream. See "Connection Lifecycle" below.
-    OpenControlStream() (Stream, error)
-
-    // AcceptStream blocks until the client opens a new bidirectional stream
-    // (input, clipboard, file transfer, etc.).
+    // AcceptStream blocks until the client opens a new bidirectional stream.
+    // The FIRST byte of every such stream is a StreamType tag (StreamControl /
+    // StreamInput / StreamClipboard / StreamFile); the server reads it to
+    // dispatch the stream. Streams are identified by tag, NOT by accept order.
+    // See "Stream Identification" below.
     AcceptStream(ctx context.Context) (Stream, error)
 
-    // OpenStream opens a server-initiated bidirectional stream.
+    // OpenStream opens a server-initiated bidirectional stream (unused in v1).
     OpenStream(ctx context.Context) (Stream, error)
 
-    // OpenUniStream opens a server-initiated unidirectional stream (rarely
-    // used — most reliable channels are bidirectional).
+    // OpenUniStream opens a server-initiated unidirectional stream. Used for the
+    // bootstrap stream: the server writes StreamBootstrap (0x10) then the seed
+    // IDR. See "Connection Lifecycle" and MODULE_PROTOCOL "Fast-Join".
     OpenUniStream(ctx context.Context) (UniStream, error)
 
     // ReadDatagram blocks for the next inbound datagram. Returns at most one
     // datagram per call. Sized up to ~1200 bytes (the QUIC datagram MTU).
     ReadDatagram(ctx context.Context) ([]byte, error)
 
-    // SendDatagram queues a datagram for delivery. Returns immediately;
-    // delivery is best-effort. Datagrams larger than the negotiated MTU
-    // (typically 1200 bytes) MUST be fragmented by the caller — see
+    // SendDatagram queues ONE datagram for delivery. Fire-and-forget per
+    // datagram; delivery is best-effort. Datagrams larger than the negotiated
+    // MTU (typically 1200 bytes) MUST be fragmented by the caller. The caller's
+    // send path must be frame-granular (enqueue whole access units, fragment at
+    // send) — never a small fixed channel of individual fragments. See
     // "Datagram Fragmentation" below.
     SendDatagram(payload []byte) error
 
@@ -154,27 +158,33 @@ The single most important transport decision is which message types go on
 | **Cursor updates** | Datagrams | S → C | Latest-wins; an old position is uninteresting. |
 | **Server Ping** | Datagrams | S → C | Best-effort; missed Pings are harmless. |
 | **Gamepad rumble** | Datagrams | S → C | Best-effort; rumble for a button press that's already past is useless. |
-| **Control stream** (first bidi) | Reliable bidirectional stream | both | Auth, Config, clipboard, JSON control messages, keyframe requests. |
-| **Input stream** | Reliable bidirectional stream | both | Binary input records + InputAck. Reliability is non-negotiable. |
+| **Control stream** (tag `0x00`) | Reliable bidirectional stream | both | Auth, Config, JSON control messages, keyframe requests. **Newline-delimited JSON**, capped at `max_message_bytes`. No bulk payloads. |
+| **Input stream** (tag `0x01`) | Reliable bidirectional stream | both | Binary input records + InputAck, **`[u16 RecLen]`-prefixed** both directions. Reliability is non-negotiable. |
+| **Bootstrap stream** (tag `0x10`) | Reliable **unidirectional** stream | S → C | One `[u32 Len][FrameHeader‖IDR]` keyframe to seed a joining/resuming decoder, then close. Guarantees a decodable first frame even though live video is lossy datagrams. |
+| **Clipboard stream** (tag `0x02`) | Reliable bidirectional stream | both | `[u32 Len][JSON]` clipboard offers/data, opened on demand. Off the 4 KiB control stream because payloads reach 1 MiB. |
 | **Gamepad input** | Reliable stream (same as input) | C → S | Snapshot diff is reliable; rumble (S → C) goes datagram. |
-| **File-transfer streams** | Reliable bidirectional streams (one per transfer) | both | Each transfer is independent; one stalling transfer doesn't block others or the media path. |
+| **File-transfer streams** (tag `0x03`) | Reliable bidirectional streams (one per transfer) | both | Each transfer is independent; one stalling transfer doesn't block others or the media path. |
 
-**Stream layout (per session):**
+**Stream layout (per session).** Every stream's first byte is a `StreamType`
+tag, so streams are dispatched by **identity, not open order** (see "Stream
+Identification"):
 
 ```
 Session opens
-  ├─ Control stream     (first bidirectional stream, opened by client)
-  │     ├─ Auth handshake
-  │     ├─ Config (S → C, JSON)
-  │     ├─ JSON control C → S (keyframe, resize, set_*, clipboard, pong, stats)
-  │     ├─ Clipboard pushes S → C
+  ├─ Control stream     (client-opened bidi, tag 0x00)
+  │     ├─ Auth handshake (first JSON line after the tag)
+  │     ├─ Config (S → C, JSON line)
+  │     ├─ JSON control C → S (keyframe, resize, set_*, pong, stats)
   │     └─ (Stays open for the life of the session)
-  ├─ Input stream       (second bidirectional stream, opened by client)
-  │     ├─ Binary input records C → S
-  │     └─ InputAck S → C
-  └─ File-transfer streams (opened on demand)
-        Per active transfer: one bidirectional stream with the 18-byte framed
-        file-transfer protocol from MODULE_FILETRANSFER.
+  ├─ Input stream       (client-opened bidi, tag 0x01; controller role only)
+  │     ├─ [u16 RecLen] binary input records C → S
+  │     └─ [u16 RecLen] InputAck S → C
+  ├─ Bootstrap stream   (server-opened UNI, tag 0x10; once per join/resume)
+  │     └─ [u32 Len][FrameHeader‖IDR] then close
+  ├─ Clipboard stream   (client-opened bidi, tag 0x02; on demand)
+  │     └─ [u32 Len][JSON] both directions
+  └─ File-transfer streams (client-opened bidi, tag 0x03; one per transfer)
+        18-byte framed file-transfer protocol from MODULE_FILETRANSFER.
 
 Datagrams (separate from streams):
   S → C: video / audio / cursor / ping / gamepad rumble
@@ -186,6 +196,33 @@ Datagrams (separate from streams):
 > transfer is its own stream within the same session — automatic isolation,
 > same auth, same TLS context. Cleaner and one fewer endpoint to operate.
 
+### Stream Identification
+
+QUIC does **not** guarantee that streams are accepted in the order the client
+opened them, and the client opens several stream kinds (input, clipboard, file
+transfer) at unpredictable times. Dispatching by accept-order is therefore a
+bug. Instead, **every stream is self-identifying**: the opener writes a 1-byte
+`StreamType` tag as the very first byte, before any framed payload.
+
+```go
+// First byte of every stream. Client-opened on bidi streams; server-opened
+// on the bootstrap uni stream. Defined in pkg/protocol, shared with the client.
+const (
+    StreamControl   uint8 = 0x00 // bidi, client-opened, exactly one per session
+    StreamInput     uint8 = 0x01 // bidi, client-opened, controller role only
+    StreamClipboard uint8 = 0x02 // bidi, client-opened, on demand
+    StreamFile      uint8 = 0x03 // bidi, client-opened, one per transfer
+    StreamBootstrap uint8 = 0x10 // uni,  server-opened, one per join/resume
+)
+```
+
+The server's accept loop reads the first byte of each accepted bidi stream and
+dispatches: `0x00` → control handler, `0x01` → input handler, `0x02` → clipboard
+handler, `0x03` → a new file-transfer handler. An unknown tag, a **second**
+`0x00`, or an `0x01`/`0x02` from a `view`-role client is a protocol error
+(`CloseProtocolError`). The browser client reads the first byte of each incoming
+**uni** stream identically and routes `0x10` to its bootstrap reader.
+
 ---
 
 ## Connection Lifecycle
@@ -196,15 +233,23 @@ Datagrams (separate from streams):
                                            returns {"session_token":"…","ttl_sec":…}
 3. Client: new WebTransport("https://host:port/wt")
 4. WebTransport handshake (TLS 1.3, 1 RTT)
-5. Server: AcceptSession → Transport surfaces a new Session to the server module
-6. Client: opens first bidirectional stream (the CONTROL stream)
-7. Client: writes first frame on control stream:
+5. Server: AcceptSession → Transport surfaces a new Session to the server module.
+   The server arms a 5 s auth deadline on the session HERE (step 5), not when a
+   stream arrives — a client that never opens any stream is closed at +5 s.
+6. Client: opens a bidirectional stream, writes the StreamType tag byte 0x00
+   (control), then the auth line:
        {"type":"auth","token":"<session_token>","role":"control|view"}
+7. Server: accept loop reads the 0x00 tag → routes to the control handler →
+   reads the auth line.
 8. Server: validates token + role
-     - Valid       → reply {"type":"auth_ok","session":{…}} + Config frame
+     - Valid       → reply {"type":"auth_ok","session":{…}}, then send the
+                     {"type":"config",…} line, then open the bootstrap uni
+                     stream (tag 0x10) and write the seed IDR.
      - Invalid     → CloseWithError(4401, "auth failed")
-     - Auth timeout → CloseWithError(4408, "auth timeout") after 5 s without auth
-9. Server: opens / accepts additional streams (input, file transfer) as needed
+     - Auth deadline fired (no 0x00 control stream + valid auth within 5 s)
+                   → CloseWithError(4408, "auth timeout")
+9. Server: accepts additional client streams (input 0x01, clipboard 0x02, file
+   0x03) as they arrive, dispatching by tag.
 10. Steady state: media on datagrams, control + input on streams, all multiplexed
 11. Either side closes → CloseWithError or graceful close → Transport surfaces
     the close event to the server module → session resources released
@@ -224,15 +269,22 @@ changes.
 ### Resume
 
 Same idea — the session token IS the resume credential. To resume, the client
-opens a new WebTransport session and sends:
+opens a new WebTransport session, opens the control stream (tag `0x00`), and
+sends:
 
 ```json
-{"type":"auth","token":"<session_token>","role":"control","resume":true,"last_video_seq":12345}
+{"type":"auth","token":"<session_token>","role":"control","resume":true}
 ```
 
-Server checks the SessionCache; if present + within TTL, replays cached Config
-+ keyframe and continues. If not, replies `auth_failed` with code 4401 and the
-client falls back to fresh `POST /auth`.
+Server checks the SessionCache; if present + within TTL, it replies
+`{"type":"auth_ok",…}`, sends `{"type":"config","resumed":true,…}`, opens a
+fresh **bootstrap stream** with the current cached IDR, and continues the live
+datagram stream. If not, replies `auth_failed` with code 4401 and the client
+falls back to fresh `POST /auth`.
+
+> There is **no `last_video_seq`** in the resume message. The bootstrap stream
+> always seeds a decodable keyframe, so a client-supplied last-sequence hint
+> buys nothing (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) → "Resume Path").
 
 ---
 
@@ -242,20 +294,36 @@ QUIC datagrams are capped at the negotiated path MTU — typically **1200 bytes*
 of payload after QUIC overhead. Video frames are 5-50 KB. They must be
 fragmented at the application layer.
 
-The fragmentation header lives in `MODULE_PROTOCOL.md`, but the rules are:
+The 8-byte `DatagramHeader` lives in `MODULE_PROTOCOL.md`, but the rules are:
 
-- Each frame gets a monotonic **FrameID** (u32).
-- Frame fragments are tagged `[FrameID][FragIndex][FragCount]` + a flag for the
-  first/last fragment.
-- The receiver buffers fragments by FrameID until all are received or a
-  reassembly deadline fires (default: one frame interval).
-- On deadline (e.g. 16.6 ms at 60 fps) the frame is **dropped**, a metric
-  increments, and the client requests a keyframe on the control stream.
-- The receiver only ever holds the **latest** in-progress frame. A new FrameID
-  arriving while an older one is incomplete immediately discards the older one.
+- Each frame gets a monotonic **FrameID** (u32) == the access unit's
+  `FrameHeader.Sequence`.
+- Each datagram carries `[Version][Type][FrameID u32][FragIndex u16]`. There is
+  **no FragCount field** — bit 15 of `FragIndex` is the LAST flag, and the last
+  fragment's index N means the frame has N+1 fragments (indices 0..N). Fragment 0
+  additionally carries the 22-byte `FrameHeader` at the start of its payload.
+- The receiver buffers fragments by `(Type, FrameID)` until complete or a
+  reassembly deadline fires (default one frame interval, `fragment_reassembly_ms`).
+- On deadline the partial frame is **dropped**, a metric increments, and the
+  client requests a keyframe on the control stream.
+- The receiver only ever holds the **latest** in-progress frame per Type. A new
+  FrameID arriving while an older one is incomplete immediately discards the
+  older one.
 
 This gives "late frame = useless = dropped" semantics for free at the transport
 boundary, with no retransmit cost.
+
+> **Send-side queue is frame-granular, not fragment-granular (fixes T-1).** A
+> 1080p IDR is ~40-50 KB ≈ 40+ datagrams. The server must NOT push individual
+> fragments into a small fixed-size channel — a channel cap of, say, 32 would
+> drop fragments *mid-frame*, corrupting **every** frame under load instead of
+> cleanly dropping whole stale frames. Instead the per-session out-queue holds
+> **assembled access units** (cap ~8 frames, drop-oldest); a single pump
+> goroutine pulls one frame, fragments it, and calls `SendDatagram` per fragment
+> back-to-back. Loss is then naturally whole-frame (recovered by the reassembly
+> deadline), never mid-frame. This queue is owned by the server module
+> ([`MODULE_SERVER.md`](./MODULE_SERVER.md)); `Transport.SendDatagram` itself is
+> fire-and-forget per datagram.
 
 ---
 
@@ -307,23 +375,33 @@ const { session_token } = await r.json();
 const wt = new WebTransport(`https://${location.host}/wt`);
 await wt.ready;
 
-// Control stream first (always)
+// Control stream first (always). First byte = StreamType tag 0x00.
 const control = await wt.createBidirectionalStream();
 const ctlWriter = control.writable.getWriter();
 const ctlReader = control.readable.getReader();
+await ctlWriter.write(new Uint8Array([0x00]));        // StreamControl tag
 await ctlWriter.write(jsonEncode({
     type: 'auth', token: session_token, role: 'control'
 }));
 
 const authResp = await readJSON(ctlReader);  // expects {"type":"auth_ok",...}
+// then a {"type":"config",...} line follows on the same stream.
 
-// Input stream
+// Input stream (controller role only). First byte = StreamType tag 0x01.
 const input = await wt.createBidirectionalStream();
-// … binary input records flow on input.writable
+const inWriter = input.writable.getWriter();
+await inWriter.write(new Uint8Array([0x01]));          // StreamInput tag
+// … [u16 RecLen]-prefixed binary input records flow on input.writable
+
+// Incoming UNI streams: the server-opened bootstrap stream (tag 0x10) seeds
+// the decoder with a reliable keyframe before any datagrams are decoded.
+for await (const uni of wt.incomingUnidirectionalStreams) {
+    routeUniStream(uni); // reads first byte: 0x10 → bootstrap IDR reader
+}
 
 // Datagrams (video, audio, cursor, ping)
 for await (const chunk of wt.datagrams.readable) {
-    routeDatagram(chunk); // dispatch by first byte (Type field)
+    routeDatagram(chunk); // dispatch by Type field in the 8-byte DatagramHeader
 }
 ```
 
@@ -347,17 +425,28 @@ flow that ships with the native client.
 
 ## Application-Layer Error Codes
 
+The close codes are defined **once**, in [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)
+(`pkg/protocol`). The transport module references `protocol.Close*` — it does
+**not** redefine them, so the two can never drift:
+
 ```go
-const (
-    CloseNormal             uint32 = 0
-    CloseAuthFailed         uint32 = 4401  // bad credentials / expired token
-    CloseAuthTimeout        uint32 = 4408  // client didn't auth within 5 s
-    CloseControllerTakeover uint32 = 4410  // controller slot seized
-    CloseProtocolError      uint32 = 4400  // malformed message
-    CloseServerShutdown     uint32 = 4503  // server going away
-    CloseResumeExpired      uint32 = 4401  // alias of AuthFailed for clarity
-)
+import "…/pkg/protocol"
+
+// Used directly, e.g.:
+sess.CloseWithError(protocol.CloseAuthTimeout, "auth timeout")
 ```
+
+| Code | Value | Meaning |
+|---|---|---|
+| `CloseNormal` | 0 | Graceful close |
+| `CloseProtocolError` | 4400 | Malformed message / bad StreamType tag / duplicate control stream |
+| `CloseAuthFailed` | 4401 | Bad credentials, expired token, **or expired resume token** |
+| `CloseAuthTimeout` | 4408 | Control stream not opened + authed within 5 s |
+| `CloseControllerTakeover` | 4410 | Controller slot seized |
+| `CloseServerShutdown` | 4503 | Server going away |
+
+There is no separate "resume expired" code — an expired resume token is just
+`CloseAuthFailed (4401)`, and the client falls back to a fresh `POST /auth`.
 
 Stream resets reuse the same code space; a stream `CancelRead(code)` with one
 of these means "this stream is unusable for the given reason."
@@ -390,7 +479,15 @@ max_streams_bidi         = 16      # cap on concurrent bidi streams per session
 max_streams_uni          = 16      # cap on concurrent uni streams (rarely used)
 enable_datagrams         = true    # MUST be true; required for video
 fragment_reassembly_ms   = 17      # drop deadline at 60 fps; use 34 at 30 fps
+datagram_send_queue_frames = 8     # per-session out-queue depth in WHOLE frames
+                                   # (drop-oldest). Frame-granular, never fragment-
+                                   # granular — see "Datagram Fragmentation".
+auth_deadline            = "5s"    # close unauthed sessions (CloseAuthTimeout 4408)
 ```
+
+> `max_streams_bidi` must comfortably exceed the steady-state stream count
+> (control + input + clipboard + N file transfers). Default 16 allows ~13
+> concurrent file transfers alongside the three persistent streams.
 
 ---
 
@@ -420,7 +517,7 @@ Considered and rejected:
 | Reason | Argument |
 |---|---|
 | "Some networks block UDP" | True (corporate, some hotel WiFi). Mitigation: those users are documented as unsupported, the same way some networks block ports for other tools. Not worth doubling the implementation surface. |
-| "Older browsers" | Chrome 97 (Jan 2022) onward, Edge 98 (Feb 2022), Firefox 114 (Jun 2023), Safari 18.2 (Dec 2024). Anything older is past the modern-browser support floor of the rest of the spec (WebCodecs, MediaStreamTrackProcessor) — already not supported. |
+| "Older browsers" | WebTransport landed in Chrome 97 (Jan 2022) / Edge 98 / Firefox 114 (Jun 2023) / Safari 18.2 (Dec 2024), but the **effective floor is Chrome 107 / Firefox 130** because the client also needs WebCodecs. Anything older is past the modern-browser support floor of the rest of the spec (WebCodecs, MediaStreamTrackProcessor) — already not supported. |
 | "Implementation simplicity" | The opposite — running both means two complete server transports, two client transports, two channel models, two auth flows. Single transport is cleaner. |
 | "TCP works everywhere" | True for connectivity, not true for latency under loss. The whole point of moving was packet loss; falling back to TCP gives back exactly the property we wanted to eliminate. |
 

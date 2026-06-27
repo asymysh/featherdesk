@@ -67,7 +67,7 @@ FeatherDesk shipping this on macOS.
 ### Go build tag
 
 ```bash
-go build -tags vt_sw -o viewport-rds-macos-vt-sw ./cmd/server
+go build -tags vt_sw -o featherdesk-macos-vt-sw ./cmd/server
 ```
 
 ### Runtime dependencies

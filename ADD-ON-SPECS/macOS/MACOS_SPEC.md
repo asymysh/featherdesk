@@ -244,8 +244,8 @@ VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReorderin
 { "codec": "hvc1.1.6.L93.B0" }
 ```
 
-The server sends whichever codec it selected via `FrameTypeConfig`. The client
-configures `VideoDecoder` from this string — never hardcoded.
+The server advertises whichever codec it selected in the `config` control-stream
+message. The client configures `VideoDecoder` from this string — never hardcoded.
 
 ---
 

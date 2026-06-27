@@ -52,17 +52,27 @@ type EncodedFrame = stream.EncodedFrame
 
 // HardwareEncoder is the contract every HW encoder add-on must satisfy.
 type HardwareEncoder interface {
-    // EncodeSurface takes a GPU-resident surface and returns encoded H.264.
-    // The surface is owned by the caller after EncodeSurface returns —
-    // the encoder releases its internal reference.
+    // EncodeSurface takes a GPU-resident surface and returns one encoded access
+    // unit (H.264 or HEVC) with EncodedFrame.Keyframe set BY THE ENCODER.
     //
-    // Returns ErrFallbackToSoftware if the surface cannot be imported
-    // (format mismatch, GPU reset, driver constraint). The pipeline
-    // catches this and switches to the SW path for the rest of the session.
+    // SURFACE OWNERSHIP (single owner — resolves the prior 4-way ambiguity):
+    // the HW encoder calls handle.Release() exactly ONCE before returning, on
+    // EVERY path including the error and ErrFallbackToSoftware paths. The
+    // capturer does NOT release it; the pipeline does NOT release it. After
+    // EncodeSurface returns, the handle is invalid to the caller.
+    //
+    // The input surface is at native capture resolution; the encoder scales it
+    // on-GPU to InitialParams.Width/Height (the Config dims) so its output
+    // always matches the advertised stream dimensions (see "Scaling invariant").
+    //
+    // Returns ErrFallbackToSoftware if the surface cannot be imported (format
+    // mismatch, GPU reset, driver constraint) — and STILL releases the handle.
+    // The pipeline catches this and switches to the SW path for the session.
     EncodeSurface(handle *SurfaceHandle) (*EncodedFrame, error)
 
-    // ForceKeyframe requests that the next encoded frame be an IDR.
-    // Thread-safe.
+    // ForceKeyframe requests that the next encoded frame be an IDR. The only
+    // method safe to call concurrently with EncodeSurface (atomic flag read by
+    // the frame loop); all other mutations go through UpdateStreamParams.
     ForceKeyframe()
 
     // Codec returns the WebCodecs codec string for the Config handshake
@@ -86,6 +96,9 @@ type HWEncoderConfig struct {
 // at runtime. HW encoders that don't implement this are torn down + recreated.
 type ConfigurableHardwareEncoder interface {
     HardwareEncoder
+    // Called only on the frame-loop goroutine, serialized with EncodeSurface
+    // via the pipeline's param-change channel — no locking vs EncodeSurface.
+    // Returns stream.ErrRequiresRestart if the change needs a fresh session.
     UpdateStreamParams(p stream.Params) error
 }
 
@@ -96,12 +109,15 @@ type ConfigurableHardwareEncoder interface {
 // See MODULE_STREAM_PARAMS.md for all error sentinels.
 ```
 
-### NAL Output Contract
+### Bitstream Output Contract
 
 Identical to the SW path (see MODULE_ENCODE):
-- Annex B form (start code `00 00 00 01` retained)
-- Keyframe access unit contains SPS + PPS + IDR concatenated
-- One NAL unit per `[]byte` element
+- `EncodedFrame.Data` is ONE **contiguous** Annex B access unit (start code
+  `00 00 00 01` retained) — **NOT** split per-NAL. (The old "one NAL per
+  `[]byte`" contract is rejected.)
+- Keyframe access unit contains SPS + PPS + IDR (H.264) or VPS + SPS + PPS + IDR
+  (HEVC) concatenated.
+- `EncodedFrame.Keyframe` is set by the encoder; the server never re-scans NALs.
 
 ---
 
@@ -113,22 +129,37 @@ Capture add-on              Hardware encoder add-on
 │ NextSurface()    │───────>│ EncodeSurface(handle)  │
 │                  │ handle │                        │
 │ Returns          │        │ Imports GPU resource   │
-│ SurfaceHandle    │        │ encodes on-GPU         │
-│ (DMA-BUF /       │        │ returns NALs           │
-│  IOSurface /     │        │                        │
+│ SurfaceHandle    │        │ scale + encode on-GPU  │
+│ (DMA-BUF /       │        │ returns 1 access unit  │
+│  IOSurface /     │        │ Release(handle) once   │
 │  D3D11 texture)  │        │ ~30KB compressed       │
 └──────────────────┘        └────────────────────────┘
                                        │
                                        v
                             ┌────────────────────────┐
                             │ EncodedFrame to server │
-                            │ (only NALs cross       │
+                            │ (only the compressed   │
+                            │  bitstream crosses     │
                             │  GPU→CPU boundary)     │
                             └────────────────────────┘
 ```
 
 Bandwidth across GPU→CPU boundary: ~30 KB compressed bitstream per frame
 (vs ~8 MB uncompressed BGRA in the CPU readback path).
+
+### Scaling invariant
+
+Capture add-ons always produce a surface at the display's **native** resolution.
+When the stream runs at a lower resolution (adaptive downscale, or a fixed
+`[stream]` width/height), the HW encoder scales the surface **in-encoder** (VPP /
+MFT scaler / VideoToolbox scaling) to `InitialParams.Width × Height`. The SW path
+achieves the same via libyuv `I420Scale` (see MODULE_ENCODE). The invariant the
+rest of the system relies on:
+
+> **encoder-output dims == `config` dims == input-coordinate range.**
+
+So the client's input scaling (which maps pointer coordinates into the advertised
+`config` width/height) is always correct regardless of native capture size.
 
 ---
 

@@ -52,7 +52,7 @@
 ## Phase 3: Production Readiness
 
 - [ ] Task: Create systemd service unit
-    - [ ] Write viewport-rds.service (Type=simple, Restart=on-failure)
+    - [ ] Write featherdesk.service (Type=simple, Restart=on-failure)
     - [ ] Document: install path, setcap command, enable/start commands
     - [ ] Test: systemctl start/stop/restart lifecycle
     - [ ] Add After=pipewire.service dependency
@@ -64,7 +64,7 @@
     - [ ] Report all capabilities at startup in a summary block
 - [ ] Task: Implement --bind flag and final CLI polish
     - [ ] Add `--bind` flag (default "0.0.0.0")
-    - [ ] Print startup banner: "ViewPort RDS listening on http://0.0.0.0:30084/"
+    - [ ] Print startup banner: "FeatherDesk listening on http://0.0.0.0:30084/"
     - [ ] Print detected capabilities: KMS ok, VA-API ok/missing, PipeWire ok/missing, uinput ok/missing
     - [ ] `--version` flag prints build version
 - [ ] Task: Final memory and stability verification

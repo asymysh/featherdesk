@@ -45,7 +45,7 @@ both architectures.
 ### Go build tag
 
 ```bash
-go build -tags openh264 -o viewport-rds-linux-openh264 ./cmd/server
+go build -tags openh264 -o featherdesk-linux-openh264 ./cmd/server
 ```
 
 ### Runtime dependencies

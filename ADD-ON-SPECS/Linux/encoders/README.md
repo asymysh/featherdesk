@@ -22,16 +22,16 @@ ADD-ON-SPECS/Linux/encoders/
 
 | Deployment | Recommended add-on set | Binary |
 |-----------|-----------------------|--------|
-| Generic Linux server (any GPU, commercial) | `openh264` + `libva` | `viewport-rds-linux-default` |
-| Home / personal (any GPU, fastest SW) | `x264` + `libva` | `viewport-rds-linux-home` |
-| NVIDIA workstation (low latency priority) | `openh264` + `nvenc` | `viewport-rds-linux-nvenc` |
-| AMD workstation (quality priority) | `openh264` + `libva` + `amf_rocm` | `viewport-rds-linux-amf` |
-| Container / no GPU (commercial) | `openh264` only | `viewport-rds-linux-cpu` |
-| Container / no GPU (home, fastest) | `x264` only | `viewport-rds-linux-cpu-home` |
+| Generic Linux server (any GPU, commercial) | `openh264` + `libva` | `featherdesk-linux-default` |
+| Home / personal (any GPU, fastest SW) | `x264` + `libva` | `featherdesk-linux-home` |
+| NVIDIA workstation (low latency priority) | `openh264` + `nvenc` | `featherdesk-linux-nvenc` |
+| AMD workstation (quality priority) | `openh264` + `libva` + `amf_rocm` | `featherdesk-linux-amf` |
+| Container / no GPU (commercial) | `openh264` only | `featherdesk-linux-cpu` |
+| Container / no GPU (home, fastest) | `x264` only | `featherdesk-linux-cpu-home` |
 
 The build tags compose; users can stack any combination:
 ```bash
-go build -tags "openh264,x264,libva,nvenc,amf_rocm" -o viewport-rds-linux-full ./cmd/server
+go build -tags "openh264,x264,libva,nvenc,amf_rocm" -o featherdesk-linux-full ./cmd/server
 ```
 
 ---

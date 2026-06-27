@@ -36,7 +36,7 @@ on X11, Wayland (GNOME/KDE/wlroots), or no display server at all. The only
 constraint is `CAP_SYS_ADMIN`:
 
 ```bash
-sudo setcap cap_sys_admin+p ./viewport-rds
+sudo setcap cap_sys_admin+p ./featherdesk
 ```
 
 NvFBC is the only capture path that beats KMS+EGL on any hardware — and only on
@@ -201,7 +201,7 @@ selection, uinput permissions, keymap coverage) at that point.
 | Requirement | Details |
 |-------------|---------|
 | Minimum kernel | 4.15+ (DRM universal planes, VA-API modern drivers) |
-| KMS capture | `CAP_SYS_ADMIN` or root — `sudo setcap cap_sys_admin+p ./viewport-rds` |
+| KMS capture | `CAP_SYS_ADMIN` or root — `sudo setcap cap_sys_admin+p ./featherdesk` |
 | VA-API encode | Intel: `intel-media-va-driver` or `i965-va-driver`; AMD: `mesa-va-drivers` |
 
 ---

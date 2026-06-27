@@ -132,6 +132,14 @@ The 1-byte `Version` lets a future binary wire change (wider `Seq`, different
 chunk size, new compression layer) negotiate via a `HELLO` message at the start
 of the connection without forcing every reader to guess.
 
+> **`PayloadLen` cap (mandatory, checked before allocation).** `PayloadLen` is a
+> `uint32` (up to 4 GiB) but the reader MUST reject oversized frames **before**
+> allocating the payload buffer, or a malicious peer can request a 4 GiB
+> allocation per frame. Caps: a `CHUNK` payload is **≤ 64 KiB**; a JSON control
+> message (`INIT`/`LIST_RESPONSE`/`ACK`/…) is **≤ 256 KiB** (a large Outgoing
+> listing still fits). Any frame exceeding its type's cap → `CancelRead` +
+> `CancelWrite(CloseProtocolError)` and the transfer is dropped.
+
 ### Message types
 
 | Msg | ID | Dir | Payload |
@@ -140,8 +148,8 @@ of the connection without forcing every reader to guess.
 | `LIST_RESPONSE` | 0x02 | H→C | JSON array of `FileInfo` |
 | `INIT` | 0x10 | both | JSON `{name, size, sha256}` — begin a transfer |
 | `ACCEPT` | 0x11 | both | JSON `{transfer_id, resume_from_seq}` — receiver ready |
-| `CHUNK` | 0x12 | both | raw bytes (≤ 64 KiB) |
-| `ACK` | 0x13 | both | JSON `{ack_seq}` — cumulative ack for windowed flow control |
+| `CHUNK` | 0x12 | both | raw bytes (≤ 64 KiB; enforced by the PayloadLen cap above) |
+| `ACK` | 0x13 | both | JSON `{ack_seq}` — cumulative **durable-write** checkpoint (for resume), NOT congestion control |
 | `COMPLETE` | 0x14 | both | JSON `{final_sha256}` |
 | `CANCEL` | 0x15 | both | JSON `{reason}` |
 | `RESUME` | 0x16 | both | JSON `{transfer_id}` — after reconnect |
@@ -154,12 +162,23 @@ of the connection without forcing every reader to guess.
 C: INIT {name:"a.zip", size:10485760, sha256:"…"}
 H: validate name (sandbox guard), check MaxFileBytes, MaxConcurrent
 H: ACCEPT {transfer_id:7, resume_from_seq:0}
-C: CHUNK seq=0 … CHUNK seq=N  (window-limited; ≤ 32 unacked chunks)
-H: ACK {ack_seq:k}  (cumulative; lets sender advance the window)
+C: CHUNK seq=0 … CHUNK seq=N  (sender just writes; QUIC stream flow control paces it)
+H: ACK {ack_seq:k}  (cumulative durable-write checkpoint; advances the resume point)
 C: COMPLETE {final_sha256:"…"}
 H: verify SHA-256 of received file == final_sha256, then os.Rename(.part → final)
 H: COMPLETE (echo) on success, or ERROR on mismatch (.part discarded)
 ```
+
+**Flow control (re-justified for QUIC).** There is **no app-level sliding
+window**. Under WebTransport each transfer is its own QUIC stream with built-in
+per-stream flow control (`[transport] initial_max_stream_data`, default 1 MiB):
+when the receiver hasn't consumed data, the sender's `Write` simply blocks. The
+old "≤ 32 unacked chunks" window (a TCP/WebSocket-era mechanism) is removed — it
+would only duplicate, and conflict with, QUIC's own window. `ACK` survives purely
+as a **durable-write checkpoint** for `RESUME` (it tells the sender the highest
+`Seq` the receiver has fsynced), not as a congestion or pacing signal. To protect
+video latency, an optional `[filetransfer] rate_limit_bps` throttles the sender
+above and beyond QUIC's fair sharing.
 
 **Transfer ID ownership.** The **receiver** assigns `transfer_id` in `ACCEPT`,
 regardless of direction. On uploads the host receives → host assigns; on

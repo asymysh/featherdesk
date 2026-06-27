@@ -23,16 +23,16 @@ encoders/
 
 | Deployment | Recommended add-on set | Binary |
 |-----------|-----------------------|--------|
-| Generic Windows (any GPU, commercial) | `openh264` + `mf_hw` | `viewport-rds-windows-default` |
-| Home / personal (any GPU, fastest SW) | `x264` + `mf_hw` | `viewport-rds-windows-home` |
-| NVIDIA-only (low latency priority) | `openh264` + `nvenc` | `viewport-rds-windows-nvenc` |
-| AMD-only (quality priority) | `openh264` + `amf` | `viewport-rds-windows-amf` |
-| Intel-only (low power) | `openh264` + `qsv` | `viewport-rds-windows-qsv` |
-| Maximum flexibility | `openh264,x264,mf_hw,nvenc,amf,qsv` | `viewport-rds-windows-full` |
+| Generic Windows (any GPU, commercial) | `openh264` + `mf_hw` | `featherdesk-windows-default` |
+| Home / personal (any GPU, fastest SW) | `x264` + `mf_hw` | `featherdesk-windows-home` |
+| NVIDIA-only (low latency priority) | `openh264` + `nvenc` | `featherdesk-windows-nvenc` |
+| AMD-only (quality priority) | `openh264` + `amf` | `featherdesk-windows-amf` |
+| Intel-only (low power) | `openh264` + `qsv` | `featherdesk-windows-qsv` |
+| Maximum flexibility | `openh264,x264,mf_hw,nvenc,amf,qsv` | `featherdesk-windows-full` |
 
 The build tags compose; stack any combination:
 ```bash
-go build -tags "openh264,mf_hw,nvenc" -o viewport-rds-windows-full ./cmd/server
+go build -tags "openh264,mf_hw,nvenc" -o featherdesk-windows-full ./cmd/server
 ```
 
 ---

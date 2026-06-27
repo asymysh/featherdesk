@@ -210,15 +210,33 @@ Bus: `BUS_VIRTUAL`. VID/PID/Version: `0xFEA1 / 0x0002 / 1` (distinct from the
 keyboard/mouse device). Name: `FeatherDesk Virtual Gamepad N` where N is the
 controller index.
 
-### Rumble forwarding (FF_RUMBLE read loop)
+### Rumble forwarding (FF_RUMBLE handshake + read loop)
 
-Games send vibration as evdev force-feedback events. The add-on enables
-`FF_RUMBLE` at device-create time, then `read()`s the same uinput fd in a
-goroutine to harvest `EV_UINPUT UI_FF_UPLOAD` / `UI_FF_ERASE` events. When the
-game submits an effect, the add-on extracts the `ff_effect.u.rumble`
-{`strong_magnitude`, `weak_magnitude`} (both `u16`) and effect duration, then
-invokes the registered rumble emitter. The pipeline forwards this to the server
-which sends `FrameTypeGamepadRumble` to the client.
+Games drive vibration through the evdev force-feedback protocol, which is a
+**two-phase** handshake — uploading an effect is distinct from playing it. The
+add-on must implement both phases or the kernel blocks the game:
+
+1. **Enable FF at create time.** Set `UI_SET_EVBIT(EV_FF)` + `UI_SET_FFBIT(FF_RUMBLE)`
+   and a non-zero `ff_effects_max` in the `uinput_user_dev`/`uinput_setup` so the
+   kernel advertises FF capacity.
+2. **Upload handshake (mandatory response).** When the game calls
+   `ioctl(EVIOCSFF)`, the kernel emits an `EV_UINPUT / UI_FF_UPLOAD` event on the
+   uinput fd. The add-on MUST: `ioctl(UI_BEGIN_FF_UPLOAD)` → read the
+   `uinput_ff_upload` (contains the `ff_effect`, kernel-assigned `effect.id`) →
+   stash `{id → strong_magnitude, weak_magnitude (u16), replay.length ms}` →
+   `ioctl(UI_END_FF_UPLOAD)` with `retval = 0`. **Skipping `UI_END_FF_UPLOAD`
+   leaves the game blocked in its ioctl.** `UI_FF_ERASE` (with `UI_BEGIN/END_FF_ERASE`)
+   removes a stashed effect.
+3. **Play trigger is a SEPARATE event.** Upload does NOT mean "rumble now." The
+   game then writes an `EV_FF` input event (`code = effect.id`, `value = 1` to
+   start, `0` to stop) which the kernel forwards to the uinput fd. The read-loop
+   goroutine harvests that `EV_FF` event, looks up the stashed magnitudes by
+   `code`, and invokes the registered rumble emitter (start) — or emits a
+   zero-magnitude stop on `value == 0`.
+
+The pipeline forwards the emitter call to the server, which sends a
+`FrameTypeGamepadRumble` **datagram** to the controller client (see
+[`MODULE_GAMEPAD.md`](../../../../specs/MODULE_GAMEPAD.md)).
 
 ### Touch (future)
 

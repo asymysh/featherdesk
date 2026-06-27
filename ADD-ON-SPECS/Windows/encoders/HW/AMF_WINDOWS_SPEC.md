@@ -50,7 +50,7 @@ Probe via `AMFCreateContext` + `InitDX11` + enumerate available codec components
 ## Build & Distribution
 
 ```bash
-go build -tags amf -o viewport-rds-windows-amf.exe ./cmd/server
+go build -tags amf -o featherdesk-windows-amf.exe ./cmd/server
 ```
 
 CGo config:

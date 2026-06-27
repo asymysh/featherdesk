@@ -63,7 +63,7 @@ on the GPU. No CPU memory copy at any stage.
 ## Build & Distribution
 
 ```bash
-go build -tags nvenc -o viewport-rds-windows-nvenc.exe ./cmd/server
+go build -tags nvenc -o featherdesk-windows-nvenc.exe ./cmd/server
 ```
 
 CGo config:

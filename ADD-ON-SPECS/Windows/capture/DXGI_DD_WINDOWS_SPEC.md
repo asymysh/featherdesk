@@ -196,7 +196,7 @@ output that Desktop Duplication can capture, bypassing the RDP restriction.
 ### Go build tag
 
 ```bash
-GOOS=windows go build -tags dxgi_dd -o viewport-rds.exe ./cmd/server
+GOOS=windows go build -tags dxgi_dd -o featherdesk.exe ./cmd/server
 ```
 
 ### Runtime dependencies

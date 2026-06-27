@@ -6,7 +6,7 @@ libx264 H.264 software encoder running as a **separate subprocess** to maintain
 GPL isolation from the proprietary main binary. The fastest software H.264
 encoder available — 2x faster than OpenH264 at equivalent quality.
 
-The subprocess model: the main `viewport-rds` binary (proprietary) spawns a
+The subprocess model: the main `featherdesk` binary (proprietary) spawns a
 small GPL-licensed encoder process. Communication via stdin/stdout pipe (raw
 I420 frames in, H.264 NALs out). Only the encoder subprocess is GPL; the main
 binary never links libx264.
@@ -21,7 +21,7 @@ binary never links libx264.
 | ffmpeg (as subprocess) | GPL-2.0+ | Used as the subprocess wrapper; already links libx264 |
 | Our Go bridge code | Proprietary | Spawns subprocess, pipes frames, reads NALs |
 
-**GPL isolation:** The main `viewport-rds` binary is proprietary. The x264
+**GPL isolation:** The main `featherdesk` binary is proprietary. The x264
 subprocess is a separate program (ffmpeg) distributed under GPL. This is the
 same pattern used by VLC, commercial streaming products, and any proprietary
 app that shells out to ffmpeg.
@@ -75,7 +75,7 @@ in-process.
 ## Architecture
 
 ```
-viewport-rds (proprietary)                    ffmpeg (GPL)
+featherdesk (proprietary)                    ffmpeg (GPL)
 ┌────────────────────┐                   ┌─────────────────────┐
 │                    │   stdin pipe       │                     │
 │ x264 bridge module │ ── I420 frames ──>│ -c:v libx264        │
@@ -122,7 +122,7 @@ Parameters controlled by the Go bridge via config:
 ### Build tag
 
 ```bash
-go build -tags x264 -o viewport-rds ./cmd/server
+go build -tags x264 -o featherdesk ./cmd/server
 ```
 
 The `x264` build tag compiles in the Go bridge code that spawns the subprocess.

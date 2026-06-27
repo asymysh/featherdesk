@@ -141,6 +141,14 @@ be added when one ships.
   goroutine. The same connection MUST stay alive to serve `XConvertSelection`
   requests when this process owns the `CLIPBOARD` selection — if the goroutine
   dies, every paste in every other X11 app for that selection fails.
+- **X11 INCR protocol (mandatory at this size).** A selection larger than the
+  server's maximum request size (`XMaxRequestSize`, often ~256 KiB) CANNOT be
+  transferred in one `XConvertSelection`. Since `[clipboard] max_bytes` is 1 MiB,
+  the X11 path MUST implement the **INCR** protocol in BOTH roles: when reading a
+  large selection (requestor receives the `INCR` target, then loops on
+  `PropertyNotify` reading chunks until a zero-length property) and when serving
+  one (owner advertises `INCR`, then writes chunks on each `PropertyNotify`
+  delete). Skipping INCR silently truncates large pastes — a common bug.
 - **Wayland (wlr-data-control).** Use `golang.org/x/exp/...`-compatible Wayland
   protocol bindings (or generate from XML); `wl-paste --watch` subprocess is
   intentionally NOT used as a fallback because it relies on the same
@@ -171,21 +179,24 @@ dedicated serializer for this format.
 
 ## Wire Protocol
 
-Clipboard is **low-rate and human-triggered**, so it uses JSON (not the binary
-input path). Directions are asymmetric, matching the existing channel design:
+Clipboard is **low-rate and human-triggered**, so it uses JSON — but it rides its
+own dedicated **clipboard stream** (StreamType tag `0x02`), opened on demand the
+first time either side has clipboard data. It is NOT on the control stream
+because a clipboard payload can reach 1 MiB, far past the 4 KiB control-line cap.
 
-**Client → host: JSON text frame**
+**Framing is symmetric:** `[u32 Len LE][JSON]` in BOTH directions on the
+clipboard stream. (The retired binary `FrameTypeClipboard = 12` frame is gone —
+see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) "Frame Types".)
+
+**Client → host**
 ```json
 {"type": "clipboard", "format": "text/plain", "text": "hello"}
 {"type": "clipboard", "format": "text/html", "html": "<b>hi</b>", "text": "hi"}
 ```
 
-**Host → client: binary frame, `FrameTypeClipboard = 12`, JSON payload**
-(server→client is always binary-framed; the payload is the same JSON shape).
-See [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md).
-
+**Host → client** (same JSON shape, same stream)
 ```json
-{"format": "text/html", "html": "<b>hi</b>", "text": "hi"}
+{"type": "clipboard", "format": "text/html", "html": "<b>hi</b>", "text": "hi"}
 ```
 
 Both directions are gated by `[clipboard] direction`. The server drops a
@@ -270,11 +281,11 @@ Host clipboard change (WM_CLIPBOARDUPDATE / XFixes / changeCount poll)
     → Monitor reads + size-checks + sanitizes
     → Changes() channel → server
     → direction check ([clipboard] direction)
-    → server sends FrameTypeClipboard (12) to controller client(s)
+    → server writes [u32 Len][JSON] on the clipboard stream to controller client(s)
 
 Client copy (clipboardchange / copy event)
     → navigator.clipboard.read() / event.clipboardData
-    → WS text {"type":"clipboard",...}
+    → [u32 Len][JSON {"type":"clipboard",...}] on the clipboard stream
     → server direction check
     → Monitor.Set() → OS clipboard
 ```

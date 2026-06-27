@@ -43,7 +43,7 @@ AOMedia AV1).
 | Intel integrated Sandy/Ivy Bridge (2011-12) | ✅ QSV | ❌ | ❌ |
 
 Runtime probe via `VTCopyVideoEncoderList` returns the available encoders. The
-add-on advertises in `FrameTypeConfig` the codec it actually picked.
+add-on advertises in the `config` control-stream message the codec it actually picked.
 
 ---
 
@@ -52,7 +52,7 @@ add-on advertises in `FrameTypeConfig` the codec it actually picked.
 ### Go build tag
 
 ```bash
-go build -tags vt_hw -o viewport-rds-macos-vt-hw ./cmd/server
+go build -tags vt_hw -o featherdesk-macos-vt-hw ./cmd/server
 ```
 
 ### Runtime dependencies

@@ -88,6 +88,19 @@ void gcv_set_button(uint8_t index, NSString *key, float value) {
     [btn setValue:value];
 }
 
+// ⚠ TECHNICAL SPIKE REQUIRED — BUILD-BLOCKING RISK.
+// GCVirtualController is designed to render an ON-SCREEN touch overlay and
+// source its state from the user's finger; Apple does NOT clearly document a
+// supported way to set element values PROGRAMMATICALLY. `setValue:` on a
+// GCControllerButtonInput obtained from a virtual controller may be a no-op,
+// may assert, or may work only on undocumented internal classes. Before any
+// other gcvirtual work, run a throwaway spike that (1) connects a
+// GCVirtualController, (2) drives a button/stick via the chosen setter, and
+// (3) confirms a separate GCController observer sees the change. If the spike
+// fails, this add-on is not viable on the public API and macOS gamepad support
+// is dropped to "unsupported" (zero-by-default), exactly like pre-Sonoma — do
+// NOT build the rest of the add-on on an unvalidated injection path.
+
 void gcv_set_thumbstick(uint8_t index, NSString *key, float x, float y) {
     GCController *c = gVC[index].controller;
     GCControllerDirectionPad *dp =

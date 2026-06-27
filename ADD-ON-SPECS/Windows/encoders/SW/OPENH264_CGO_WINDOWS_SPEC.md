@@ -42,7 +42,7 @@ Same encoder, same code on both x86 and ARM Windows.
 ### Go build tag
 
 ```bash
-go build -tags openh264 -o viewport-rds-windows-openh264.exe ./cmd/server
+go build -tags openh264 -o featherdesk-windows-openh264.exe ./cmd/server
 ```
 
 The build tag matches the Linux build tag. Same encoder, same Go file.

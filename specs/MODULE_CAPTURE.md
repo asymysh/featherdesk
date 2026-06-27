@@ -24,7 +24,13 @@ package capture
 // Frame holds raw screen pixels (CPU-resident).
 // Used by the SW encoder path (pixels → I420 → encoder).
 type Frame struct {
-    Data      []byte      // Pixel buffer (width * height * 4)
+    Data      []byte      // Pixel buffer (Stride * Height bytes)
+    Stride    int         // Bytes per row. MAY exceed Width*4 (GPU readback
+                          // rows are often padded to a power-of-two pitch).
+                          // libyuv ARGBToI420/ABGRToI420 take this stride
+                          // directly; assuming Stride == Width*4 corrupts the
+                          // image on padded backends (e.g. DXGI). Width*4 is
+                          // the valid byte count per row.
     PixelFmt  PixelFormat // PixelBGRA (macOS/Windows) or PixelRGBA (Linux GL)
     Width     int
     Height    int
@@ -67,8 +73,17 @@ type FBInfo struct {
 // CPU readback path: NextFrame() returns CPU-resident BGRA pixels.
 // Used by SW encoder path.
 type Capturer interface {
-    // NextFrame returns the next screen frame as CPU pixels.
-    // Borrowed: valid only until the next NextFrame() call.
+    // NextFrame returns the most recent screen frame as CPU pixels. It BLOCKS
+    // until either a new frame is available or the per-frame deadline (~one
+    // frame interval) elapses. Three outcomes:
+    //   (*Frame, nil) — a new frame (borrowed: valid only until the next call).
+    //   (nil,    nil) — no new frame within the deadline (screen idle). The
+    //                   caller skips this tick; it does NOT re-encode. A newly
+    //                   joined client is still served from the IDR cache via the
+    //                   bootstrap stream, so idle screens cost ~zero bandwidth.
+    //   (nil,    err) — capture failed (device lost, etc.).
+    // It never returns a stale frame as if it were new, and never blocks
+    // forever on an idle screen.
     NextFrame() (*Frame, error)
 
     // Close releases all resources (DRM fds, EGL contexts, COM refs).
@@ -86,8 +101,13 @@ type Capturer interface {
 type SurfaceCapturer interface {
     Capturer
 
-    // NextSurface returns a GPU-resident surface handle.
-    // Caller must call fb.Release() when done (set per-platform by the add-on).
+    // NextSurface returns a GPU-resident surface handle (same blocking + nil
+    // semantics as NextFrame: nil,nil means "no new surface this interval").
+    // OWNERSHIP: the handle is normally passed straight to a HW encoder's
+    // EncodeSurface, which calls fb.Release() exactly once on every path. The
+    // pipeline does NOT release it itself in that case. ONLY if the surface is
+    // never handed to an encoder (e.g. probe/teardown) must the caller invoke
+    // fb.Release(). Release is set per-platform by the add-on.
     NextSurface() (*FBInfo, error)
 }
 
@@ -183,11 +203,25 @@ The module intentionally does NOT support:
 - `Capturer.NextFrame()` returns a **borrowed** `*Frame.Data` — valid only
   until the next `NextFrame()` call. Callers (the SW path's Converter) copy
   into pinned encoder input buffers as needed.
-- `SurfaceCapturer.NextSurface()` returns an **owned** `*FBInfo` — caller must
-  hand it to a HW encoder for consumption, which releases the underlying
-  handle after `Encode()` completes.
+- `SurfaceCapturer.NextSurface()` returns an `*FBInfo` whose ownership passes to
+  the HW encoder: `EncodeSurface` calls `fb.Release()` **exactly once on every
+  path** (success, error, and `ErrFallbackToSoftware`). The capturer and pipeline
+  never release it. The single exception is a surface that is never handed to an
+  encoder, which the caller must release itself. (This is the single-owner rule
+  that resolves the prior capture/encode/pipeline ambiguity — see
+  [`MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md).)
 - The Capturer is **not safe** for concurrent `NextFrame()` calls from
   multiple goroutines. The pipeline ensures single-goroutine access.
+
+### Resolution: capture is always native; the encoder scales
+
+Capturers always emit frames/surfaces at the **display's native resolution**.
+They do **not** downscale to the stream resolution — that is the encoder's job
+(HW: in-encoder VPP/scaler; SW: libyuv `I420Scale`). Consequently a
+`ConfigurableCapturer.UpdateStreamParams` call uses only the HDR / bit-depth /
+FPS fields; a Width/Height change does **not** resize capture output (the encoder
+absorbs it). This keeps the invariant **encoder-output dims == `config` dims ==
+input-coordinate range** without the capturer and encoder both trying to scale.
 
 ---
 

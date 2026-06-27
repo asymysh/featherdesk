@@ -1,4 +1,4 @@
-BINARY := viewport-rds
+BINARY := featherdesk
 PKG := ./...
 CMD := ./cmd/server
 

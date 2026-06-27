@@ -114,7 +114,7 @@ func NewDevice(width, height int) (*Device, error) {
 
 	// Set up device struct
 	var dev uinputUserDev
-	copy(dev.Name[:], "viewport-rds")
+	copy(dev.Name[:], "featherdesk")
 	dev.ID.Bustype = 0x03 // BUS_USB
 	dev.ID.Vendor = 0x1234
 	dev.ID.Product = 0x5678

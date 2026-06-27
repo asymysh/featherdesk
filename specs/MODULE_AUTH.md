@@ -107,10 +107,10 @@ session_ttl_minutes = 60
 
 ### Behavior
 
-- Operator runs `viewport-rds hash-password` once to generate an argon2id
+- Operator runs `featherdesk hash-password` once to generate an argon2id
   hash:
   ```
-  $ viewport-rds hash-password
+  $ featherdesk hash-password
   Password: ********
   Confirm:  ********
   $argon2id$v=19$m=65536,t=3,p=4$RyVKczQy...
@@ -144,7 +144,7 @@ mode                   = "pin"
 pin_length             = 8           # 8-digit PIN (100M possibilities). Min 6, max 12.
 pairing_window_minutes = 5           # accept new pairings for N min after start
 max_pin_attempts       = 10          # GLOBAL limit per window. Exponential backoff after 3.
-paired_devices_file    = "/var/lib/viewport-rds/paired.json"
+paired_devices_file    = "/var/lib/featherdesk/paired.json"
 session_ttl_minutes    = 60
 ```
 
@@ -266,13 +266,13 @@ https://host:port/wt   (WebTransport; bearer carried in control-stream first fra
 
 Server-side flow:
 1. Look up session_token in active session cache
-2. If found AND not expired: skip auth, jump straight to "resumed" Config
-   handshake + cached IDR replay (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)
-   resume flow)
+2. If found AND not expired: skip auth, send the "resumed" config message
+   (`{"type":"config","resumed":true,…}`) then seed the decoder over a fresh
+   bootstrap stream (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) resume flow)
 3. If not found / expired: session closed with CloseAuthFailed (4401). Client falls back to
    full auth re-flow with stored credentials (token / password / device token).
-   NOTE: resume happens post-WS-upgrade, so HTTP 401 is not possible here --
-   always use WS close code 4401.
+   NOTE: resume happens post-WebTransport-upgrade, so an HTTP 401 is not possible
+   here -- always use the QUIC application close code 4401.
 
 ### Session token properties
 
@@ -293,17 +293,20 @@ Server-side flow:
 ## Authorization (Role Model)
 
 Beyond authentication (who you are), authorization (what you can do) is
-controlled by URL query param:
+controlled by the **`role` field of the control-stream auth message** — NOT a
+URL query param. The `/wt` URL is identical for every client; browsers can't set
+headers on the WebTransport constructor, so role travels in-band with the token.
 
-| URL | Role | Permissions |
+| Auth message | Role | Permissions |
 |-----|------|------------|
-| `https://host/wt?role=control` + control-stream auth `{role:"control"}` | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, file transfer streams, gamepad |
-| `https://host/wt?role=view` + control-stream auth `{role:"view"}` | Viewer | Receive video/audio/cursor/clipboard-pushes only |
-| `https://host/wt` (no role; control-stream auth omits `role`) | Auto: first connection = controller, rest = viewer | — |
+| `{"type":"auth","token":…,"role":"control"}` | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, file-transfer streams, gamepad |
+| `{"type":"auth","token":…,"role":"view"}` | Viewer | Receive video/audio/cursor/clipboard-pushes only |
+| `{"type":"auth","token":…}` (role omitted) | Auto: first connection = controller, rest = viewer | — |
 
-**One controller per session.** Subsequent `?role=control` connections become
+**One controller per session.** Subsequent `role:"control"` connections become
 viewers (the first controller keeps the slot until they disconnect; if
-authenticated, they can `?role=control&takeover=true` to forcibly seize).
+authenticated, they can set `"takeover":true` in the auth message to forcibly
+seize, honored only when `[auth] allow_takeover = true`).
 
 Per-mode role permissions can be locked down via:
 
@@ -427,10 +430,10 @@ internal/auth/
 | Cleartext over HTTP | TLS 1.2+ mandatory, AEAD ciphers only (see [`MODULE_SERVER.md`](./MODULE_SERVER.md)) |
 | Token generation | **All** random tokens (auth, session, device) MUST use `crypto/rand.Read()`. `math/rand` is prohibited. |
 | TLS key storage | Self-signed cert private key cached with mode 0600 (Unix) / restrictive ACL (Windows). Permissions verified on startup. |
-| Device revocation | `DELETE /devices/{device_id}` admin endpoint (requires controller auth) revokes individual paired devices. CLI: `viewport-rds revoke-device <id>`. |
+| Device revocation | `DELETE /devices/{device_id}` admin endpoint (requires controller auth) revokes individual paired devices. CLI: `featherdesk revoke-device <id>`. |
 | Metrics endpoint | If `metrics.bind` is not a loopback address, server prints a security warning at startup. Consider adding bearer token auth to scrape endpoint for exposed deployments. |
 | Viewer-only attacks | `require_auth_for_view = true` by default. Unauthenticated viewing requires explicit opt-in. |
-| Controller takeover | `allow_takeover = false` by default. When enabled, displaced controller receives WS close code 4410. |
+| Controller takeover | `allow_takeover = false` by default. When enabled, displaced controller receives QUIC application close code 4410 (`CloseControllerTakeover`). |
 | Origin hijacking | `allow_origin = ""` by default (same-origin only). Wildcard `"*"` requires explicit opt-in. |
 
 ---

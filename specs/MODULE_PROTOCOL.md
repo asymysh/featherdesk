@@ -23,40 +23,43 @@ package protocol
 
 const HeaderSize = 22
 
-// Frame type constants. Each Type appears on exactly one transport channel
-// (datagram vs control stream vs input stream); see "Channel Model" below.
+// FrameHeader Type constants. The 22-byte FrameHeader is used ONLY on the
+// media channels: datagram fragment 0 and the bootstrap stream. Control,
+// input, and clipboard messages do NOT use FrameHeader (see "Channel Model").
 const (
-    FrameTypeVideoH264    uint8 = 1   // datagram (S→C); fragmented
+    FrameTypeVideoH264    uint8 = 1   // datagram (S→C); fragmented + bootstrap-stream join IDR
     FrameTypePing         uint8 = 2   // datagram (S→C); 8-byte nonce
     // 3 reserved (client Pong routed on the control stream as JSON)
     FrameTypeAudioPCM     uint8 = 4   // datagram (S→C); fragmented (deferred)
     // 5 reserved (formerly VideoVP8 — VP8 rejected; never reuse without protocol version bump)
-    FrameTypeConfig       uint8 = 6   // control stream (S→C, JSON payload)
-    FrameTypeVideoHEVC    uint8 = 7   // datagram (S→C); fragmented
+    // 6 retired (was FrameTypeConfig; Config is now a control-stream JSON message)
+    FrameTypeVideoHEVC    uint8 = 7   // datagram (S→C); fragmented + bootstrap-stream join IDR
     FrameTypeCursorUpdate uint8 = 11  // datagram (S→C); latest-wins
-    FrameTypeClipboard    uint8 = 12  // control stream (S→C, JSON payload; MODULE_CLIPBOARD)
-    FrameTypeInputAck     uint8 = 14  // input stream (S→C)
+    // 12 retired (was FrameTypeClipboard; clipboard is now a clipboard-stream message)
+    FrameTypeInputAck     uint8 = 14  // input stream (S→C), length-prefixed
     FrameTypeGamepadRumble uint8 = 15 // datagram (S→C); MODULE_GAMEPAD
     // 0x50 reserved for future webcam redirection (deferred from v1).
-    // Do NOT reuse without a protocol version bump.
+    // Do NOT reuse 6, 12, or 0x50 without a protocol version bump.
 )
 
 // Application-layer close codes (carried by transport.Session.CloseWithError
-// and stream cancellation). See MODULE_TRANSPORT.
+// and stream cancellation). pkg/protocol is the SOLE owner of these; the
+// transport module references protocol.Close* rather than redefining them.
 const (
     CloseNormal             uint32 = 0
     CloseProtocolError      uint32 = 4400 // malformed message
-    CloseAuthFailed         uint32 = 4401 // bad / expired session token
-    CloseAuthTimeout        uint32 = 4408 // client didn't auth within 5 s
+    CloseAuthFailed         uint32 = 4401 // bad / expired session token (also: resume token expired)
+    CloseAuthTimeout        uint32 = 4408 // client didn't open + auth the control stream within 5 s
     CloseControllerTakeover uint32 = 4410 // controller slot seized
     CloseServerShutdown     uint32 = 4503
 )
-// NOTE: There is no binary KeyframeReq or Resize type.
+// NOTE: There is no binary KeyframeReq, Resize, or Config type.
 //   - Keyframe requests arrive as JSON on the control stream: {"type":"keyframe"}
-//   - Resolution changes are pushed as a fresh Config frame.
-//   - Input events are BINARY (not JSON) — see MODULE_INPUT.md.
+//   - Resolution changes are pushed as a fresh control-stream {"type":"config"}.
+//   - Input events are BINARY (length-prefixed) on the input stream — see MODULE_INPUT.md.
 
-// FrameHeader is the fixed-size header prepended to every reliable-stream message and every reassembled datagram frame.
+// FrameHeader is the 22-byte header prepended to every MEDIA access unit
+// (inside datagram fragment 0, and inside each bootstrap-stream message).
 type FrameHeader struct {
     Version     uint8  // Protocol version (currently 1)
     Type        uint8  // Frame type identifier
@@ -79,12 +82,13 @@ func UnmarshalHeader(buf []byte) (FrameHeader, error)
 
 ---
 
-## Wire Format — 22-byte FrameHeader (control + input streams)
+## Wire Format — 22-byte FrameHeader (media access units only)
 
-Used by every server-to-client frame on the **control stream** and the **input
-stream** (Config, Clipboard, InputAck — anything reliable + ordered). Also used
-inside datagram payloads (after fragmentation reassembly) so the upstack
-decoder sees the same shape regardless of transport channel.
+Used **only on the media channels**: at the start of datagram fragment 0 (so the
+upstack decoder sees the same shape after reassembly) and at the start of each
+bootstrap-stream message. It is NOT used on the control, input, or clipboard
+streams — those carry their own compact framing (JSON lines, length-prefixed
+records). `Config`, `Clipboard`, and `InputAck` are **not** FrameHeader frames.
 
 ```
 Offset  Size  Type     Field         Encoding
@@ -112,126 +116,166 @@ Offset  Size  Type     Field         Encoding
 ------  ----  ------   -----         --------
 0       1     uint8    Version       =1
 1       1     uint8    Type          Frame type (FrameTypeVideoH264 / VideoHEVC / AudioPCM / CursorUpdate / Ping / GamepadRumble)
-2       4     uint32   FrameID       Little-endian; monotonic per Type
-6       2     uint16   FragIndex     Little-endian; 0-based
-                                     bit 15 = LAST fragment flag
-                                     bits 0-14 = fragment index (max 32767)
+2       4     uint32   FrameID       Little-endian; == the FrameHeader.Sequence of this access unit
+6       2     uint16   FragIndex     Little-endian; bit 15 = LAST flag; bits 0-14 = fragment index (0-based, max 32767)
 ------- Total: 8 bytes -------
 
 [DatagramHeader: 8 bytes][Fragment payload: up to ~1192 bytes]
 ```
 
-**The FIRST fragment** (FragIndex == 0) of a frame carries the **22-byte
-FrameHeader at the start of its payload**, then the leading bytes of the
-frame's bitstream. Subsequent fragments carry only raw payload bytes.
+**FrameID == Sequence.** `DatagramHeader.FrameID` carries the same value as the
+`FrameHeader.Sequence` of the access unit it belongs to. It is duplicated into
+the compact datagram header so the receiver can group fragments by frame
+without first reassembling and parsing the 22-byte FrameHeader. (For audio the
+audio Sequence is used; counters remain per-Type.)
 
-**The LAST fragment** sets the `LAST` flag (bit 15 of `FragIndex`). Receiver
-reassembles when it sees both fragment 0 (with FrameHeader) and the last
-fragment, AND has received every fragment in between.
+**The FIRST fragment** (FragIndex == 0) carries the **22-byte FrameHeader at the
+start of its payload**, then the leading bytes of the access unit. Subsequent
+fragments carry only raw access-unit bytes. `FrameHeader.PayloadSize` is the
+size of the **complete access unit** (the whole bitstream after the 22-byte
+header), NOT the size of this fragment — the receiver uses it to know the total
+expected byte count.
 
-Small frame types (Ping = 8 bytes, CursorUpdate, GamepadRumble) typically fit
-in a single datagram — fragment 0 + LAST flag, all in one datagram.
+**The LAST fragment** sets the `LAST` flag (bit 15 of `FragIndex`). Its index
+value N (bits 0-14) means the frame has **N+1 fragments, indices 0..N** — no
+separate fragment-count field is needed because the last fragment's index
+encodes the count. A single-datagram frame is `FragIndex = 0 | LAST`.
+
+Small frame types (Ping = 8 bytes, CursorUpdate, GamepadRumble) always fit in a
+single datagram (fragment 0 + LAST).
 
 ### Datagram reassembly rules
 
 - Receiver maintains one reassembly buffer per `(Type, FrameID)`.
-- Reassembly **deadline**: one frame interval (16.6 ms at 60 fps; configured
-  via `[transport] fragment_reassembly_ms`). On deadline expiry the partial
-  frame is **dropped**, a metric increments, and the client sends a JSON
-  `{"type":"keyframe"}` on the control stream.
-- A **new FrameID arriving while an older one is in progress** for the same
-  Type discards the older buffer immediately (latest-wins).
-- Out-of-order fragments are tolerated (datagrams have no delivery guarantee).
-- Duplicate fragments are silently ignored.
-- A fragment whose total reassembled size would exceed a safety cap
-  (`16 MB` by default) is rejected and the frame dropped.
+- A frame is **complete** when the LAST fragment (index N) has arrived AND
+  fragments 0..N are all present AND the accumulated payload size equals
+  `FrameHeader.PayloadSize + 22`. Then deliver it upstack.
+- Reassembly **deadline**: one frame interval (default 16.6 ms at 60 fps;
+  `[transport] fragment_reassembly_ms`). If the LAST fragment never arrives, or
+  a middle fragment is lost, the deadline fires: the partial frame is
+  **dropped**, a metric increments, and (for video Types) the client sends a
+  JSON `{"type":"keyframe"}` on the control stream to recover. The decoder is
+  marked "needs IDR" until a keyframe arrives.
+- A **new FrameID arriving while an older one is in progress** for the same Type
+  discards the older buffer immediately (latest-wins — old frames are useless).
+- Out-of-order fragments are tolerated; duplicate fragments are ignored.
+- A frame whose `FrameHeader.PayloadSize` exceeds a safety cap (16 MB default)
+  is rejected and dropped before allocation.
 
 This gives "late frame = useless = dropped" semantics for free, without
-retransmit overhead.
+retransmit overhead. The reliable **bootstrap stream** (see Channel Model)
+guarantees a *newly-joined* client a decodable first keyframe even though live
+video is unreliable.
 
 ### Frame Types
 
-Each Type appears on **exactly one transport channel**. The channel — datagram,
-control stream, or input stream — is fixed by the Type and is the only thing
-the receiver needs to know to route the message.
+Each Type appears on **exactly one transport channel** with one framing. The
+22-byte `FrameHeader` is used **only on the media channels** (datagram fragment 0
+and the bootstrap stream). Control, input, and clipboard messages use their own
+compact framing (described per channel below), so no stream ever carries two
+framings in the same direction.
 
-| Type | Value | Dir | Channel | Payload | Width/Height |
-|------|-------|-----|---------|---------|--------------|
-| VideoH264 | 1 | S→C | **datagram** (fragmented) | One access unit, Annex B (keyframe = SPS+PPS+IDR) | Frame dims |
-| Ping | 2 | S→C | datagram | 8-byte nonce; client replies with JSON `{"type":"pong","nonce":…}` on the control stream | Unused (0) |
-| _(reserved)_ | 3 | — | — | Reserved | — |
-| AudioPCM | 4 | S→C | datagram (fragmented) | Raw S16LE PCM (deferred — audio paused) | SampleRate, Channels |
-| _(reserved)_ | 5 | — | — | Formerly VideoVP8 — rejected. Do not reuse without version bump. | — |
-| Config | 6 | S→C | **control stream** | JSON handshake (codec, dims, fps, hdr, cursorMode, session_token, resumed) | Unused (0) |
-| VideoHEVC | 7 | S→C | **datagram** (fragmented) | HEVC access unit, Annex B (keyframe = VPS+SPS+PPS+IDR) | Frame dims |
-| CursorUpdate | 11 | S→C | datagram | Cursor position + optional image (latest-wins) | Unused (0) |
-| Clipboard | 12 | S→C | control stream | JSON clipboard push (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)) | Unused (0) |
-| InputAck | 14 | S→C | **input stream** | Client input `seq` (u32 LE) + server-recv timestamp (u64 LE) | Unused (0) |
-| GamepadRumble | 15 | S→C | datagram | 9 bytes `[Index u8][WeakMag u16][StrongMag u16][DurationMs u32]` (see [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) | Unused (0) |
-| _(reserved)_ | 0x50 | — | — | Reserved for future webcam redirection. | — |
-| **Input events** | **0x01-0x4F** | **C→S** | **input stream** (6-byte header) | Binary input records (keyboard 0x10-0x1F, mouse 0x20-0x2F, touch 0x30-0x3F, gamepad 0x40-0x4F; see [`MODULE_INPUT.md`](./MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) | n/a |
+| Type | Value | Dir | Channel | Payload |
+|------|-------|-----|---------|---------|
+| VideoH264 | 1 | S→C | **datagram** (fragmented) + bootstrap stream for the join IDR | One access unit, Annex B (keyframe = SPS+PPS+IDR) |
+| Ping | 2 | S→C | datagram | 8-byte nonce; client replies `{"type":"pong","nonce":…}` on the control stream |
+| _(reserved)_ | 3 | — | — | Reserved |
+| AudioPCM | 4 | S→C | datagram (fragmented) | Raw S16LE PCM (deferred — audio paused) |
+| _(reserved)_ | 5 | — | — | Formerly VideoVP8 — rejected. Do not reuse without version bump. |
+| VideoHEVC | 7 | S→C | **datagram** (fragmented) + bootstrap stream for the join IDR | HEVC access unit, Annex B (keyframe = VPS+SPS+PPS+IDR) |
+| CursorUpdate | 11 | S→C | datagram | Cursor position + optional image (latest-wins) |
+| InputAck | 14 | S→C | **input stream** (length-prefixed) | 13-byte `[Type=14 u8][Seq u32][RecvTimestampNs u64]` |
+| GamepadRumble | 15 | S→C | datagram | 9 bytes `[Index u8][WeakMag u16][StrongMag u16][DurationMs u32]` (see [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) |
+| _(reserved)_ | 0x50 | — | — | Reserved for future webcam redirection. |
+| **Input events** | **0x01-0x4F** | **C→S** | **input stream** (length-prefixed) | Binary input records (keyboard 0x10-0x1F, mouse 0x20-0x2F, touch 0x30-0x3F, gamepad 0x40-0x4F; see [`MODULE_INPUT.md`](./MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) |
 
-> **Input record total size = 6-byte shared header + per-type payload.** The
-> dispatcher Type→length table in [`MODULE_INPUT.md`](./MODULE_INPUT.md) lists
-> exact totals per record (e.g. `KeyEvent` total 9 bytes = 6 header + 3 payload).
+> **Config (was type 6) and Clipboard (was type 12) are no longer binary
+> `FrameHeader` frames.** `Config` is now a JSON line on the control stream
+> (`{"type":"config",...}`); clipboard rides its own clipboard stream. Both
+> moves remove mixed-framing from the control stream and remove the control-stream
+> size-cap hazard for clipboard. Type values 6 and 12 are retired from the
+> on-the-wire FrameHeader Type space (do not reuse without a version bump).
 
-> `Resize` is **not** a separate type — a resolution change is a fresh `Config`
-> frame. `KeyframeReq` is **not** a binary type — requested as JSON on the
-> control stream.
+> `Resize` is **not** a separate type — a resolution change is a fresh `config`
+> JSON message. `KeyframeReq` is **not** a binary type — requested as JSON on
+> the control stream.
 
 ### Channel Model (over WebTransport)
+
+Each stream is **single-framing and self-delimiting**:
 
 ```
 SESSION (one per client)
   ├─ DATAGRAMS (unreliable, fire-and-forget)
-  │     S → C: VideoH264 / VideoHEVC / AudioPCM (each fragmented)
-  │            CursorUpdate / Ping / GamepadRumble
+  │     S → C: VideoH264 / VideoHEVC / AudioPCM (fragmented; 8-byte DatagramHeader)
+  │            CursorUpdate / Ping / GamepadRumble (single datagram each)
   │     C → S: (none in v1 — reserved for future client-side media)
   │
-  ├─ CONTROL STREAM (reliable bidirectional; opened first by client)
-  │     S → C frames (22-byte FrameHeader): Config (6), Clipboard (12)
-  │     C → S JSON messages: auth, keyframe, pong, stats, resize, set_*,
-  │                          clipboard, gamepad_connect/disconnect
+  ├─ CONTROL STREAM  (reliable bidi; FIRST stream the client opens)
+  │     Framing: newline-delimited JSON, BOTH directions.
+  │     S → C: {"type":"auth_ok"|"auth_failed"|"config"|"hdr_unavailable"|...}
+  │     C → S: {"type":"auth"|"keyframe"|"pong"|"stats"|"resize"|"set_*"}
   │
-  └─ INPUT STREAM (reliable bidirectional; opened by client after auth)
-        S → C frames (22-byte FrameHeader): InputAck (14)
-        C → S binary records (6-byte header): input events 0x01-0x4F
+  ├─ INPUT STREAM  (reliable bidi; SECOND stream the client opens, controller only)
+  │     Framing: [u16 RecLen LE][record], BOTH directions.
+  │     C → S: input records (6-byte header + per-type payload)
+  │     S → C: InputAck (13-byte message)
+  │
+  ├─ BOOTSTRAP STREAM  (reliable UNIdirectional; server → client, once at join)
+  │     Framing: [u32 Len LE][22-byte FrameHeader || access unit]; one IDR; then close.
+  │     Seeds the joiner's decoder with a guaranteed-decodable keyframe.
+  │
+  ├─ CLIPBOARD STREAM  (reliable bidi; opened on demand if clipboard enabled)
+  │     Framing: [u32 Len LE][JSON clipboard message], BOTH directions.
+  │     See MODULE_CLIPBOARD.
+  │
+  └─ FILE-TRANSFER STREAMS  (reliable bidi; one per active transfer)
+        Framing: 18-byte header with PayloadLen (self-delimiting). See MODULE_FILETRANSFER.
 ```
 
-File-transfer streams are additional bidirectional streams (one per transfer)
-opened on demand — see [`MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md).
+**Why this split:** datagrams give "late = useless = drop" for free; reliable
+streams give "must arrive, in order" for free; independent QUIC streams give
+HOL-isolation for free. Each message type lands on the channel whose guarantees
+it needs. See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) for the rationale
+and the per-stream identification rules.
 
-**Why this split:** datagrams have "late = useless = drop" semantics for free;
-streams have "must arrive in order" semantics for free. We pick the right
-channel per message type. See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md)
-"Channel Model" for the longer rationale.
+### Control-stream JSON messages
 
-### Control-stream JSON messages (C → S)
-
-JSON line-delimited (one message per line, `\n` terminator), reliable, ordered.
-Cost is negligible at these rates and human-readability aids debugging:
+Newline-delimited JSON (one message per line, `\n` terminator), reliable,
+ordered, **both directions**. A reader frames a message by reading to the next
+`\n`. The control reader caps any single line at `server.max_message_bytes`
+(default 4 KiB) — bulk payloads (clipboard) never travel here.
 
 ```json
+// Server → client:
+{"type": "auth_ok",   "session": { ... }}
+{"type": "auth_failed","reason": "bad token"}
+{"type": "config",    "codec": "avc1.42E01F", "width": 1920, "height": 1080,
+                      "fps": 60, "hdr": false, "color_space": "bt709",
+                      "cursorMode": "separate", "session_token": "…",
+                      "session_ttl_sec": 3600, "resumed": false}
+{"type": "hdr_unavailable"}                          // HDR requested but no HEVC/10-bit encoder
+
+// Client → server:
+{"type": "auth", "token": "…", "role": "control|view", "resume": false}
 {"type": "keyframe"}                                 // request an IDR after a gap
-{"type": "pong", "nonce": 12345}                     // reply to a server Ping
+{"type": "pong", "nonce": 12345}                     // reply to a server Ping datagram
 {"type": "stats", "decodeMs": 3.2, "dropped": 0}     // optional client telemetry
 {"type": "resize", "width": 1280, "height": 720}     // dynamic resolution change
 {"type": "set_bitrate", "kbps": 8000}                // dynamic bitrate (control role only)
 {"type": "set_fps", "fps": 30}                       // dynamic frame rate (control role only)
 {"type": "set_hdr", "hdr": true}                     // toggle HDR pipeline
-{"type": "clipboard", "format": "text/plain", "text": "..."}   // clipboard C→H (MODULE_CLIPBOARD)
 ```
 
-- **Input events are NOT here** — they are binary (see above).
-- `keyframe`/`pong`/`stats`/`resize`/`set_*`/`clipboard` carry no input `seq`.
-- `resize`, `set_*`, `clipboard` (C→H) are gated by authorization role
-  (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); the server silently drops them
-  from `view` role clients. `clipboard` (C→H) is additionally gated by
-  `[clipboard] direction`: dropped when `direction = "host_to_client"` or
-  `"disabled"` (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)).
+- **Input events are NOT here** — they are binary on the input stream.
+- **Clipboard is NOT here** — it rides the clipboard stream (it can be up to
+  1 MiB, far beyond the 4 KiB control-line cap).
+- `keyframe`/`pong`/`stats`/`resize`/`set_*` carry no input `seq`.
+- `resize`, `set_*` are gated by authorization role (see [`MODULE_AUTH.md`](./MODULE_AUTH.md));
+  the server silently drops them from `view`-role clients.
 - Parameter-change messages flow through the `stream.Params` contract (see
-  [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)); the server may emit a
-  new `FrameTypeConfig` if the codec or color space changed.
+  [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)); the server emits a new
+  `config` message if the codec or color space changed.
 
 ### Resume Path
 
@@ -240,40 +284,53 @@ new WebTransport session the client opens the control stream and sends the auth
 message with `resume: true`:
 
 ```json
-{
-  "type":"auth",
-  "token":"<session_token>",
-  "role":"control",
-  "resume":true,
-  "last_video_seq":12345
-}
+{ "type":"auth", "token":"<session_token>", "role":"control", "resume":true }
 ```
 
 If the server still has the session cached AND the token verifies:
 
-- Server skips the full auth/Config exchange and sends `Config{resumed:true}`.
-- Server replays the most recent cached IDR (datagram-fragmented).
-- Server resumes live stream from the next encoder frame.
+- Server sends `{"type":"config", "resumed":true, ...}` on the control stream.
+- Server opens a **bootstrap stream** and writes the most recent cached IDR
+  (reliable — guaranteed decodable, see "Fast-Join" below).
+- Server resumes the live datagram stream from the next encoder frame.
 
 If the token is unknown / expired / fails verification the server closes the
 WebTransport session with `CloseAuthFailed (4401)` and the client falls back to
-a fresh `POST /auth` + new WebTransport session. See
-[`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) + [`MODULE_AUTH.md`](./MODULE_AUTH.md).
+a fresh `POST /auth` + new WebTransport session.
+
+> There is **no `last_video_seq`** field. The server always seeds a resumed
+> client with a fresh bootstrap IDR; a stale client-provided sequence offers no
+> useful optimization (the cached IDR is what makes the stream decodable, and
+> it is sent reliably regardless). See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md)
+> + [`MODULE_AUTH.md`](./MODULE_AUTH.md).
 
 ### Sequence Number Semantics (server → client)
 
 - The **server** owns and increments the sequence counters. Video and Audio have **independent** counters (both start at 0).
 - Sequence increments by 1 for each message the server *sends* of that type (a frame dropped at the server for a slow client still consumed a sequence number for the stream as a whole — see note).
 - **Per-client drop note:** The server may drop a frame for an individual slow client (full send buffer). Because the sequence is stream-global, that client will see a gap and may request a keyframe. This is intentional and bounded by the keyframe-request rate limit (see MODULE_SERVER).
-- Client gap rule: `if (seq > lastSeq + 1)` → frames were missed → request a keyframe via the text channel. **Exception:** the first live frame after a cached-IDR fast-join is NOT treated as a gap (see "Fast-Join Reconciliation").
+- Client gap rule: `if (seq > lastSeq + 1)` → frames were missed → request a keyframe via a `{"type":"keyframe"}` JSON message on the control stream. **Exception:** the first live datagram frame after the bootstrap-stream IDR is NOT treated as a gap (see "Fast-Join").
 - Sequence wraps at `2^32` (≈ 828 days at 60 fps — acceptable; client handles wrap with modular comparison).
 
-### Fast-Join Reconciliation (IDR cache vs gap detection)
+### Fast-Join (bootstrap stream + gap detection)
 
-When a client connects, the server sends `Config`, then the **cached IDR** message (which may carry an old sequence number), then the live stream. To avoid a false gap:
+A newly-joined (or resumed) client must start from a decodable keyframe, but live
+video is unreliable datagrams (a lost fragment of a datagram IDR would be
+undecodable). So the join keyframe is sent over a **reliable bootstrap stream**:
 
-- The client sets `lastSeq = <seq of the first frame it receives>` and does NOT run gap detection on the transition from the cached IDR to the first live frame.
-- Gap detection begins only from the **second** live frame onward.
+1. Server sends `{"type":"config",...}` on the control stream.
+2. Server opens a unidirectional **bootstrap stream** and writes the cached IDR
+   as `[u32 Len][22-byte FrameHeader || access unit]`, then closes the stream.
+   (If no IDR is cached yet — very first client — the server forces a keyframe on
+   the encoder and sends that first IDR on the bootstrap stream.)
+3. Client reads the bootstrap stream, seeds its `VideoDecoder` with the IDR
+   (`type:"key"`), and sets `lastSeq` from that frame's Sequence.
+4. Client then consumes live datagram frames. Gap detection begins from the
+   first live datagram frame; the bootstrap→live transition is never a gap.
+
+This bounds the reliability cost to exactly one stream per join. Subsequent
+keyframes (periodic or on-request) travel as ordinary datagrams; if one is lost,
+the client requests another via `{"type":"keyframe"}`.
 
 ### A/V Synchronization & Canonical Clock
 
@@ -290,9 +347,11 @@ The video payload is the **complete access unit** for one frame, with all NAL un
 ```
 [00 00 00 01][NAL 1 ...][00 00 00 01][NAL 2 ...] ...
 ```
-- Keyframe messages contain `SPS, PPS, IDR` in order (self-contained, decodable cold).
+- A keyframe access unit is self-contained, decodable cold: H.264 = `SPS, PPS, IDR`; HEVC = `VPS, SPS, PPS, IDR` (in order).
 - The browser `VideoDecoder` consumes the whole payload as one `EncodedVideoChunk` — it never needs to split NALs, so no length-prefixing is used.
-- The server detects keyframes by scanning for an IDR NAL (type 5) to set the `EncodedVideoChunk` key/delta hint via the per-frame message (a dedicated keyframe flag is not on the wire; the client derives it from the bitstream, same as the original design).
+- **Keyframe signaling is NOT on the wire** (the 22-byte `FrameHeader` carries no keyframe flag). Each side derives it independently:
+  - **Server:** the encoder reports it (`stream.EncodedFrame.Keyframe`), used to refresh the IDR cache and seed the bootstrap stream. The server never re-scans the bitstream.
+  - **Client:** derives the `EncodedVideoChunk` key/delta hint by inspecting the first VCL NAL of the reassembled access unit — H.264 `nal_unit_type == 5` (IDR), HEVC `nal_unit_type ∈ 16..21` (IRAP: BLA/IDR/CRA). Frames arriving on the bootstrap stream are always `key`.
 
 ---
 
@@ -301,7 +360,7 @@ The video payload is the **complete access unit** for one frame, with all NAL un
 - **Zero-allocation:** Marshal writes into caller-owned buffer; no heap escapes
 - **Fixed size:** Header is always exactly 22 bytes (enables pre-allocation)
 - **Little-endian:** Matches x86/ARM native byte order (no conversion on most hardware)
-- **Datagram boundaries are intrinsic; reliable-stream messages carry a length-prefix.** See MODULE_TRANSPORT for the channel framing rules.
+- **Framing is per-channel, not uniform:** datagram boundaries are intrinsic; the control + clipboard streams are newline-delimited JSON; the input stream and bootstrap stream are length-prefixed binary. See the "Channel Model" section above and [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md).
 - **Versioned:** Byte 0 enables future protocol evolution without out-of-band negotiation
 - **Sequenced:** Per-type counters enable server-side drop detection without ack overhead
 - **Clock-aligned:** Both video and audio share CLOCK_MONOTONIC for A/V sync
@@ -311,9 +370,11 @@ The video payload is the **complete access unit** for one frame, with all NAL un
 ## Refactoring Directives
 
 ### R-PRO-01: Connection Handshake
-Right after auth_ok on the control stream, the server MUST send a `FrameTypeConfig` (type 6, JSON payload) on the control stream, BEFORE any video/audio/IDR datagrams flow:
+Right after `auth_ok` on the control stream, the server MUST send a `config`
+JSON message on the control stream, BEFORE any video/audio/IDR media flows:
 ```json
 {
+    "type": "config",
     "version": 1,
     "codec": "avc1.42E01F",
     "width": 1920,
@@ -335,15 +396,17 @@ Right after auth_ok on the control stream, the server MUST send a `FrameTypeConf
 - `cursorMode` is `"separate"` (client renders cursor from `CursorUpdate` messages) or `"embedded"` (cursor is burned into the video frame).
 - `session_token` is issued by the server after successful auth (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); client stores it (in-memory only) for reconnection.
 - `session_ttl_sec` is the auth session lifetime (from `[auth] session_ttl_minutes`). The reconnect state cache has a separate, shorter TTL (`[reconnect] cache_ttl_seconds`, default 300s).
-- `resumed = true` on Config frames sent in response to a successful resume — client skips full decoder re-init and just waits for the replayed IDR.
-- If capabilities change (resolution, codec, cursor mode, HDR), the server sends a **new** Config frame; the client reconfigures its decoder and input scaling.
-- Send order on connect: **Config → cached IDR (if any) → live frames.**
+- `resumed = true` on a `config` message sent in response to a successful resume — client skips full decoder re-init and waits for the bootstrap-stream IDR.
+- If capabilities change (resolution, codec, cursor mode, HDR), the server sends a **new** `config` message; the client reconfigures its decoder and input scaling.
+- Send order on connect: **`config` (control stream) → IDR (bootstrap stream) → live frames (datagrams).**
 
 ### Shared Payload Types (Go)
 
 ```go
-// ConfigPayload is the JSON body of a FrameTypeConfig (type 6) message.
+// ConfigPayload is a control-stream JSON message (newline-delimited). Like all
+// control messages it carries a "type" discriminator; here Type == "config".
 type ConfigPayload struct {
+    Type             string `json:"type"`             // always "config"
     Version          int    `json:"version"`
     Codec            string `json:"codec"`            // full WebCodecs string
     Width            int    `json:"width"`
@@ -377,7 +440,7 @@ These live in `pkg/protocol` alongside `FrameHeader`, shared by server and (conc
 `MarshalHeader` should return an error if `buf` is shorter than `HeaderSize`, rather than panicking. This is a low-cost check (single comparison) that prevents crashes from propagating.
 
 ### R-PRO-03: Separate Audio Header Semantics
-Width/Height overloading for audio is now documented as a known interpretation rule. The `FrameTypeConfig` handshake communicates audio parameters upfront. No structural change needed — the overloading is acceptable given the handshake makes semantics explicit.
+Width/Height overloading for audio is now documented as a known interpretation rule. The `config` handshake message communicates audio parameters upfront. No structural change needed — the overloading is acceptable given the handshake makes semantics explicit.
 
 ### R-PRO-04: Annex B Per-Frame Concatenation (REVISED from round 1)
 Serialize each video frame as ONE message containing the **complete access unit** in Annex B (start codes retained), all NALs concatenated. Do NOT length-prefix and do NOT split NALs across messages. Rationale: the browser `VideoDecoder` consumes a whole access unit as a single `EncodedVideoChunk` and never iterates NALs, so length-prefixing adds client-side AVCC `avcC` complexity for zero benefit. This also makes keyframe caching trivially correct (the IDR message already contains SPS+PPS+IDR).
@@ -390,8 +453,11 @@ Define a single process-wide `CLOCK_MONOTONIC` epoch. Every video frame (from ev
 ### R-PRO-06: Server Owns Sequence Counters
 The server is the sole owner of the video and audio sequence counters (independent, per type). They are assigned in `Broadcast`/`BroadcastAudio` at send time. The pipeline must NOT maintain its own frame sequence counter.
 
-### R-PRO-07: Magic Bytes in Handshake (Optional)
-The `FrameTypeConfig` message acts as the implicit handshake. The first 2 bytes of the first message are always `0x01 0x06` (Version=1, Type=Config), usable for protocol sniffing.
+### R-PRO-07: Handshake Discriminator
+The first control-stream message after `auth_ok` is always the `config` JSON
+message (`{"type":"config",...}`). There are no binary magic bytes — the control
+stream is newline-delimited JSON from its first byte, and the `"type"` field is
+the discriminator for every message on it.
 
 ### R-PRO-08: Extract to `pkg/protocol`
 This module is already pure (no dependencies). Move it directly to `pkg/protocol/` as the canonical wire format shared between server and any future native client implementations.
@@ -408,7 +474,8 @@ This module is already pure (no dependencies). Move it directly to `pkg/protocol
 | Unit | Deterministic encoding (same input → same bytes) | No |
 | Unit | Buffer reuse safety | No |
 | Unit | Annex B access-unit assembly (SPS+PPS+IDR ordering, start codes) | No |
-| Unit | Client→server JSON control parsing (keyframe, pong, stats, resize, set_*, clipboard) | No |
+| Unit | Control-stream JSON parsing both directions (auth, config, keyframe, pong, stats, resize, set_*) | No |
+| Unit | Clipboard-stream JSON parsing (offer/data, >4 KiB payloads up to 1 MiB cap) | No |
 | Unit | Binary input record decode (every Type, truncated/oversized/unknown Type, InputBatch caps) | No |
 | Benchmark | Marshal throughput (target: <1ns/op) | No |
 | Benchmark | Unmarshal throughput (target: <0.5ns/op) | No |

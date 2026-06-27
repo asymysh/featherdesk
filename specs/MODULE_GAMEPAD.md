@@ -152,10 +152,14 @@ input record.
 6    1   u8     Index
 ```
 
-### Server → Client (rumble feedback, binary frame)
+### Server → Client (rumble feedback, unreliable datagram)
 
-Rumble piggybacks on the 22-byte `FrameHeader` like every other server-to-client
-frame:
+Rumble is a single best-effort **datagram** (Type 15) — like cursor updates and
+ping, it rides the unreliable datagram channel, NOT a reliable stream: a rumble
+for a button press that is already in the past is useless, so dropping it under
+loss is preferable to delaying fresher data. It fits in one datagram (fragment
+`0 | LAST`, 8-byte `DatagramHeader`); see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)
+"Channel Model".
 
 **Type `15` FrameTypeGamepadRumble (9-byte payload)**
 

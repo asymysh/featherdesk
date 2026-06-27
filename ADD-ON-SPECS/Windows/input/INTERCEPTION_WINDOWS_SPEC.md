@@ -145,6 +145,22 @@ the `SecureAttention` implementation is Windows-specific.
 
 ---
 
+## Held-input release (no stuck keys)
+
+The authoritative owner of "release everything still held" is the core
+`Dispatcher.ReleaseAll` (see [`MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md)),
+which the server calls on controller disconnect/takeover. This add-on cooperates:
+
+- It injects exactly the key-down/button-down events it is told to, so the
+  Dispatcher's pressed-set is accurate.
+- Its `Close()` **defensively** sends a `KEY_UP` for any key and a button-up for
+  any mouse button it still believes is down (a belt-and-suspenders guard in case
+  Close is reached without a prior `ReleaseAll`), so a mid-keypress disconnect
+  never leaves Shift/Ctrl/a game-movement key latched at the OS class-driver
+  level. Relative-mode pointer state needs no release (it carries no held state).
+
+---
+
 ## Build & Distribution
 
 ```bash

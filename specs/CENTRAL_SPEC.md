@@ -1,8 +1,8 @@
-# FeatherDesk (ViewPort RDS) - Central Architecture Specification
+# FeatherDesk - Central Architecture Specification
 
 ## Product Overview
 
-**Name:** FeatherDesk (binary: `viewport-rds`)
+**Name:** FeatherDesk (binary: `featherdesk`)
 **Type:** Low-latency remote desktop streaming server (Linux primary, Windows + macOS planned)
 **Language:** Go 1.26+ with CGo
 **Deployment:** Single binary with embedded web client + optional add-on encoder binaries
@@ -123,7 +123,7 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 >   (`v4l2loopback`, `dshow_vcam`, `cmio_ext`) can be reconstructed from git
 >   history if/when revived.
 >
-> (**Input is no longer deferred** — see module 9.)
+> (**Input is no longer deferred** — see module 10.)
 
 > **Not supported (permanently out of scope):**
 > - **Generic USB redirection** — needs kernel drivers on both ends, cannot work
@@ -317,17 +317,17 @@ When adding a new vendor-specific encoder:
 │  CAPTURE MODULE │      │   ENCODE     │ │   AUDIO   │ │  SERVER   │  │   INPUT    │
 │                 │      │  (Software)  │ │   MODULE  │ │  MODULE   │  │   MODULE   │
 │ NextFrame()     │─────▶│ Convert()    │ │           │ │           │  │            │
-│ -> *Frame       │ RGBA │ Encode()     │ │ Chunks()  │ │ HTTPS+WSS │  │ uinput     │
-│   (borrowed)    │      │ -> [][]byte  │ │ ->[]byte  │ │ Broadcast │  │ injection  │
+│ -> *Frame       │ RGBA │ Encode()     │ │ Chunks()  │ │ HTTP/3+WT │  │ uinput     │
+│   (borrowed)    │      │ -> []byte AU │ │ ->[]byte  │ │ Broadcast │  │ injection  │
 │                 │      └──────┬───────┘ └─────┬─────┘ └─────┬─────┘  └────────────┘
 │ NextSurface()   │──┐         │                │             │
-│ -> *FBInfo      │  │  NALs   │                │ PCM         │
+│ -> *FBInfo      │  │  AnxB   │                │ PCM         │
 └─────────────────┘  │         │                │             │
                      │         ▼                ▼             │
                      │  ┌──────────────────────────────┐      │
                      │  │       PROTOCOL MODULE        │      │
                      │  │  v1 | 22-byte header         │◀─────┘
-                     │  │  Seq + Timestamp + NAL-LP    │
+                     │  │  Seq + Timestamp + Annex B AU│
                      │  └──────────────┬───────────────┘
                      │                 │
                      │                 ▼
@@ -340,9 +340,9 @@ When adding a new vendor-specific encoder:
                      │
                      │  ┌──────────────────────────────┐
                      └─▶│   HARDWARE ENCODE MODULE     │
-                DMA-BUF │  VA-API zero-copy path       │
-                  fd    │  DMA-BUF → VASurface →       │
-                        │  encode → NALs (GPU-only)    │
+                 DMA-BUF │  VA-API zero-copy path       │
+                   fd    │  DMA-BUF → VASurface →       │
+                         │  encode → Annex B (GPU-only) │
                         └──────────────────────────────┘
 ```
 
@@ -360,7 +360,7 @@ PATH B — Hardware (zero-copy, GPU-resident)  [preferred]:
 PATH A — Software (CPU round-trip)  [fallback / [encode] force_addon = "openh264" or "x264"]:
     capturer.NextFrame() → BGRA []byte (GPU→CPU: ~24MB at 1440p)
     → converter.Convert() → I420 (CPU, SIMD libyuv ARGBToI420)
-    → encoder.Encode() → NALs (CPU; OpenH264 CGo or x264 subprocess — VP8/libavcodec/in-process-x264 rejected)
+    → encoder.Encode() → []byte Annex B AU + keyframe bool (CPU; OpenH264 CGo or x264 subprocess — VP8/libavcodec/in-process-x264 rejected)
     cursorMode = "embedded" (server-side blend) OR "separate"
 ```
 
@@ -380,7 +380,8 @@ type Capturer interface {
 }
 
 type Frame struct {
-    Data      []byte       // Pixel buffer (width * height * 4)
+    Data      []byte       // Pixel buffer (Stride * Height bytes)
+    Stride    int          // Bytes per row; MAY exceed Width*4 (padded readback)
     PixelFmt  PixelFormat  // PixelBGRA (macOS/Windows) or PixelRGBA (Linux GL)
     Width     int          // pixels
     Height    int          // pixels
@@ -408,22 +409,22 @@ const (
 ### Contract 2: Encode -> Server
 
 ```go
-// Encode produces codec-specific packets
+// Encode produces ONE contiguous Annex B access unit + a keyframe flag.
 type Encoder interface {
-    Encode(frame *I420Frame) ([][]byte, error)
+    Encode(frame *I420Frame) (data []byte, keyframe bool, err error)
     ForceKeyframe()
     Close() error
 }
 ```
 
-**Data Flow:** `encoder.Encode(frame)` returns `[][]byte` -> pipeline wraps as `EncodedFrame` -> `server.Broadcast(codecType, EncodedFrame)`
+**Data Flow:** `encoder.Encode(frame)` returns `(data, keyframe)` -> pipeline wraps as `EncodedFrame{Data, Keyframe, …}` -> `server.Broadcast(codecType, EncodedFrame)`
 
 **Contract Rules:**
-- `nil, nil` return means frame was skipped (no error, no output)
-- First frame after `ForceKeyframe()` MUST be a keyframe (H.264: SPS+PPS+IDR)
-- Each `[]byte` element is exactly **one NAL unit, in Annex B form (with the `00 00 00 01` start code)** for H.264.
-- The server concatenates the elements verbatim into one per-frame message payload (no re-framing).
-- Returned byte slices are OWNED by the caller (safe to hold across calls)
+- `nil, false, nil` return means the frame was skipped (no error, no output).
+- First frame after `ForceKeyframe()` MUST be a keyframe (H.264: SPS+PPS+IDR; HEVC: VPS+SPS+PPS+IDR).
+- `data` is **ONE complete access unit**, contiguous Annex B (start codes retained), **NOT** split per-NAL. The old `[][]byte` per-NAL contract is rejected.
+- `keyframe` is set BY THE ENCODER (it knows when it emitted an IDR/IRAP); the server never re-scans NALs.
+- `data` is **borrowed from a `sync.Pool`** — it must NOT be retained past the next `Encode()` call. `server.Broadcast` copies it into the per-session frame-granular out-queue before the loop calls `Encode()` again.
 
 ---
 
@@ -445,53 +446,59 @@ Header layout (little-endian):
 ```
 
 **Frame Types (all server → client):**
-| Type | Value | Payload |
-|------|-------|---------|
-| VideoH264 | 1 | One H.264 access unit: all NALs concatenated, Annex B (keyframe = SPS+PPS+IDR type 5) |
-| Ping | 2 | 8-byte nonce |
-| _(reserved)_ | 3 | Reserved (client Pong routed via JSON text channel) |
-| AudioPCM | 4 | Raw S16LE PCM (Width=SampleRate, Height=Channels) — deferred (audio module paused) |
-| _(reserved)_ | 5 | Formerly VideoVP8 — VP8 codec rejected. Reserved; do not reuse without protocol version bump. |
-| Config | 6 | JSON handshake (codec, dims, fps, hdr, audio, cursorMode, session_token) — sent first, and on change |
-| VideoHEVC | 7 | One HEVC access unit: all NALs concatenated, Annex B (keyframe = VPS+SPS+PPS+IDR types 19-20) |
-| CursorUpdate | 11 | Cursor position + optional image (client-side cursor) |
-| Clipboard | 12 | JSON clipboard push (host → client; see [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)) |
-| InputAck | 14 | Echo of client input seq + server timestamp (RTT) |
-| GamepadRumble | 15 | 9-byte rumble payload (index + magnitudes + duration; see [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) |
+The 22-byte FrameHeader is **media-only** now (datagram fragment 0 + the bootstrap
+stream). Config and Clipboard are NOT FrameHeader types anymore.
 
-One datagram fragment chain = one frame (one access unit). The server NEVER splits a frame's NALs across messages.
+| Type | Value | Channel | Payload |
+|------|-------|---------|---------|
+| VideoH264 | 1 | datagram + bootstrap | One H.264 access unit, Annex B (keyframe = SPS+PPS+IDR type 5) |
+| Ping | 2 | datagram | 8-byte nonce |
+| _(reserved)_ | 3 | — | Reserved (client Pong is a JSON line on the **control stream**) |
+| AudioPCM | 4 | datagram | Raw S16LE PCM (Width=SampleRate, Height=Channels) — deferred (audio module paused) |
+| _(reserved)_ | 5 | — | Formerly VideoVP8 — VP8 rejected. Do not reuse without protocol version bump. |
+| _(retired)_ | 6 | — | Was Config — now a `{"type":"config"}` JSON line on the control stream |
+| VideoHEVC | 7 | datagram + bootstrap | One HEVC access unit, Annex B (keyframe = VPS+SPS+PPS+IDR types 19-20) |
+| CursorUpdate | 11 | datagram | Cursor position + optional image (client-side cursor) |
+| _(retired)_ | 12 | — | Was Clipboard — now `[u32 Len][JSON]` on the **clipboard stream** |
+| InputAck | 14 | input stream | 13-byte echo of client input seq + server timestamp (RTT) |
+| GamepadRumble | 15 | datagram | 9-byte rumble payload (index + magnitudes + duration; see [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) |
+
+One datagram fragment-chain carries exactly one access unit; fragmentation is purely byte-level within that AU (NALs are never reordered or dropped individually).
 
 ---
 
-### Contract 4: Client -> Server (two channels)
+### Contract 4: Client -> Server (per-stream framing)
 
-Client→server uses the WebTransport channel (datagram vs reliable stream) as the
-discriminator (see
-[`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) and [`MODULE_INPUT.md`](./MODULE_INPUT.md)):
+Client→server messages are discriminated by **which stream** they arrive on
+(every stream's first byte is a StreamType tag — see
+[`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md), [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md),
+[`MODULE_INPUT.md`](./MODULE_INPUT.md)):
 
-- **Binary frames:** input events (compact 6-byte record header, types
-  `0x01-0x4F`). Binary for performance + security (measured ~121× faster
-  decode, zero-alloc, smaller attack surface). Type `0x50` is **reserved**
-  for a future webcam frame and is dropped by current binaries.
-- **Text frames (JSON):** rare human-triggered control only.
+- **Input stream (tag 0x01):** `[u16 RecLen]`-prefixed binary input records
+  (6-byte record header + payload, types `0x01-0x4F`). Binary for performance +
+  security (~121× faster decode, zero-alloc, smaller attack surface). Type `0x50`
+  is **reserved** for a future webcam frame and is dropped by current binaries.
+- **Control stream (tag 0x00):** newline-delimited JSON, rare human-triggered control.
+- **Clipboard stream (tag 0x02):** `[u32 Len][JSON]` clipboard messages (off the
+  control stream because payloads reach 1 MiB).
 
 ```
-BINARY  [Version=1][Type][Seq u32][…record…]      // input event (MODULE_INPUT)
-TEXT    {"type":"keyframe"}                         // request IDR
-TEXT    {"type":"resize","width":1280,"height":720}
-TEXT    {"type":"clipboard","format":"text/plain","text":"…"}
-TEXT    {"type":"pong","nonce":12345}
+INPUT  [u16 RecLen][Version=1][Type][Seq u32][…record…]  // input stream (MODULE_INPUT)
+CTRL   {"type":"keyframe"}                                 // control stream — request IDR
+CTRL   {"type":"resize","width":1280,"height":720}         // control stream
+CTRL   {"type":"pong","nonce":12345}                       // control stream
+CLIP   {"type":"clipboard","format":"text/plain","text":"…"} // clipboard stream
 ```
 
 **Coordinate-space rule:** absolute pointer `X`/`Y` are in the **stream
-coordinate space** advertised by the latest `Config` (`width`/`height`). The
+coordinate space** advertised by the latest `config` message (`width`/`height`). The
 injector's absolute range MUST equal that range. Capture, encode, Config, and
 input dims must all agree (no hidden scaling); the pipeline calls
 `Dispatcher.Resize` on a resolution change.
 
 ---
 
-### Contract 5: Audio -> Server
+### Contract 5: Audio -> Server  ⏸️ DEFERRED (audio module paused — banner in MODULE_AUDIO)
 
 ```go
 // Audio delivers fixed-size PCM chunks, each stamped at capture time.
@@ -525,8 +532,9 @@ type AudioChunk struct {
 type SurfaceCapturer interface {
     Capturer
 
-    // NextSurface returns a GPU-resident surface handle.
-    // Caller must call fb.Release() after EncodeSurface completes.
+    // NextSurface returns a GPU-resident surface handle. Ownership passes to the
+    // HW encoder: EncodeSurface calls fb.Release() exactly once on every path
+    // (M-1). The caller releases it ONLY if it is never handed to an encoder.
     NextSurface() (*FBInfo, error)
 }
 
@@ -554,9 +562,11 @@ type FBInfo struct {
 // HardwareEncoder is the contract every HW encoder add-on satisfies.
 // See specs/MODULE_HARDWARE_ENCODE.md for the full contract.
 type HardwareEncoder interface {
-    // EncodeSurface takes a GPU-resident surface handle and returns encoded
-    // H.264/HEVC NALs. The encoder releases the underlying handle when done.
-    // Returns ErrFallbackToSoftware if the handle cannot be imported.
+    // EncodeSurface takes a GPU-resident surface handle and returns ONE
+    // contiguous Annex B access unit (EncodedFrame.Keyframe set by the encoder).
+    // The encoder calls handle.Release() exactly once on EVERY return path
+    // (success, error, fallback). Returns ErrFallbackToSoftware if the handle
+    // cannot be imported (still releasing it).
     EncodeSurface(handle *FBInfo) (*EncodedFrame, error)
 
     // ForceKeyframe requests that the next encoded frame be an IDR.
@@ -571,10 +581,10 @@ type HardwareEncoder interface {
 }
 ```
 
-**Data Flow:** `capturer.NextSurface()` -> `hwEncoder.EncodeSurface(handle)` -> `handle.Release()` -> `server.Broadcast(codecType, *encodedFrame)`
+**Data Flow:** `capturer.NextSurface()` -> `hwEncoder.EncodeSurface(handle)` (which calls `handle.Release()` internally, exactly once) -> `server.Broadcast(codecType, *encodedFrame)`
 
 **Contract Rules:**
-- `FBInfo` ownership is transferred from the capture add-on to the HW encoder add-on. The HW encoder releases the underlying platform handle after `EncodeSurface` returns.
+- `FBInfo` ownership is transferred from the capture add-on to the HW encoder add-on. The HW encoder calls `handle.Release()` **exactly once on every path** (success/error/fallback); the capturer and pipeline never release it (single-owner rule, M-1).
 - If hardware encode returns `ErrFallbackToSoftware`, pipeline degrades permanently to software path for the rest of the session.
 - Codec advertisement: the HW encoder advertises its codec via `Codec()`; the pipeline matches against browser handshake preferences.
 
@@ -588,8 +598,9 @@ type HardwareEncoder interface {
 type EncodedFrame struct {
     Data      []byte // Contiguous Annex B bitstream (start codes retained).
                      // NOT split into per-NAL slices -- avoids decompose/recompose
-                     // copy overhead. The server prepends the 22-byte header and
-                     // sends Data directly (single memcpy into WS frame).
+                     // copy overhead. The server prepends the 22-byte FrameHeader
+                     // and copies Data into the per-session frame-granular
+                     // out-queue (the pump fragments it into datagrams later).
     Width     uint16
     Height    uint16
     Timestamp uint64 // CLOCK_MONOTONIC ns, carried through from capture
@@ -598,9 +609,10 @@ type EncodedFrame struct {
 }
 
 type Server interface {
-    // Broadcast assembles one per-frame message and fans it out.
+    // Broadcast assembles one access unit and fans it out to per-session queues.
     // codecType is FrameTypeVideoH264 or FrameTypeVideoHEVC.
-    // The server assigns the video Sequence and detects/uses Keyframe for IDR caching.
+    // The server assigns the video Sequence and uses f.Keyframe (encoder-set)
+    // for IDR caching + the bootstrap stream.
     Broadcast(codecType uint8, f EncodedFrame)
     BroadcastAudio(chunk AudioChunk)
     // ...
@@ -610,43 +622,45 @@ type Server interface {
 **Contract Rules:**
 - The pipeline carries `Width/Height/Timestamp` from the capture step through encode to here (they are NOT recomputed).
 - The server owns the per-type sequence counters; the pipeline never sets them.
-- `Keyframe` lets the server cache the complete keyframe message (SPS+PPS+IDR) without re-parsing — though the server also verifies via NAL inspection.
+- `f.Keyframe` (set by the encoder) lets the server cache the keyframe access unit (SPS+PPS+IDR / VPS+SPS+PPS+IDR) for the bootstrap stream. The server does **not** re-parse NALs (M-2).
 
 ---
 
 ## Module Dependency Graph
 
 ```
-                pkg/stream (shared types: Params, EncodedFrame, error sentinels)
+                 pkg/stream (shared types: Params, EncodedFrame, error sentinels)
                     │
-    ┌───────────────┼───────────────────────────────────────┐
-    │               │               │               │      │
-    ▼               ▼               ▼               ▼      ▼
- capture         encode          hwencode        server   config
-    │            │    │          │    │             │
-    │            │    └──────────┘    │             ├── protocol
-    │            │     (hwencode      │             ├── auth
-    │            │      imports       │             └── stream
-    │            │      capture       │
-    │            └── capture           │
+    ┌───────────────┼───────────────────────────────────┬──────────┐
+    │               │               │           │       │          │
+    ▼               ▼               ▼           ▼       ▼          ▼
+ capture         encode          hwencode    server  config   transport
+    │            │    │          │    │         │ │              │
+    │            │    └──────────┘    │         │ ├── protocol ◀─┘ (close codes)
+    │            │     (hwencode      │         │ ├── auth
+    │            │      imports       │         │ ├── stream
+    │            │      capture       │         │ └── transport (Transport/Session)
+    │            └── capture          │
     │            (Converter takes     │
     │             *capture.Frame)     │
     ▼                                 ▼
  (per OS,                          (per OS,
   add-on)                           add-on)
 
-              pipeline (imports ALL core interfaces + probes compiled-in add-ons)
+              pipeline (imports ALL core interfaces + builds transport + probes add-ons)
                 │
-    ┌───────────┼───────────┼───────────┼───────────┐
-    ▼           ▼           ▼           ▼           ▼
- capture    encode      hwencode     server      config
+    ┌───────────┼───────────┼───────────┼───────────┼───────────┐
+    ▼           ▼           ▼           ▼           ▼           ▼
+ capture    encode      hwencode     server      config     transport
 ```
 
 > Import edges documented:
 > - `encode -> capture` (Converter takes `*capture.Frame`)
 > - `hwencode -> capture` (`SurfaceHandle = capture.FBInfo`)
 > - `encode, hwencode, capture -> stream` (Params, error sentinels)
-> - `server -> {protocol, auth, stream, input}` (types + auth gate + input dispatch)
+> - `transport -> protocol` (transport references `protocol.Close*`; protocol is the sole owner of the close codes)
+> - `server -> {transport, protocol, auth, stream, input}` (transport surface + types + auth gate + input dispatch)
+> - `pipeline -> transport` (the pipeline builds the QUIC transport via `transport.New` and hands it to the server)
 > - `input` injection add-ons -> `input` core (KeyMouseInjector/TouchInjector + HID table)
 > - `clipboard`, `filetransfer` are core leaves (per-OS files); `server` calls them
 > - No cycles. `stream` is the shared leaf. `pipeline` is the sole orchestrator.
@@ -690,17 +704,18 @@ The orchestrator is now a proper module (`MODULE_PIPELINE.md`) — not inline in
 - Never panic in hot path
 
 ### Buffer Ownership Model
-- **Capture:** Returned `Frame.Data` is BORROWED — valid only until the next `NextFrame()` call. Caller must copy if retaining.
+- **Capture (CPU):** Returned `Frame.Data` is BORROWED — valid only until the next `NextFrame()` call. Caller must copy if retaining.
+- **Capture (surface):** `NextSurface()` returns an `*FBInfo` whose `Release()` is called **exactly once** by the HW encoder's `EncodeSurface` on every path (success/error/fallback). The capturer and pipeline never release it (single-owner rule, M-1).
 - **Convert:** Returned `*I420Frame` is BORROWED — valid only until the next `Convert()` call. Zero-alloc steady state.
-- **Encode:** Returned `[][]byte` NALs are OWNED by caller — freshly allocated, safe to hold indefinitely.
-- **Broadcast:** Server serializes header+payload into a single `[]byte` per frame, then copies into per-client write buffers.
+- **Encode:** Returned `data []byte` is ONE contiguous Annex B access unit, BORROWED from a `sync.Pool` — must NOT be held past the next `Encode()` call. The encoder also returns a `keyframe bool`. (The old "`[][]byte` NALs, freshly allocated, safe to hold" contract is rejected.)
+- **Broadcast:** Server assembles header+payload into one `[]byte` access unit and copies it into the per-session **frame-granular** out-queue; the per-session pump fragments it into datagrams at send time.
 
 **Rule:** Any function that returns borrowed data must document it in the interface comment. The caller must never store borrowed slices beyond the next call boundary.
 
 ### Concurrency Model
 - Capture loop: single goroutine, `runtime.LockOSThread()` (X11/EGL requirement)
 - Encode: synchronous call within capture goroutine (frame drops preferred over pipeline latency)
-- Server broadcast: fan-out via per-client buffered channels
+- Server broadcast: fan-out via per-session frame-granular out-queues (drop-oldest); a per-session pump fragments + sends datagrams
 - Audio: separate goroutine with channel delivery
 - Input: synchronous handler in server's read goroutine
 
@@ -725,12 +740,15 @@ The orchestrator is now a proper module (`MODULE_PIPELINE.md`) — not inline in
 
 ### Connection / Join Flow (no keyframe storm)
 ```
-client connects → server sends Config → server sends cached IDR message (if present)
-  → if NO cached IDR exists: server triggers ForceKeyframe on the active encoder
+client opens control stream (tag 0x00) + auths
+  → server sends {"type":"config"} JSON line on the control stream
+  → server opens a bootstrap stream (tag 0x10) and writes the cached IDR (if present)
+  → if NO cached IDR exists: server forces a keyframe; that first IDR goes on the bootstrap stream
   → otherwise: NO forced keyframe (the cached IDR is self-contained: SPS+PPS+IDR)
-  → client starts decoding from the IDR; sets lastSeq = first received frame's seq
-  → live frames flow; gap detection starts from the 2nd live frame
+  → client decodes the bootstrap IDR (reliable); sets lastSeq = its seq
+  → live datagram frames flow; gap detection starts from the 2nd live datagram frame
 ```
+- The bootstrap stream is reliable, so the join keyframe is always decodable even though live video is lossy datagrams.
 - A join NEVER restarts the capturer (the old `capturer.Restart()` behavior is removed).
 - Keyframe requests (from gap detection or join) are rate-limited by the server (e.g., max 1 forced IDR per 500 ms) to prevent storms when many clients join at once.
 
@@ -738,8 +756,8 @@ client connects → server sends Config → server sends cached IDR message (if 
 ```
 capturer detects resolution change (monitor hotplug / mode switch)
   → NextFrame/NextSurface returns new Width/Height (pipeline detects by comparison)
-  → pipeline: rebuild converter + encoder (new dims), call input.Resize(w,h)
-  → server: send a fresh Config frame (new dims) + force a keyframe
+  → pipeline: applyParams on the frame loop — reconfigure/rebuild encoder, call input.Resize(w,h)
+  → server: send a fresh {"type":"config"} message (new dims) + force a keyframe
   → client: reconfigure VideoDecoder, update input coordinate scaling
 ```
 The pipeline owns this orchestration; no module drives it alone.
@@ -884,7 +902,7 @@ featherdesk/
 | TD-18 | Medium | Protocol | Multiple NALs per frame need grouping into one access unit | One message per frame, Annex B concatenation (TD-23); length-prefix rejected (TD-28) |
 | TD-19 | Medium | Client | Always requests ?role=control (no viewer mode) | R-CLI role selection via URL hash |
 | TD-20 | Medium | Architecture | No orchestrator spec (complex wiring logic undocumented) | MODULE_PIPELINE.md |
-| TD-21 | Low | Server | No connection handshake (client guesses codec) | R-PRO-01: FrameTypeConfig on connect |
+| TD-21 | Low | Server | No connection handshake (client guesses codec) | R-PRO-01: `{"type":"config"}` control-stream message on connect |
 | TD-22 | Low | Pipeline | No frame drop strategy (unbounded latency under load) | Pipeline: 5 FPS floor + skip logic |
 
 ### Round-2 Review Findings (verified against source)

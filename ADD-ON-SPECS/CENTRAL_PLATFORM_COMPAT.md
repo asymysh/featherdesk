@@ -28,11 +28,15 @@
 
 **Client-side decode:**
 No codec negotiation needed. The server picks the best codec it can encode and
-sends it in `FrameTypeConfig`. The client decodes whatever arrives.
+advertises it in the `config` control-stream message. The client decodes
+whatever arrives.
 
-> **Firefox is not a supported browser.** Firefox has no HEVC WebCodecs support.
-> Minimum browser requirement: **Chrome 107+, Edge, Safari 16.4+** (partial
-> WebCodecs; full support Safari 26+). All three support HEVC hardware decode.
+> **Minimum browser: Chrome 107+, Edge 98+, Firefox 130+, Safari 18.2+** (the
+> WebCodecs + WebTransport intersection — see [`../specs/MODULE_CLIENT.md`](../specs/MODULE_CLIENT.md)).
+> **HEVC caveat:** Chrome/Edge/Safari decode HEVC; Firefox's WebCodecs does
+> **not**. A host that selects HEVC (e.g. for HDR) is decodable only by
+> Chromium/WebKit clients — Firefox clients need an H.264 stream (the universal
+> default), so HDR is effectively Chromium/WebKit-only.
 
 ## Codec Support Matrix
 
@@ -89,21 +93,21 @@ were all considered and rejected — see per-OS capture READMEs.
 | Platform | API | Notes |
 |----------|-----|-------|
 | **Linux** | uinput (kernel virtual device) | Requires `/dev/uinput` access |
-| **Windows** | `SendInput` | No special permissions needed |
+| **Windows** | Interception filter driver (+ `SendSAS` for Ctrl+Alt+Del) | Injects **below UIPI** (reaches elevated apps), unlike `SendInput`. Requires the Interception driver installed (LGPL, dynamically linked). |
 | **macOS** | `CGEvent` | Requires Accessibility permission |
 
 ---
 
 ## Protocol — Platform-Agnostic
 
-The wire protocol (`specs/MODULE_PROTOCOL.md`) is identical on all platforms:
-- 22-byte binary header (Version, Type, Sequence, Timestamp, W, H, PayloadSize)
-- `FrameTypeConfig` (type 6) as handshake — carries codec string, dims, cursorMode
+The wire protocol (`../specs/MODULE_PROTOCOL.md`) is identical on all platforms:
+- 22-byte media `FrameHeader` (Version, Type, Sequence, Timestamp, W, H, PayloadSize) — media channels only (datagram fragment 0 + bootstrap stream)
+- `config` JSON message on the **control stream** as handshake — carries codec string, dims, cursorMode (the binary type-6 Config frame is retired)
 - `FrameTypeVideoH264` (type 1) for video — slot 5 reserved (formerly VP8, rejected)
-- `FrameTypeAudioPCM` (type 4) for audio
-- JSON text frames for all client→server messages (input, keyframe request)
+- `FrameTypeAudioPCM` (type 4) for audio (deferred)
+- **Binary** `[u16 RecLen]`-prefixed input records on the **input stream** (C→S); JSON on the **control stream** for keyframe/resize/etc. — input is NOT JSON
 
-The codec in the `Config` handshake is the **full WebCodecs codec string**:
+The codec in the `config` message is the **full WebCodecs codec string**:
 - H.264: `"avc1.42E01F"` (Constrained Baseline 3.1) — universal default
 - AV1: `"av01.0.04M.08"` — RTX 40+ NVIDIA (Ada Lovelace), RDNA3+ AMD (RX 7000+), Intel Arc. **No Apple Silicon has AV1 HW encode** (M3+ has decode only).
 

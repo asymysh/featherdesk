@@ -1,12 +1,12 @@
 # Initial Concept
 
-A low-latency remote desktop streaming server in Go, porting the Windows ViewPort RDS project to Linux with KMS capture, VA-API/OpenH264 encoding, WebSocket streaming, PipeWire audio, and uinput injection.
+A low-latency remote desktop streaming server in Go, porting the Windows FeatherDesk project to Linux with KMS capture, VA-API/OpenH264 encoding, WebSocket streaming, PipeWire audio, and uinput injection.
 
-# ViewPort RDS for Linux
+# FeatherDesk for Linux
 
 ## Vision
 
-ViewPort RDS is a high-performance, low-latency remote desktop streaming server for Linux. It captures the host screen, encodes it using hardware-accelerated VA-API or software OpenH264, and streams H.264 NAL units over WebSocket to connected browser clients. The system supports multi-viewer sessions with role-based access (one controller, many viewers), PipeWire audio capture, and kernel-level input injection via uinput.
+FeatherDesk is a high-performance, low-latency remote desktop streaming server for Linux. It captures the host screen, encodes it using hardware-accelerated VA-API or software OpenH264, and streams H.264 NAL units over WebSocket to connected browser clients. The system supports multi-viewer sessions with role-based access (one controller, many viewers), PipeWire audio capture, and kernel-level input injection via uinput.
 
 The goal is to deliver Parsec/Sunshine-level latency and quality on LAN while remaining lightweight, self-contained, and deployable as a single Go binary.
 

@@ -56,7 +56,7 @@ gracefully so the SW add-on takes over).
 ### Go build tag
 
 ```bash
-go build -tags mf_hw -o viewport-rds-windows-mf-hw.exe ./cmd/server
+go build -tags mf_hw -o featherdesk-windows-mf-hw.exe ./cmd/server
 ```
 
 ### Runtime dependencies

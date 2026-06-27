@@ -66,7 +66,7 @@ ViewportRDS.app/
 └── Contents/
     ├── Info.plist           # must contain CFBundleIdentifier
     └── MacOS/
-        └── viewport-rds     # the actual binary
+        └── featherdesk     # the actual binary
 ```
 
 ### Code-signing requirement (production)
@@ -87,7 +87,7 @@ grants permission as it did pre-26.
 ### Go build tag
 
 ```bash
-go build -tags sck -o viewport-rds-darwin ./cmd/server
+go build -tags sck -o featherdesk-darwin ./cmd/server
 ```
 
 Without the `sck` tag the default macOS binary has no capture backend

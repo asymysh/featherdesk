@@ -21,15 +21,15 @@ ADD-ON-SPECS/macOS/encoders/
 
 | Deployment | Recommended add-on set | Binary |
 |-----------|-----------------------|--------|
-| Generic Mac (commercial default) | `vt_sw` + `vt_hw` | `viewport-rds-macos-default` |
-| Apple Silicon M1+ | `vt_hw` only | `viewport-rds-macos-arm64` |
-| Intel Mac | `vt_sw` + `vt_hw` | `viewport-rds-macos-x86_64` |
-| Cross-platform binary, commercial | `openh264` + `vt_hw` | `viewport-rds-macos-cross-bsd` |
-| Cross-platform binary, home / OSS | `x264` + `vt_hw` | `viewport-rds-macos-cross-gpl` |
+| Generic Mac (commercial default) | `vt_sw` + `vt_hw` | `featherdesk-macos-default` |
+| Apple Silicon M1+ | `vt_hw` only | `featherdesk-macos-arm64` |
+| Intel Mac | `vt_sw` + `vt_hw` | `featherdesk-macos-x86_64` |
+| Cross-platform binary, commercial | `openh264` + `vt_hw` | `featherdesk-macos-cross-bsd` |
+| Cross-platform binary, home / OSS | `x264` + `vt_hw` | `featherdesk-macos-cross-gpl` |
 
 The build tags compose:
 ```bash
-go build -tags "vt_sw,vt_hw,openh264" -o viewport-rds-macos ./cmd/server
+go build -tags "vt_sw,vt_hw,openh264" -o featherdesk-macos ./cmd/server
 ```
 
 ---

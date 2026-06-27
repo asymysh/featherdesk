@@ -12,10 +12,11 @@ datagram delivery, auth handshake on the control stream) live in
 the `transport.Transport` + `transport.Session` interfaces and adds:
 
 - Session bookkeeping (controller slot, viewer list, max-clients enforcement).
-- Per-session goroutines (read control stream, read input stream, accept file
-  transfer streams, queue datagrams out).
-- Broadcast fan-out (one assembled frame goes to every session's datagram queue).
-- Keyframe cache + fast-join replay.
+- Per-session goroutines (read control stream, read input stream, accept
+  clipboard + file-transfer streams, pump frames out).
+- Broadcast fan-out (one assembled access unit goes to every session's
+  **frame-granular** out-queue; the pump fragments at send time).
+- Keyframe cache + **bootstrap-stream** fast-join.
 - Direction + role gating for clipboard / file transfer / parameter changes.
 
 ---
@@ -30,12 +31,12 @@ type Server interface {
     // Start begins listening for connections. Blocks until ctx is cancelled.
     Start(ctx context.Context) error
 
-    // Broadcast assembles ONE per-frame message (header + concatenated NALs)
-    // and fans it out to all clients. The server assigns the video Sequence,
-    // and caches the whole message if it is a keyframe (for fast-join).
-    // codecType is FrameTypeVideoH264 (additional FrameType* values may be
-    // added as new codecs are introduced — VP8 was rejected and its slot
-    // (5) is reserved).
+    // Broadcast assembles ONE access unit (22-byte FrameHeader || Annex B
+    // payload) and fans it out to every session's frame-granular out-queue.
+    // The server assigns the video Sequence and, when f.Keyframe is set BY THE
+    // ENCODER (the server does NOT re-scan the bitstream), caches the assembled
+    // access unit for bootstrap-stream fast-join. codecType is
+    // FrameTypeVideoH264 / FrameTypeVideoHEVC (VP8 was rejected; slot 5 reserved).
     Broadcast(codecType uint8, f EncodedFrame)
 
     // BroadcastAudio sends one PCM chunk to all clients. Server assigns the
@@ -164,16 +165,19 @@ your proxy's QUIC support before deploying.
 ### WebTransport Session Lifecycle
 
 ```
-1. Client opens WebTransport: new WebTransport("https://host:port/wt?role=control|view&...")
-   No credentials in the URL or HTTP headers (browsers can't set them).
+1. Client opens WebTransport: new WebTransport("https://host:port/wt")
+   No credentials, role, or takeover flag in the URL or HTTP headers (browsers
+   can't set them) — they all travel in the control-stream auth message (step 7).
 2. Transport handler upgrades to WebTransport (TLS 1.3, Origin checked per R-SRV-06).
 3. transport.Transport surfaces the new Session on its SessionsChan.
 4. Server-side: spawn a per-session goroutine. The session has NO privileges yet.
-5. Server starts a 5-second auth timer.
-6. Session accepts the FIRST bidirectional stream — this is the CONTROL stream.
-7. Server reads the first JSON message on the control stream:
-       {"type":"auth","token":"<bearer>","role":"control|view","resume":bool,
-        "last_video_seq":N}
+5. Server starts a 5-second auth timer ON SESSION ACCEPT (covers a client that
+   never opens any stream — it is closed at +5s).
+6. streamAcceptor reads the StreamType tag (first byte) of each accepted bidi
+   stream. The CONTROL stream is the one tagged 0x00 (StreamControl); a second
+   0x00 is a protocol error.
+7. Server reads the first JSON line on the control stream:
+       {"type":"auth","token":"<bearer>","role":"control|view","resume":bool}
 8. Authenticator.Authenticate validates the token. See MODULE_AUTH.md.
      - Resume path: if resume=true AND SessionCache.Get(token) hits within TTL,
        skip new-session setup, mark "resumed", jump to step 12.
@@ -185,33 +189,38 @@ your proxy's QUIC support before deploying.
    variant: distinguishable via reason string "max_clients").
 10. Issue new session_token (32-byte random, base64url) → SessionCache.Put.
 11. role check + controller slot:
-     - First control connection wins; subsequent control without `takeover=true`
-       become viewers.
-     - Explicit takeover: `?role=control&takeover=true` honored only when
+     - First control connection wins; subsequent control whose auth message
+       omits `"takeover":true` become viewers.
+     - Explicit takeover (auth message `"takeover":true`) honored only when
        AllowTakeover is true. Displaced controller is closed with
        CloseControllerTakeover (4410).
-12. Write Config frame on the control stream:
-       22-byte FrameHeader(Type=Config) + JSON payload with codec, dims, fps,
-       hdr, cursorMode, session_token, session_ttl_sec, resumed=true|false.
-13. Replay cached IDR via datagrams (fragmented) if a keyframe is cached;
-    if not, invoke onNewClient → pipeline forces a keyframe on active encoder.
-14. Accept the SECOND bidirectional stream from the client — this is the
-    INPUT stream. Spawn an input-reader goroutine that decodes 6-byte-header
-    records and forwards them to input.Dispatcher.Dispatch (controller only).
-15. AcceptStream loop in background: every subsequent bidirectional stream is
-    a file-transfer stream — hand to filetransfer.Service. If a stream's first
-    bytes don't match the file-transfer protocol header, CancelRead+CancelWrite
-    with CloseProtocolError.
-16. Datagram-out queue: per-session bounded channel (cap 32). Broadcast() pushes
-    fragmented frames into it; a per-session writer goroutine drains via
-    session.SendDatagram. Channel full → drop the frame for that client.
-17. Control-stream reader loop dispatches JSON messages (controller only for
+12. Send the config message on the control stream as a JSON line (NOT a binary
+    frame): {"type":"config","codec":…,"width":…,…,"session_token":…,
+    "session_ttl_sec":…,"resumed":true|false}.
+13. Seed the joiner's decoder: open a bootstrap UNI stream (tag 0x10) and write
+    [u32 Len][FrameHeader‖IDR] of the cached access unit, then close it. If NO
+    keyframe is cached yet (very first client), invoke onNewClient → pipeline
+    forces a keyframe; the first encoded IDR is then sent on the bootstrap stream.
+14. INPUT stream: the stream tagged 0x01 (controller role only). Spawn an
+    input-reader goroutine that reads [u16 RecLen]-prefixed records and forwards
+    each to input.Dispatcher.Dispatch; it writes InputAck back length-prefixed.
+15. The same streamAcceptor loop dispatches the remaining tags: 0x02 → clipboard
+    handler (a [u32 Len][JSON] reader/writer; direction+role gated), 0x03 → a new
+    file-transfer stream handed to filetransfer.Service. An unknown tag, or an
+    0x01/0x02 from a view-role client, → CancelRead+CancelWrite(CloseProtocolError).
+16. Frame-out queue: per-session bounded channel of WHOLE access units
+    (cap = datagram_send_queue_frames, default 8; drop-OLDEST on overflow).
+    Broadcast() pushes one assembled access unit per frame; the datagramPump
+    goroutine pulls one frame, fragments it, and calls session.SendDatagram per
+    fragment. NEVER a fragment-granular channel (would corrupt frames mid-send —
+    see MODULE_TRANSPORT "Datagram Fragmentation", fixes T-1).
+17. Control-stream reader loop dispatches JSON lines (controller only for
     role-gated ones):
         resize/set_*           → stream.Manager (drop for viewers)
-        clipboard              → clipboard.Monitor.Set (direction-gated; drop for viewers)
         {"type":"keyframe"}    → rate-limited keyframe-request callback
         {"type":"pong"}        → record RTT
         {"type":"stats"}       → record client telemetry
+    (Clipboard is NOT here — it rides the clipboard stream from step 15.)
 18. Datagram-in loop: ReadDatagram blocks until the client sends one.
     In v1 there are no C→S datagrams (reserved); any datagram received is
     counted in a metric and dropped.
@@ -233,7 +242,8 @@ your proxy's QUIC support before deploying.
   JSON control messages stay well under 4 KB.
 - **Datagram size limit:** QUIC enforces the per-datagram MTU (~1200 bytes)
   natively; the receiver discards any datagram whose 8-byte DatagramHeader
-  is malformed or whose advertised FragCount/FragIndex is out of range.
+  is malformed or whose FragIndex (bits 0-14, LAST = bit 15) is out of range.
+  There is no FragCount field.
 - **Reassembly size cap:** a frame whose total reassembled size would exceed
   16 MB is rejected and the in-progress buffer discarded.
 - **Input rate limit:** per-client token bucket at `server.input_rate_limit`
@@ -265,10 +275,14 @@ type SessionState struct {
     Role        string         // "control" | "view"
     CreatedAt   time.Time
     ExpiresAt   time.Time      // refreshed on each WebTransport connect
-    LastVideoSeq uint32        // for client-driven catch-up (currently informational)
     LastParams  stream.Params  // snapshot of resolution/bitrate/HDR at disconnect
 }
 ```
+
+> There is no `LastVideoSeq` field — resume always reseeds the decoder via a
+> fresh bootstrap-stream IDR, so a stored last-sequence offers no optimization
+> (see MODULE_PROTOCOL "Resume Path"). `LastParams` is kept so a resumed client
+> restarts at the same resolution/bitrate/HDR instead of renegotiating.
 
 TTL comes from `[reconnect] cache_ttl_seconds` (default 300s). The cache is in-memory only — restarting the binary invalidates all sessions. See [`MODULE_AUTH.md`](./MODULE_AUTH.md) and [`MODULE_CONFIG.md`](./MODULE_CONFIG.md).
 
@@ -277,9 +291,11 @@ TTL comes from `[reconnect] cache_ttl_seconds` (default 300s). The cache is in-m
 ```go
 type Session struct {
     wt        transport.Session   // underlying WebTransport session
-    control   transport.Stream    // bidirectional control stream
-    input     transport.Stream    // bidirectional input stream (controller only; nil for viewers)
-    dgramOut  chan []byte         // bounded datagram queue (cap 32; drops on overflow)
+    control   transport.Stream    // bidi control stream (tag 0x00)
+    input     transport.Stream    // bidi input stream (tag 0x01; nil for viewers)
+    clip      transport.Stream    // bidi clipboard stream (tag 0x02; nil until opened)
+    frameOut  chan []byte         // bounded queue of WHOLE access units
+                                  // (cap datagram_send_queue_frames=8; drop-OLDEST)
     role      string              // "control" | "view"
     identity  auth.Identity
     log       *slog.Logger
@@ -287,17 +303,22 @@ type Session struct {
 ```
 
 **Per-session goroutines:**
-- `datagramPump()`: drains `dgramOut` → `wt.SendDatagram()`. QUIC has its own
-  keepalive (configured via `[transport] keepalive_period`).
-- `controlReader()`: reads JSON line-delimited messages on the control stream
-  → dispatches to keyframe/pong/stats/resize/set_*/clipboard handlers.
-- `inputReader()` (controller only): reads 6-byte-header binary records on the
-  input stream → `input.Dispatcher.Dispatch`; writes `InputAck` back on the
-  same stream.
-- `streamAcceptor()`: `wt.AcceptStream` loop; identifies file-transfer streams
-  by their first message and hands them to `filetransfer.Service.ServeStream`.
+- `datagramPump()`: pulls one whole access unit from `frameOut`, fragments it
+  into ≤~1192-byte datagrams, and calls `wt.SendDatagram()` per fragment. Loss
+  is whole-frame, never mid-frame. QUIC has its own keepalive (configured via
+  `[transport] keepalive_period`).
+- `controlReader()`: reads newline-JSON messages on the control stream →
+  dispatches keyframe/pong/stats/resize/set_* (NOT clipboard — see below).
+- `inputReader()` (controller only): reads `[u16 RecLen]`-prefixed binary
+  records on the input stream → `input.Dispatcher.Dispatch`; writes `InputAck`
+  back length-prefixed on the same stream.
+- `clipboardReader()` (started when a 0x02 stream is accepted): reads
+  `[u32 Len][JSON]` clipboard messages → `clipboard.Monitor.Set`
+  (direction+role gated); writes host→client clipboard the same way.
+- `streamAcceptor()`: `wt.AcceptStream` loop; reads each stream's StreamType tag
+  and dispatches (0x01 input, 0x02 clipboard, 0x03 → `filetransfer.Service.ServeStream`).
 
-### Broadcasting (fragmented datagram fan-out)
+### Broadcasting (frame-granular fan-out; pump fragments at send)
 
 ```go
 func (s *Server) Broadcast(codecType uint8, f stream.EncodedFrame) {
@@ -305,44 +326,41 @@ func (s *Server) Broadcast(codecType uint8, f stream.EncodedFrame) {
     //    Sequence=s.videoSeq++ (atomic), Timestamp=f.Timestamp,
     //    Width=f.W, Height=f.H, PayloadSize=len(f.Data).
     // 2. Build header || f.Data into one contiguous []byte = the access unit.
-    // 3. Fragment it into N datagrams of ≤ ~1192 bytes each, with the
-    //    8-byte DatagramHeader (Version, Type, FrameID, FragIndex+LASTflag).
-    //    Fragment 0 starts with the 22-byte FrameHeader; later fragments
-    //    carry only raw payload bytes. See MODULE_PROTOCOL "Datagram
-    //    fragmentation".
-    // 4. If f.Keyframe (verified by inspecting NAL types — IDR type 5 for
-    //    H.264, type 19/20 for HEVC), cache the COMPLETE list of fragments
-    //    under idrMu.
-    // 5. Range over the per-session sessions list: for each session, push
-    //    each fragment into the session's bounded datagram-out channel.
-    //    If a session's channel is full, drop the fragment (and the rest
-    //    of this frame for that session) and increment a per-session
-    //    drop metric — that client will detect the gap and request a
-    //    keyframe, which the server rate-limits.
+    // 3. If f.Keyframe (set by the ENCODER — the server does NOT re-scan NALs),
+    //    store this assembled access unit under idrMu as the bootstrap seed.
+    // 4. Range over the sessions list: push the WHOLE access unit into each
+    //    session's frameOut channel. If the channel is full, drop the OLDEST
+    //    queued frame and enqueue this one (a slow client thus skips stale
+    //    frames cleanly), and increment a per-session drop metric.
+    //    Fragmentation happens later, in datagramPump — NOT here. The queue is
+    //    frame-granular so a slow client never receives a half-sent frame.
 }
 ```
 
-One frame becomes N datagrams (N ≈ frame_bytes / 1192). NALs are never split
-across access units — splitting is only at the datagram granularity within one
-access unit.
+`datagramPump` turns one access unit into N datagrams (N ≈ frame_bytes / 1192)
+with the 8-byte DatagramHeader; fragment 0 starts with the 22-byte FrameHeader,
+later fragments carry only raw payload bytes (see MODULE_PROTOCOL "Datagram
+Fragmentation"). NALs are never split across access units.
 
 ### Keyframe Caching Strategy
 
 - A keyframe is a complete access unit that contains `SPS, PPS, IDR` (H.264) or
-  `VPS, SPS, PPS, IDR` (HEVC). The cache stores **the complete list of
-  fragments** (already prepared with their DatagramHeaders).
-- On `Broadcast`, if `f.Keyframe`, the fragment list is stored under `idrMu`.
-- On new client connect, the server sends, in order: **Config (on control
-  stream) → cached keyframe fragments (as datagrams) → live datagrams**.
+  `VPS, SPS, PPS, IDR` (HEVC). The cache stores **the assembled access unit**
+  (`FrameHeader || Annex B`), NOT pre-fragmented datagrams — because it is
+  delivered over the reliable **bootstrap stream**, not as datagrams.
+- On `Broadcast`, if `f.Keyframe` (encoder-set), the access unit is stored under `idrMu`.
+- On new client connect/resume, the server sends, in order: **config (JSON line
+  on the control stream) → cached IDR (on the bootstrap stream) → live datagrams**.
 - If NO keyframe is cached yet (very first client), the server invokes the
-  new-client callback so the pipeline forces a keyframe on the active encoder.
+  new-client callback so the pipeline forces a keyframe; that first IDR is then
+  written to the bootstrap stream.
 - If a keyframe IS cached, the server does NOT force a new one — the joiner
-  reassembles from the cached fragments. Prevents a keyframe storm.
+  decodes the bootstrap IDR. Prevents a keyframe storm.
 
 **Sequence note for fast-join:** the cached keyframe carries its original
 (possibly old) FrameID/Sequence. The client initializes `lastSeq` from the
-first frame it reassembles and suppresses gap detection on the first live
-transition (see protocol "Fast-Join Reconciliation").
+bootstrap frame and suppresses gap detection on the first live datagram
+transition (see protocol "Fast-Join").
 
 ### Keyframe-Request Rate Limiting
 
@@ -354,10 +372,10 @@ transition (see protocol "Fast-Join Reconciliation").
 ### Controller Model
 
 - Single controller slot (`atomic.Pointer[Client]`)
-- First client with `?role=control` claims the slot via CAS
+- First client whose auth message carries `"role":"control"` claims the slot via CAS
 - Controller receives all input events (keyboard/mouse/wheel)
 - Other clients are passive viewers (no input)
-- When controller disconnects, slot becomes available for next `?role=control` client
+- When controller disconnects, slot becomes available for the next `"role":"control"` client
 
 ---
 
@@ -385,7 +403,7 @@ Replace `InsecureSkipVerify` with configurable origin checking. Default to same-
 Move the `Server` interface and `Config` to a public package. Keep the WebTransport server implementation in `internal/server/`.
 
 ### R-SRV-08: Bandwidth Estimation (now base feature — flows into stream.Manager)
-The server measures RTT (via WS ping/pong, every 10s) and packet-loss proxy (via the `{"type":"stats"}` JSON message: `dropped` counter delta). It feeds these signals to `stream.Manager` every 500ms; the Manager applies the adaptive policy from `[stream.adaptive]` and pushes updated `stream.Params` to the encoder + capturer via the `Configurable*` interfaces. See [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md).
+The server derives RTT from the QUIC connection's **`SmoothedRTT`** (quic-go exposes it via `ConnectionState`), augmented by an app-level `{"type":"ping"}`/`{"type":"pong"}` on the control stream for an end-to-end sample. The fast-path congestion signal is the **server's own datagram-drop rate** (frames dropped from `frameOut` on overflow), NOT the result of `SendDatagram` (which is fire-and-forget and never reports loss), plus the client's `{"type":"stats"}` `dropped` delta. It feeds these signals to `stream.Manager` every 500ms; the Manager applies the adaptive policy from `[stream.adaptive]` and pushes updated `stream.Params` to the encoder + capturer via the `Configurable*` interfaces. See [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md).
 
 ### R-SRV-09: Health Check Endpoint
 `/healthz` endpoint returns 200 `{"status":"ok"}` for load balancer probes. Detailed counters (uptime, clients, frames, bytes/sec, drop rates) live on the Prometheus endpoint (separate port — see MODULE_CONFIG `[metrics]`).
@@ -399,12 +417,12 @@ Allow configurable number of controllers (for pair programming). Input events wo
 
 | Level | What | Hardware Required |
 |-------|------|-------------------|
-| Unit | Status endpoint response format | No |
-| Unit | IDR detection (NAL type parsing) | No |
-| Unit | Client Send with full/empty channel | No |
+| Unit | `/healthz` response format | No |
+| Unit | StreamType tag dispatch (0x00/0x01/0x02/0x03, unknown tag, duplicate 0x00) | No |
+| Unit | frameOut drop-oldest under overflow (no mid-frame fragment drop) | No |
 | Integration | WebTransport handshake + datagram + stream delivery | No |
 | Integration | Client disconnect cleanup (no panic, count=0) | No |
-| Integration | New client receives cached IDR | No |
+| Integration | New client receives bootstrap-stream IDR before live datagrams | No |
 | Integration | Multi-client broadcast fan-out | No |
 | Load | 25 concurrent clients receiving 60fps | No (but resource-heavy) |
 
@@ -415,8 +433,8 @@ Allow configurable number of controllers (for pair programming). Input events wo
 | Metric | Target |
 |--------|--------|
 | Broadcast fan-out (25 clients, 1080p frame) | <2ms |
-| Connection setup (TLS + WS upgrade) | <100ms |
+| Connection setup (TLS 1.3 + WebTransport upgrade) | <100ms |
 | Max clients | 25 (configurable) |
 | Frame drop under load | <5% per slow client |
 | Ping RTT (LAN) | <5ms |
-| Memory per client | <512KB (16 frame buffers × ~32KB each) |
+| Memory per client | <320KB (8 frame buffers × ~32KB each, `datagram_send_queue_frames`) |

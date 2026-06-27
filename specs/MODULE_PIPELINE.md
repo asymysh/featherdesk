@@ -15,15 +15,20 @@ package pipeline
 // and audio (deferred) into a streaming system.
 type Pipeline struct {
     cfg       *config.Config           // parsed TOML config (owned by caller, read-only)
+    registry  *AddonRegistry           // compiled-in capture/encoder add-ons (init()-registered)
+    transport transport.Transport      // QUIC/WebTransport listener; built here, handed to server
     capturer  capture.Capturer
     surfCap   capture.SurfaceCapturer  // nil if capturer doesn't implement SurfaceCapturer
+    converter *encode.Converter        // BGRA/RGBA→I420 (+ scale to output dims); nil on HW path
     encoder   encode.Encoder           // nil if hardware path
     hwEncoder hwencode.HardwareEncoder // nil if software path
     server    server.Server
     input     input.Dispatcher         // nil → view-only (no input add-on compiled in)
     clipboard clipboard.Monitor        // nil if [clipboard] disabled or Probe failed
     files     filetransfer.Service     // nil if [filetransfer] disabled
-    params    stream.Params            // current dynamic stream parameters
+    audio     audio.Capturer           // nil — DEFERRED until MODULE_AUDIO un-defers
+    params    stream.Params            // current dynamic stream parameters (output dims)
+    paramCh   chan stream.Params       // adaptive/control param changes, applied ON the frame loop
     logger    *slog.Logger
     stats     *Stats
     // (audio + webcam deferred; input/clipboard/filetransfer are live modules)
@@ -76,7 +81,11 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
 5. If hardware path errors with ErrFallbackToSoftware mid-session: degrade
    to software path permanently for the rest of the session
 6. Derive stream dims from the capturer's actual resolution (NOT hardcoded).
-7. Create server (embedded client FS, session token).
+6b. Instantiate the QUIC transport: `transport.New(transport.Config{…})` from
+    the `[server]`, `[server.tls]`, and `[transport]` sections (binds the UDP
+    port + TLS). The pipeline owns the transport and hands it to the server.
+7. Create server (embedded client FS, session token), passing it the transport
+    via `server.Config.Transport`.
 8. Probe + create input dispatcher if an input add-on is compiled in AND
    `[input] enabled`: build `KeyMouseInjector` (interception/uinput/cgevent) and
    optional `TouchInjector` (win_touch), sized to the SAME stream dims. If no
@@ -103,7 +112,7 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
 
 Key fixes vs round 1: skip is decided BEFORE capture; `EncodedFrame.Data` is contiguous Annex B (no per-NAL split/rejoin); the server owns the sequence; pacing is capture-to-capture (NOT delivery-to-delivery).
 
-**Allocation strategy:** NAL output buffers and WS message buffers use `sync.Pool` (sized to typical access-unit ~50KB). Steady-state frame loop is zero-alloc after warmup. The `Converter.Convert()` reuses I420 buffers (already documented); the encoder and server must follow the same pattern.
+**Allocation strategy:** the encoder's Annex B output buffer and the server's broadcast access-unit buffers use `sync.Pool` (sized to a typical access unit ~50KB). Steady-state frame loop is zero-alloc after warmup. The `Converter.Convert()` reuses I420 buffers (already documented); the encoder and server must follow the same pattern.
 
 ```go
 func (p *Pipeline) runFrameLoop(ctx context.Context) {
@@ -122,6 +131,16 @@ func (p *Pipeline) runFrameLoop(ctx context.Context) {
     for {
         if ctx.Err() != nil {
             return
+        }
+
+        // (0) Apply any pending parameter changes ON THIS GOROUTINE (M-6).
+        //     stream.Manager / control handlers never touch the encoder directly;
+        //     they send stream.Params into p.paramCh and the frame loop drains it
+        //     here, so Encode and UpdateStreamParams are never concurrent.
+        select {
+        case np := <-p.paramCh:
+            p.applyParams(np)
+        default:
         }
 
         // (1) Skip owed frames from a previous overrun.
@@ -179,18 +198,19 @@ func (p *Pipeline) captureEncode() (EncodedFrame, bool, error) {
 func (p *Pipeline) runHardwareFrame() (EncodedFrame, bool, error) {
     fb, err := p.surfCap.NextSurface()
     if err != nil {
-        if errors.Is(err, hwencode.ErrFallbackToSoftware) {
+        if errors.Is(err, stream.ErrFallbackToSoftware) {
             p.degradeToSoftware()
             return EncodedFrame{}, false, nil
         }
         return EncodedFrame{}, false, err
     }
-    if fb == nil { return EncodedFrame{}, false, nil } // no new frame
+    if fb == nil { return EncodedFrame{}, false, nil } // no new surface this tick
 
-    // HW encoder takes ownership of the FBInfo handle and releases it after encode.
+    // EncodeSurface owns fb: it calls fb.Release() exactly once on EVERY path
+    // (success, error, ErrFallbackToSoftware). The pipeline never releases it.
     encoded, err := p.hwEncoder.EncodeSurface(fb)
     if err != nil {
-        if errors.Is(err, hwencode.ErrFallbackToSoftware) {
+        if errors.Is(err, stream.ErrFallbackToSoftware) {
             p.degradeToSoftware()
             return EncodedFrame{}, false, nil
         }
@@ -205,15 +225,17 @@ func (p *Pipeline) runSoftwareFrame() (stream.EncodedFrame, bool, error) {
     if err != nil { return stream.EncodedFrame{}, false, err }
     if frame == nil { return stream.EncodedFrame{}, false, nil } // static screen
 
-    i420 := p.converter.Convert(frame) // takes *capture.Frame, NOT frame.Data
-    data, err := p.encoder.Encode(i420)
+    i420 := p.converter.Convert(frame) // *capture.Frame → I420, scaled to output dims
+    data, keyframe, err := p.encoder.Encode(i420)
     if err != nil { return stream.EncodedFrame{}, false, err }
-    if len(data) == 0 { return stream.EncodedFrame{}, false, nil }
+    if len(data) == 0 { return stream.EncodedFrame{}, false, nil } // skipped (rate control)
     return stream.EncodedFrame{
-        Data: data, Width: uint16(frame.Width), Height: uint16(frame.Height),
+        // Dims are the ENCODED (output) dims = i420 dims, NOT the native capture
+        // dims — the converter already scaled to the stream resolution.
+        Data: data, Width: uint16(i420.Width), Height: uint16(i420.Height),
         Timestamp: frame.Timestamp,
-        Keyframe:  containsKeyframe(data, p.codecType()),
-        CodecType: protocol.FrameTypeVideoH264, // SW path is always H.264
+        Keyframe:  keyframe,                     // from the encoder (M-2); no NAL re-scan
+        CodecType: protocol.FrameTypeVideoH264,  // SW path is always H.264
     }, true, nil
 }
 
@@ -221,9 +243,38 @@ func (p *Pipeline) runSoftwareFrame() (stream.EncodedFrame, bool, error) {
 func (p *Pipeline) forceKeyframe() {
     if p.hwEncoder != nil { p.hwEncoder.ForceKeyframe() } else { p.encoder.ForceKeyframe() }
 }
+
+// applyParams applies a stream.Params change ON THE FRAME-LOOP GOROUTINE (M-6).
+// One unified path for BOTH client-requested changes (resize/set_bitrate/set_fps/
+// set_hdr arriving via p.paramCh) and capture-detected resolution changes.
+func (p *Pipeline) applyParams(np stream.Params) {
+    dimsChanged := np.Width != p.params.Width || np.Height != p.params.Height
+    // Try in-place reconfigure on the active capturer + encoder; on
+    // stream.ErrRequiresRestart, tear down and rebuild for the new params.
+    if err := p.reconfigureOrRebuild(np); err != nil {
+        p.logger.Error("pipeline", "param change failed", "err", err)
+        return
+    }
+    p.params = np
+    if dimsChanged && p.input != nil {
+        p.input.Resize(np.Width, np.Height) // keep absolute mouse mapping 1:1
+    }
+    p.server.SendConfig(p.currentConfig()) // push fresh {"type":"config"} line
+    p.forceKeyframe()                       // let clients re-init their decoders
+}
+
+// degradeToSoftware permanently swaps the HW path for the SW path mid-session
+// (GPU reset / driver constraint). Builds the Converter + SW encoder, nils
+// hwEncoder/surfCap, forces a keyframe. Called only from the frame-loop goroutine.
+func (p *Pipeline) degradeToSoftware() {
+    p.logger.Warn("pipeline", "hardware encoder unavailable; degrading to software")
+    p.buildSoftwarePath(p.params) // sets p.converter + p.encoder
+    p.hwEncoder, p.surfCap = nil, nil
+    p.forceKeyframe()
+}
 ```
 
-**`containsKeyframe`**: for H.264, scans NALs for type 5 (IDR). **`sleepToInterval(&lastFrameT, interval)`** sleeps until `lastFrameT + interval`, then sets `lastFrameT = now()`. Both are O(1)/cheap.
+**`sleepToInterval(&lastFrameT, interval)`** sleeps until `lastFrameT + interval`, then sets `lastFrameT = now()`. O(1)/cheap. There is no `containsKeyframe` — keyframe status comes from the encoder (`EncodedFrame.Keyframe` on the HW path; the `keyframe` return on the SW path), never a pipeline-side NAL scan.
 
 > **Frame-drop semantics: pull-latest source assumed.** The skip-a-capture strategy assumes the capturer is a **pull-latest** source: a call to `NextFrame` / `NextSurface` always returns the CURRENT framebuffer, so skipping cleanly drops stale frames. This is true for KMS+EGL (Linux), ScreenCaptureKit (macOS), and DXGI Desktop Duplication (Windows). Pipe-based subprocess capturers (X11grab, ffmpeg-based) were rejected from the architecture.
 
@@ -255,25 +306,33 @@ func (p *Pipeline) runAudioLoop(ctx context.Context) {
 
 ### Resolution-Change Handling
 
-The pipeline owns the resolution-change orchestration (no other module drives it):
+The pipeline owns the resolution-change orchestration (no other module drives it).
+Both triggers funnel through the **single** `applyParams` path (defined above),
+so there is exactly one place that mutates the encoder/capturer:
 
 ```go
-// Detected when capture returns a frame with different Width/Height than the
-// current params. No sentinel error needed -- the pipeline compares dimensions.
-func (p *Pipeline) handleResize(newW, newH int) {
-    p.logger.Info("pipeline", fmt.Sprintf("resolution change → %dx%d", newW, newH))
-    // 1. Rebuild software converter + encoder (or reconfigure hw encoder) for new dims.
-    p.rebuildEncoder(newW, newH)
-    // 2. Resize the uinput device so absolute coords still map 1:1 to the stream.
-    if p.input != nil { p.input.Resize(newW, newH) }
-    // 3. Push a fresh Config to all clients (new dims, same codec/cursorMode).
-    p.server.SendConfig(p.currentConfig())
-    // 4. Force a keyframe so clients can re-init their decoders immediately.
-    p.forceKeyframe()
+// Capture-detected change: capture returns a frame whose native dims differ
+// from the current OUTPUT dims AND no explicit downscale is configured. The
+// pipeline builds a Params with the new dims and reuses applyParams — it does
+// NOT have a second, separate resize routine.
+func (p *Pipeline) onCaptureDimsChanged(newW, newH int) {
+    np := p.params
+    np.Width, np.Height = newW, newH
+    p.paramCh <- np   // applied on the frame-loop goroutine (M-6)
 }
+
+// Client-requested changes (resize / set_bitrate / set_fps / set_hdr) arrive via
+// stream.Manager, which likewise sends a stream.Params into p.paramCh.
 ```
 
-Invariant: **capture dims == encoder dims == Config dims == uinput range.** No hidden scaling anywhere; this keeps the client's absolute mouse mapping pixel-accurate.
+`applyParams` resizes input, sends a fresh `{"type":"config"}` line, and forces a
+keyframe (see its definition under "Main Frame Loop"). HDR requested with no
+HEVC/10-bit encoder is rejected there: the server sends `{"type":"hdr_unavailable"}`
+and the stream stays SDR (see [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)).
+
+Invariant: **encoder-output dims == config dims == input-coordinate range.** The
+encoder (HW in-encoder, SW via libyuv `I420Scale`) absorbs any native→output
+scaling; this keeps the client's absolute mouse mapping pixel-accurate.
 
 ### Shutdown Sequence
 
@@ -410,7 +469,7 @@ func (r *RollingStats) Max() time.Duration
 func (r *RollingStats) P99() time.Duration
 ```
 
-**Key improvement:** Fixed-size rolling window (60 samples) instead of unbounded slice. Memory is O(1) regardless of runtime duration. `Stats` is mutex-guarded because the frame loop writes and `/status` reads concurrently.
+**Key improvement:** Fixed-size rolling window (60 samples) instead of unbounded slice. Memory is O(1) regardless of runtime duration. `Stats` is mutex-guarded because the frame loop writes and the Prometheus metrics exporter reads concurrently.
 
 ---
 
@@ -444,7 +503,10 @@ Move all logic from `cmd/server/main.go` into this module. `main.go` should only
 5. Exit
 
 ### R-PIP-02: Make Stats Observable
-Expose stats via the server's `/status` endpoint (already exists) and optionally via Prometheus metrics endpoint (`/metrics`).
+Expose stats via the Prometheus metrics endpoint (`/metrics` on the separate
+metrics port — see MODULE_CONFIG `[metrics]`). The legacy `/status` JSON endpoint
+on the main port is removed; liveness is `/healthz`, detailed counters are
+Prometheus. No unauthenticated observability surface on the main TLS server.
 
 ### R-PIP-03: Hot-Reload Encoder
 If hardware encoder becomes unavailable mid-stream (GPU reset, driver crash), fall back to software encoder without dropping the connection:

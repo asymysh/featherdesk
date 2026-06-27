@@ -119,7 +119,7 @@ func main() {
 	cfg := parseFlags()
 	log := newLogger(cfg)
 
-	log.Info("main", "ViewPort RDS v0.1.0")
+	log.Info("main", "FeatherDesk v0.1.0")
 	log.Info("main", fmt.Sprintf("listening on http://%s:%d/", cfg.bind, cfg.port))
 
 	capKMS := os.Geteuid() == 0

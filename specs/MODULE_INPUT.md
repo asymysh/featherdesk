@@ -45,11 +45,37 @@ binary decode is ~121× faster, zero-allocation, ~70-79% smaller on the wire, an
 has a far smaller attack surface than JSON.
 
 **Channel: input flows on the WebTransport input stream (a dedicated reliable
-bidirectional stream).** See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md):
-- Binary input records (client→server) on the input stream — 6-byte header.
-- InputAck (server→client) on the same input stream — 22-byte header.
-- Rare JSON control (keyframe, pong, stats, resize, set_*, clipboard) flows on
-  the separate **control** stream, not here.
+bidirectional stream, StreamType tag `0x01`).** See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md):
+- A QUIC stream is a byte stream with NO intrinsic message boundaries, so every
+  record is wrapped `[u16 RecLen LE][record]`, BOTH directions.
+- Binary input records (client→server): `[u16 RecLen][6-byte record header + payload]`.
+- InputAck (server→client): `[u16 RecLen=13][13-byte InputAck]` — a 13-byte
+  message `[Type=14 u8][Seq u32 LE][RecvTimestampNs u64 LE]`, **not** a 22-byte
+  FrameHeader (the FrameHeader is media-only now).
+- Rare JSON control (keyframe, pong, stats, resize, set_*) flows on the separate
+  **control** stream; clipboard rides the **clipboard** stream — neither here.
+
+### Stream framing & `ReadFrame`
+
+Because the input stream is a QUIC byte stream, the core provides a single
+helper that reads exactly one length-prefixed record, used by both the server's
+input-reader goroutine and (symmetrically) the client's InputAck reader:
+
+```go
+// ReadFrame reads one [u16 RecLen LE][record] message from r and returns the
+// record bytes (without the length prefix). It bounds RecLen at maxRecLen
+// (4 KiB) and returns io.ErrUnexpectedEOF on a short read, so a single Dispatch
+// call always receives one complete, self-delimited record.
+func ReadFrame(r io.Reader) (record []byte, err error)
+
+// WriteFrame writes [u16 RecLen][record]. Used by the client to send records
+// and by the server to send InputAck.
+func WriteFrame(w io.Writer, record []byte) error
+```
+
+`Dispatcher.Dispatch` operates on the record bytes that `ReadFrame` returns — it
+never sees the length prefix. This is what makes input records unambiguous on the
+byte stream (fixes the "records have no delimiter on a QUIC byte stream" hazard).
 
 ### Shared 6-byte record header
 
@@ -197,6 +223,12 @@ type Event struct {
 
     // Touch
     Contacts []TouchContact
+
+    // Gamepad (types 0x40-0x4F; see MODULE_GAMEPAD.md for GamepadState layout).
+    // The dispatcher decodes the record and routes it to the GamepadInjector.
+    GamepadIndex uint8         // controller slot 0..3
+    Gamepad      *GamepadState // non-nil for KindGamepadState; carries buttons/axes
+    GamepadID    string        // KindGamepadConnect only — browser gamepad id
 }
 
 type EventKind uint8
@@ -207,6 +239,9 @@ const (
     KindButton
     KindScroll
     KindTouch
+    KindGamepadState      // 0x40 — full button/axis snapshot
+    KindGamepadConnect    // 0x41
+    KindGamepadDisconnect // 0x42
 )
 
 type TouchContact struct {
@@ -273,13 +308,24 @@ type InjectorConfig struct {
 // Dispatcher decodes binary input records and routes Events to injectors.
 // Owned by the server; created with whichever add-ons were compiled in.
 type Dispatcher interface {
-    // Dispatch decodes one binary input record and injects it.
-    // Returns the record Seq (for InputAck) and any injection error.
-    // Performs validation + clamping before injection.
+    // Dispatch decodes one binary input record (the record bytes from
+    // input.ReadFrame — no length prefix) and injects it. Returns the record
+    // Seq (for InputAck) and any injection error. Performs validation +
+    // clamping before injection, and records each key/button down in a
+    // pressed-set for ReleaseAll.
     Dispatch(frame []byte) (seq uint32, err error)
 
     // Resize propagates a resolution change to all injectors.
     Resize(width, height int) error
+
+    // ReleaseAll injects an up-event for every key/button/touch currently held,
+    // then clears the pressed-set. The Dispatcher OWNS held-input state — the
+    // server calls ReleaseAll when the controller slot is released or seized
+    // (takeover), and Close calls it too. This prevents a disconnect mid-keypress
+    // from leaving a key stuck down on the host. Injector add-ons may ALSO
+    // release defensively in their own Close, but the authoritative owner is the
+    // Dispatcher (it alone knows the cross-injector pressed-set).
+    ReleaseAll() error
 
     Close() error
 }
@@ -297,10 +343,11 @@ independent add-ons. On Linux, `uinput` provides `KeyMouseInjector` (and may
 later add `TouchInjector`). The dispatcher holds one `KeyMouseInjector` and an
 optional `TouchInjector`, routing by event kind.
 
-**InputAck / latency.** After injecting, the **server** (not this module) emits a
-`FrameTypeInputAck` (type 14) carrying `Seq` + a server-receive timestamp. The
-client measures input round-trip latency from it. `Dispatch` returns the parsed
-`Seq` so the server can ack.
+**InputAck / latency.** After injecting, the **server** (not this module) sends a
+13-byte `InputAck` (type 14) — `[Type=14][Seq u32][RecvTimestampNs u64]`,
+length-prefixed `[u16 RecLen=13]` on the input stream (NOT a 22-byte FrameHeader).
+The client measures input round-trip latency from it. `Dispatch` returns the
+parsed `Seq` so the server can ack.
 
 **Coordinate-space constraint.** `X`/`Y` are already in the stream's pixel space
 (the client scaled them using the latest `Config` width/height). The injector's
@@ -386,8 +433,12 @@ Input stream binary record (client → server)
                 KindScroll     → keyMouse.InjectScroll(dx, dy, unit)
                 KindTouch      → if touch != nil { touch.InjectTouch(contacts) }
                                  else drop
+                KindGamepadState      → if gp != nil { gp.Update(state) } else drop
+                KindGamepadConnect    → if gp != nil { gp.Connect(index, id) } else drop
+                KindGamepadDisconnect → if gp != nil { gp.Disconnect(index) } else drop
+            track pressed keys/buttons (for ReleaseAll on controller change/Close)
             return Seq
-    → server emits InputAck(Seq, recvTimestamp)
+    → server emits InputAck(Seq, recvTimestamp) as [u16 RecLen=13][13-byte ack]
 ```
 
 Only the **controller** client's binary frames reach the dispatcher; viewer

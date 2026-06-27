@@ -27,9 +27,9 @@ no config file") for context.
 ### Startup
 
 1. Parse `--config <path>` flag. If absent, use the OS-conventional default:
-   - Linux: `/etc/viewport/config.toml`, then `$XDG_CONFIG_HOME/viewport/config.toml`, then `./viewport.toml`
-   - macOS: `/Library/Application Support/viewport/config.toml`, then `~/Library/Application Support/viewport/config.toml`, then `./viewport.toml`
-   - Windows: `%PROGRAMDATA%\viewport\config.toml`, then `%APPDATA%\viewport\config.toml`, then `.\viewport.toml`
+   - Linux: `/etc/featherdesk/config.toml`, then `$XDG_CONFIG_HOME/featherdesk/config.toml`, then `./featherdesk.toml`
+   - macOS: `/Library/Application Support/featherdesk/config.toml`, then `~/Library/Application Support/featherdesk/config.toml`, then `./featherdesk.toml`
+   - Windows: `%PROGRAMDATA%\featherdesk\config.toml`, then `%APPDATA%\featherdesk\config.toml`, then `.\featherdesk.toml`
 2. Read the file. Parse into typed Go struct.
 3. Validate. Reject unknown keys (strict mode — typo guard).
 4. Apply defaults for any section that's absent.
@@ -92,7 +92,7 @@ add-on. Examples:
 ## Schema
 
 ```toml
-# viewport.toml — example with every supported key shown at its default.
+# featherdesk.toml — example with every supported key shown at its default.
 
 [server]
 bind         = "0.0.0.0:30084"    # UDP listen address for HTTP/3 + WebTransport (restart required)
@@ -122,6 +122,9 @@ max_streams_bidi        = 16      # cap on concurrent bidi streams per session
 max_streams_uni         = 16      # cap on concurrent uni streams (rarely used)
 enable_datagrams        = true    # MUST be true; required for video
 fragment_reassembly_ms  = 17      # drop deadline at 60 fps; use 34 at 30 fps
+datagram_send_queue_frames = 8    # per-session out-queue depth in WHOLE frames
+                                  # (drop-oldest). Frame-granular, never per-fragment.
+auth_deadline           = "5s"    # close unauthed sessions (CloseAuthTimeout 4408)
 
 [log]
 format = "auto"     # "auto" | "json" | "text"
@@ -210,7 +213,7 @@ token              = ""              # explicit token; "" = auto-generate 32-byt
 token_file         = ""              # write generated token here (mode 0600) for ops tooling
 session_ttl_minutes = 60             # auth session lifetime
 
-# Password mode (requires "viewport-rds hash-password" to generate)
+# Password mode (requires "featherdesk hash-password" to generate)
 password_hash      = ""              # argon2id hash
 
 # PIN mode (first-launch pairing)
@@ -218,14 +221,14 @@ pin_length             = 8           # 8-digit PIN (100M possibilities). Min 6, 
 pairing_window_minutes = 5
 max_pin_attempts       = 10          # global limit per window (not per-IP). Exponential
                                      # backoff: 1s, 2s, 4s, 8s... after 3rd failure.
-paired_devices_file    = ""          # e.g. "/var/lib/viewport-rds/paired.json" (mode 0600)
+paired_devices_file    = ""          # e.g. "/var/lib/featherdesk/paired.json" (mode 0600)
 
 # Authorization
 require_auth_for_view = true         # SECURE DEFAULT. Viewers must also authenticate.
                                      # Set false only for trusted LANs / demos.
 allow_takeover        = false        # SECURE DEFAULT. Controller slot is locked.
                                      # When takeover occurs, displaced controller gets
-                                     # WS close code 4410 with reason "controller_takeover".
+                                     # QUIC close code 4410 with reason "controller_takeover".
 
 # OAuth (deferred — interface defined, no implementation in v1)
 # oauth_provider     = "google" | "github" | "azure" | "okta"
@@ -478,6 +481,12 @@ layout          = "standard"  # v1: "standard" Standard Gamepad layout only
 | `server.bind` | `host:port` form; port 1–65535 | startup error |
 | `server.bind` | parseable as IP or hostname | startup error |
 | `server.tls.cert` / `server.tls.key` | both empty OR both set + readable | startup error |
+| `transport.enable_datagrams` | MUST be `true` (video requires datagrams) | startup error |
+| `transport.fragment_reassembly_ms` | 1–1000 | startup error |
+| `transport.datagram_send_queue_frames` | 1–64 (whole-frame out-queue depth) | startup error |
+| `transport.max_streams_bidi` | ≥ 4 (control + input + clipboard + ≥1 file) | startup error |
+| `transport.keepalive_period` / `max_idle_timeout` / `auth_deadline` | parseable duration; `keepalive_period < max_idle_timeout` | startup error |
+| `transport.initial_max_data` / `initial_max_stream_data` | parseable byte size; `initial_max_data ≥ initial_max_stream_data` | startup error |
 | `log.format` | one of `auto`/`json`/`text` | startup error |
 | `log.level` | one of `debug`/`info`/`warn`/`error` | startup error |
 | `log.output` | `stderr` / `stdout` / writable file path | startup error |
@@ -529,6 +538,8 @@ On SIGHUP (or Windows equivalent):
 | `[server]` `bind` / `port` | ❌ | restart required |
 | `[server.tls]` | ❌ | restart required |
 | `[server]` `allow_origin` | ✅ | applies on next upgrade |
+| `[transport]` flow-control / stream caps / `enable_datagrams` | ❌ | restart required (set on the QUIC listener at bind) |
+| `[transport]` `fragment_reassembly_ms` / `datagram_send_queue_frames` / `auth_deadline` | ✅ | applied to new frames / sessions |
 | `[log]` | ✅ | new handler created, in-flight writes complete on old handler |
 | `[metrics]` `enabled` | ✅ | start/stop the listener |
 | `[metrics]` `port`/`bind` | ❌ | restart required |
@@ -552,6 +563,10 @@ package config
 
 type Config struct {
     Server    ServerSection    `toml:"server"`
+    Transport TransportSection `toml:"transport"`  // QUIC tunables — MUST exist as a
+                                                    // struct field, else DisallowUnknownFields
+                                                    // rejects every config that has a [transport]
+                                                    // section (the schema ships one by default).
     Log       LogSection       `toml:"log"`
     Metrics   MetricsSection   `toml:"metrics"`
     Capture   CaptureSection   `toml:"capture"`
@@ -567,6 +582,28 @@ type Config struct {
     // Per-addon sections ([addon_module_*]) are parsed dynamically by each
     // add-on's init config reader -- they do not appear as static struct fields.
 }
+
+// TransportSection maps the [transport] schema. Duration + byte-size values are
+// written as TOML strings ("15s", "10MiB"), so the fields use small wrapper
+// types implementing encoding.TextUnmarshaler — BurntSushi/toml will not decode
+// "15s" into a bare time.Duration or "10MiB" into an int64 on its own.
+type TransportSection struct {
+    KeepalivePeriod         Duration `toml:"keepalive_period"`
+    MaxIdleTimeout          Duration `toml:"max_idle_timeout"`
+    InitialMaxData          ByteSize `toml:"initial_max_data"`
+    InitialMaxStreamData    ByteSize `toml:"initial_max_stream_data"`
+    MaxStreamsBidi          int      `toml:"max_streams_bidi"`
+    MaxStreamsUni           int      `toml:"max_streams_uni"`
+    EnableDatagrams         bool     `toml:"enable_datagrams"`
+    FragmentReassemblyMs    int      `toml:"fragment_reassembly_ms"`
+    DatagramSendQueueFrames int      `toml:"datagram_send_queue_frames"`
+    AuthDeadline            Duration `toml:"auth_deadline"`
+}
+
+// Duration and ByteSize wrap their underlying values and implement
+// encoding.TextUnmarshaler ("15s" → time.Duration; "10MiB" → bytes).
+type Duration struct{ time.Duration }
+type ByteSize int64
 
 // Load parses + validates the config at path, applies defaults, and returns
 // a fully-populated Config. Errors are clear and actionable (file + line + key).

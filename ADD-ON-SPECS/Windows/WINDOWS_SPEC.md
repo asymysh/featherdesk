@@ -128,16 +128,16 @@ alongside MF HW.
 
 ## Audio + Input
 
-⏸️ **Deferred.** The Windows audio (WASAPI loopback) and input (SendInput, ViGEmBus,
-InjectSyntheticPointerInput) sections have been deliberately removed from this
-document to keep the focus on the capture and encode pipeline.
+⏸️ **Deferred.** The Windows audio (WASAPI loopback) and input (Interception
+driver, `win_touch` InjectTouchInput, ViGEmBus) sections have been deliberately
+removed from this document to keep the focus on the capture and encode pipeline.
 
 When we resume work on audio and input, the existing core specs remain authoritative:
 - [`specs/MODULE_AUDIO.md`](../../specs/MODULE_AUDIO.md)
 - [`specs/MODULE_INPUT.md`](../../specs/MODULE_INPUT.md)
 
 This platform spec will be updated with Windows-specific details (WASAPI loopback,
-SendInput, optional ViGEmBus for gamepads) at that point.
+Interception driver, `win_touch`, optional ViGEmBus for gamepads) at that point.
 
 ---
 

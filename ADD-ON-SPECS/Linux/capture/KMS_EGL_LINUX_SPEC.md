@@ -55,7 +55,7 @@ proprietary remains a valid fallback.
 
 Grant the capability once at install time:
 ```bash
-sudo setcap cap_sys_admin+p ./viewport-rds
+sudo setcap cap_sys_admin+p ./featherdesk
 ```
 
 After that, the binary runs as a regular user.
@@ -67,7 +67,7 @@ After that, the binary runs as a regular user.
 ### Go build tag
 
 ```bash
-go build -tags kms_egl -o viewport-rds-linux-kms ./cmd/server
+go build -tags kms_egl -o featherdesk-linux-kms ./cmd/server
 ```
 
 ### Runtime dependencies

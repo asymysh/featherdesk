@@ -76,12 +76,20 @@ to it via a channel.
 space** — the union of all monitors' physical pixel grids. Two corrections vs
 the naive read are mandatory:
 
-1. **DPI awareness.** Before the FeatherDesk process makes any UI / metrics
-   calls, it MUST call
-   `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`
-   (or carry the equivalent application manifest). Otherwise
-   `GetSystemMetrics(SM_CXSCREEN)` returns DPI-scaled (logical) pixels and
-   touch lands at the wrong physical position on every HiDPI display.
+1. **DPI awareness (owned by the process entry point, NOT this add-on).**
+   `PER_MONITOR_AWARE_V2` is **process-global and may be set only once**, before
+   any DPI-dependent call — and the `dxgi_dd` capture add-on depends on it too
+   (for correct physical surface dimensions). So it MUST be established **once at
+   process startup**, owned by the FeatherDesk entry point via the **application
+   manifest** (`<dpiAwareness>PerMonitorV2</dpiAwareness>`, the most robust path)
+   or a single early `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`
+   call. This add-on does **not** set it (a lazy set at injector-create time would
+   be too late and could race the capture add-on). Instead, at `New()` it
+   **verifies** the context via `GetThreadDpiAwarenessContext` /
+   `AreDpiAwarenessContextsEqual` and returns an actionable error if the process
+   is not PER_MONITOR_AWARE_V2 — because otherwise `GetSystemMetrics(SM_CXSCREEN)`
+   returns DPI-scaled (logical) pixels and touch lands at the wrong physical
+   position on every HiDPI display.
 2. **Virtual-screen metrics, not SM_CXSCREEN.** On any multi-monitor setup
    `SM_CXSCREEN` only covers the primary display. Use:
    ```c

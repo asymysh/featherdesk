@@ -51,7 +51,7 @@ encoder + supported codecs.
 ## Build & Distribution
 
 ```bash
-go build -tags qsv -o viewport-rds-windows-qsv.exe ./cmd/server
+go build -tags qsv -o featherdesk-windows-qsv.exe ./cmd/server
 ```
 
 CGo config:

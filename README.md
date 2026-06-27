@@ -53,9 +53,35 @@ Plus deferred specs (`MODULE_AUDIO`) and the [`ADD-ON-SPECS/`](./ADD-ON-SPECS/) 
 
 | Phase | What lands |
 |---|---|
-| **v1** | Browser client over HTTP/3 + WebTransport (QUIC). No Tailscale. WSS / fallbacks are NOT supported — modern browsers only (Chrome 97+, Edge 98+, Firefox 114+, Safari 18.2+). Connectivity is the user's network problem (LAN, port forward, or their own Tailscale / Cloudflare Tunnel). |
+| **v1** | Browser client over HTTP/3 + WebTransport (QUIC). No Tailscale. WSS / fallbacks are NOT supported — modern browsers only (Chrome 107+, Edge 98+, Firefox 130+, Safari 18.2+; the
+floor is set by WebCodecs availability — Chrome 107 / Firefox 130 — not just WebTransport). Connectivity is the user's network problem (LAN, port forward, or their own Tailscale / Cloudflare Tunnel). |
 | **v2** | Native FeatherDesk client (Windows / macOS / Linux). Built around WebTransport (QUIC) for transport. Embeds `tsnet`. The auth-key paste flow ships here — host generates a single sharing key that bundles a Tailscale pre-auth key + FeatherDesk session token + host address; client pastes it once and is connected to the tailnet AND the FeatherDesk host in one step. |
 | **v3+** | Mobile clients (iOS / Android) with the same auth-key paste flow. |
+
+## Roadmap (next steps)
+
+The spec phase is complete and audited. The path from here:
+
+1. **Implementation — Linux-first vertical slice.** Build the minimal end-to-end
+   path that puts one real captured frame on screen in a browser:
+   `config → transport → server → kms_egl (capture) → openh264 (encode) →
+   pipeline → browser`. Each stage is the smallest viable implementation of its
+   module spec; once a single frame round-trips, the remaining add-ons and
+   features layer onto a proven pipeline.
+
+2. **`MODULE_NETWORK.md` — Tailscale add-on (v2 enabler).** Spec the
+   listener-provider pattern: the server asks `network.GetListener()` and gets
+   a plain TCP/UDP listener by default, or a Tailscale-backed (`tsnet`) listener
+   when the `tailscale` add-on is compiled in. Includes the one-click auth flow,
+   Funnel (public exposure) as a config flag, Headscale support, and the
+   binary-size note. This is the connectivity half of the v2 story.
+
+3. **`MODULE_NATIVE_CLIENT.md` (promote `FUTURE_NATIVE_CLIENT.md`).** When v2
+   work begins, promote the historical doc to a live module spec and add the
+   **auth-key paste flow**: host generates one sharing key (Tailscale pre-auth
+   key + FeatherDesk session token + host address, base64-bundled); the native
+   client decodes it, joins the tailnet via embedded `tsnet`, and connects to
+   the host in a single paste. This is the transport + UX half of the v2 story.
 
 ## License
 

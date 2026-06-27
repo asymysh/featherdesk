@@ -66,7 +66,7 @@ use. Users on pure open-source Mesa get VA-API (the default binary path) only.
 ### Go build tag
 
 ```bash
-go build -tags amf_rocm -o viewport-rds-linux-amf ./cmd/server
+go build -tags amf_rocm -o featherdesk-linux-amf ./cmd/server
 ```
 
 The `amf_rocm` build tag pulls in `internal/encode/amf/` package.

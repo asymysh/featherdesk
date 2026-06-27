@@ -1,12 +1,12 @@
-# Product Guidelines - ViewPort RDS
+# Product Guidelines - FeatherDesk
 
 ## Naming & Identity
 
-- **Project name:** ViewPort RDS
-- **Binary name:** `viewport-rds`
-- **CLI prefix:** `viewport-rds [flags]`
-- **Log prefix:** `[viewport-rds]`
-- **Service name:** `viewport-rds.service` (systemd)
+- **Project name:** FeatherDesk
+- **Binary name:** `featherdesk`
+- **CLI prefix:** `featherdesk [flags]`
+- **Log prefix:** `[featherdesk]`
+- **Service name:** `featherdesk.service` (systemd)
 
 ## Code Style
 

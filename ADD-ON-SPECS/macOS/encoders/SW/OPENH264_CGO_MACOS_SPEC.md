@@ -58,7 +58,7 @@ M2 Pro = 12 cores), 4 threads is the practical ceiling.
 ### Go build tag
 
 ```bash
-GOOS=darwin go build -tags openh264 -o viewport-rds-macos ./cmd/server
+GOOS=darwin go build -tags openh264 -o featherdesk-macos ./cmd/server
 ```
 
 ### Runtime dependency

@@ -71,7 +71,7 @@ NvFBC has been in every NVIDIA proprietary driver from ~2014 onward. Supported o
 ### Go build tag
 
 ```bash
-go build -tags nvfbc -o viewport-rds-linux-nvfbc-capture ./cmd/server
+go build -tags nvfbc -o featherdesk-linux-nvfbc-capture ./cmd/server
 ```
 
 The `nvfbc` build tag pulls in `internal/capture/nvfbc/` package.

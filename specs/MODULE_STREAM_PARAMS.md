@@ -63,15 +63,16 @@ type Params struct {
     ColorSpace string // "bt709" (SDR) | "bt2020" (HDR)
 
     // ── Keyframe behavior ───────────────────────────────────────
-    // 0 = on-demand only (current default — client requests via JSON text)
+    // 0 = on-demand only (current default — client requests {"type":"keyframe"}
+    //     on the control stream)
     // >0 = periodic IDR every N frames (only useful for stateless clients)
     KeyframeInterval int
 
     // ── Adaptive signals (pipeline measures, feeds back) ────────
     // These are READ-ONLY from add-ons' perspective — set by pipeline
     // based on network telemetry. Add-ons use them only as hints.
-    NetworkRTTMs       int     // Last-measured round-trip time
-    PacketLossPct      float64 // Smoothed packet loss percentage
+    NetworkRTTMs       int     // From QUIC SmoothedRTT + app ping/pong
+    PacketLossPct      float64 // Smoothed; from server datagram-drop rate + client stats
 }
 ```
 
@@ -93,8 +94,10 @@ var (
     ErrRequiresRestart = errors.New("stream: parameter change requires add-on restart")
 
     // ErrHDRUnsupported is returned by UpdateStreamParams when an encoder
-    // cannot produce HDR output (8-bit only). Pipeline switches to an
-    // HEVC-capable encoder.
+    // cannot produce HDR output (8-bit only). The pipeline switches to an
+    // HEVC-Main10-capable encoder IF one is compiled in; if NONE is available
+    // (terminal case), the pipeline rejects the HDR request, sends the client
+    // {"type":"hdr_unavailable"} on the control stream, and stays SDR.
     ErrHDRUnsupported = errors.New("stream: encoder does not support HDR/10-bit")
 
     // ErrFallbackToSoftware is returned by EncodeSurface (HW encoder) or
@@ -105,12 +108,16 @@ var (
 )
 
 // Manager coordinates dynamic parameter changes across the pipeline.
-// The server feeds client-driven changes (resize, set_bitrate, set_fps)
-// and bandwidth-adaptation signals into the Manager, which applies them
-// to the active encoder + capturer via the Configurable* interfaces.
+// The server feeds client-driven changes (resize, set_bitrate, set_fps) and
+// bandwidth-adaptation signals into the Manager, which clamps/applies hysteresis
+// and computes the effective Params. It does NOT call UpdateStreamParams itself
+// — it hands the effective Params to the pipeline's paramCh so the change is
+// applied ON THE FRAME-LOOP GOROUTINE (M-6: Encode and UpdateStreamParams are
+// never concurrent). See MODULE_PIPELINE "applyParams".
 type Manager interface {
-    // Apply attempts to apply new parameters. Returns the effective params
-    // (which may differ from requested due to clamping/hysteresis).
+    // Apply clamps + records the requested params and enqueues the effective
+    // result for the frame loop. Returns the effective params (which may differ
+    // from requested due to clamping/hysteresis).
     Apply(requested Params) (effective Params, err error)
 
     // Current returns the active parameters.
@@ -170,7 +177,7 @@ Each add-on translates `stream.Params` to its native concepts:
 
 | `stream.Params` field | KMS+EGL | NvFBC | SCK (macOS) | DXGI DD |
 |----------------------|---------|-------|-------------|---------|
-| `Width`, `Height` | Output is native — pipeline scales via libyuv or GL blit | Output is native — pipeline scales | `SCStreamConfiguration.{width,height}` (requires `updateConfiguration:`) | Output is native — pipeline scales via D3D11 blit |
+| `Width`, `Height` | Native capture; the **encoder** scales (SW: libyuv `I420Scale`; HW: in-encoder) | Native capture; encoder scales | Native capture; encoder scales (SCK *can* also scale via `SCStreamConfiguration.{width,height}`, but default is encoder-scale to keep the invariant) | Native capture; encoder scales |
 | `FPS` | Pipeline pacing (capture is event-driven) | Pipeline pacing | `SCStreamConfiguration.minimumFrameInterval` (hot) | `IDXGIOutputDuplication::AcquireNextFrame` timeout |
 | `BitDepth=10` + `HDR` | Request `DRM_FORMAT_XRGB2101010` framebuffer (driver-dependent) | NvFBC supports HDR via `NVFBC_FRAME_GRAB_FLAGS_NOWAIT` + 10-bit pixel format | `SCStreamConfiguration.pixelFormat = kCVPixelFormatType_64RGBALeAccurate` (requires macOS 14+) | `DXGI_FORMAT_R10G10B10A2_UNORM` (requires HDR enabled in Display Settings) |
 | `ColorSpace` | Reported per surface metadata; pipeline annotates encoder | Reported per surface | Set automatically based on display | `IDXGIOutput6::GetDesc1()` → `DXGI_OUTPUT_DESC1.ColorSpace` |
@@ -196,14 +203,21 @@ profile is in the WebCodecs spec).
 3. Switch encoder selection:
    - Reject H.264-only encoders (OpenH264, x264 standard build)
    - Require HEVC Main10 capable: NVENC, AMF, MF HW HEVC, VT HW HEVC
+   - TERMINAL CASE: if NO HEVC-Main10 encoder is compiled in, the HDR request
+     is rejected — the server sends {"type":"hdr_unavailable"} on the control
+     stream and the session STAYS SDR (H.264, bt709). The pipeline does not
+     half-switch capture to 10-bit. This is the only graceful failure mode.
 4. Configure capture add-on:
    - UpdateStreamParams() with BitDepth=10, HDR=true, ColorSpace="bt2020"
    - Capture re-initializes with 10-bit pixel format
 5. Configure encoder add-on:
    - UpdateStreamParams() — encoder switches to HEVC Main10 profile
-   - SEI HDR10 metadata block prepended to first NAL of every IDR
-6. Issue Config handshake to client:
-   - codec = "hvc1.2.4.L93.B0" (HEVC Main10 Profile 3.1)
+   - The ENCODER ADD-ON owns SEI insertion: it emits the HDR10 mastering-display
+     + content-light-level SEI NALs inside each keyframe access unit
+     (VPS + SPS + PPS + prefix-SEI + IDR). The pipeline/server never synthesize
+     SEI — they only carry the bytes the encoder produced.
+6. Issue config handshake to client:
+   - codec = "hvc1.2.4.L93.B0" (HEVC Main10, Level 3.1)
    - Add hdr_metadata block with display mastering + content light level
 7. Client configures VideoDecoder:
    - {codec: "hvc1.2.4.L93.B0", hardwareAcceleration: "prefer-hardware"}
@@ -240,23 +254,22 @@ the policy; add-ons translate.
    │ window.onresize fires               │                              │
    │ debounce 250ms                      │                              │
    │                                     │                              │
-   ├─ JSON text: {"type":"resize",       │                              │
+   ├─ control-stream JSON: {"type":"resize",                            │
    │  "width":1920, "height":1080}       │                              │
    ├─────────────────────────────────────>                              │
    │                                     │ validate against display     │
    │                                     │ (clamp to native dims)       │
-   │                                     ├─────────────────────────────>│
-   │                                     │                              │ params.Width = 1920
-   │                                     │                              │ params.Height = 1080
-   │                                     │                              │ ApplyStreamParams()
+   │                                     ├──── paramCh ────────────────>│
+   │                                     │                              │ effective Params{W:1920,H:1080}
+   │                                     │                              │ applyParams() on the FRAME LOOP:
    │                                     │                              │   → capture.UpdateStreamParams
    │                                     │                              │   → encoder.UpdateStreamParams
    │                                     │                              │     (or restart if required)
    │                                     │                              │ ForceKeyframe (new dims invalidate
    │                                     │                              │  reference frames)
    │                                     │                              │
-   │                                     │ Send fresh Config frame      │
-   │                                     │ with new width/height        │
+   │                                     │ Send fresh config message    │
+   │                                     │ (JSON line) new width/height │
    │ <───────────────────────────────────┤                              │
    │                                     │                              │
    │ Reconfigure VideoDecoder            │                              │
@@ -285,20 +298,23 @@ the policy; add-ons translate.
 
 ## Bandwidth Adaptation (Pipeline-Owned)
 
-The pipeline monitors network telemetry (RTT, packet loss from WebTransport / QUIC connection telemetry
-+ client stats messages) and feeds adaptive signals into
-`stream.Params`:
+The pipeline monitors network telemetry (QUIC `SmoothedRTT` + app ping/pong for
+RTT; the server's own datagram-drop rate + client stats messages for loss) and
+feeds adaptive signals into `stream.Params`:
 
 ```
 [telemetry loop, runs every 100ms]
    ↓
-measure RTT (WS pong), PacketLossPct (client stats), send-side timing
+measure RTT (QUIC SmoothedRTT + app ping/pong),
+        PacketLossPct (server frameOut-drop rate + client stats)
    ↓
 update params.NetworkRTTMs, params.PacketLossPct
    ↓
 [adaptation policy — two-tier response]
-   FAST path (send-side): if conn.Write() takes > 2× target interval,
-       immediate 0.5× bitrate reduction (single measurement, no window)
+   FAST path (server-side): the datagram out-queue (frameOut) is dropping frames
+       on overflow — the server, not the client, observes this immediately
+       (SendDatagram is fire-and-forget and reports nothing). On a sustained
+       drop spike: immediate 0.5× bitrate reduction (single measurement).
    SLOW path (client feedback):
        if PacketLossPct > 5% for 2 consecutive 100ms windows (200ms):
            new_bitrate = max(current * 0.7, min_bitrate)
@@ -306,9 +322,9 @@ update params.NetworkRTTMs, params.PacketLossPct
            new_bitrate = min(current * 1.1, max_bitrate)
    ↓
 if new_bitrate != current:
-   params.BitrateBps = new_bitrate
-   encoder.UpdateStreamParams(params)
-   (skip Config handshake — bitrate change is transparent to client)
+   effective.BitrateBps = new_bitrate
+   send effective Params to pipeline.paramCh   // applied on the frame loop (M-6)
+   (no config message — a bitrate change is transparent to the client decoder)
 ```
 
 ### Bounds and policy knobs

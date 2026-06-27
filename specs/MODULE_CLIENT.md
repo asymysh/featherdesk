@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Client module is the browser-based viewer and controller. It connects to the server via **WebTransport (QUIC)** over HTTPS, decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back on a dedicated **reliable input stream** as compact 6-byte-header binary records (see [`MODULE_INPUT.md`](./MODULE_INPUT.md)). Media (video, audio, cursor, gamepad rumble, ping) arrives as **unreliable datagrams** with application-level fragment reassembly; rare control messages (keyframe req, resize, clipboard, etc.) flow as JSON on the **reliable control stream**. See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) for the channel model.
+The Client module is the browser-based viewer and controller. It connects to the server via **WebTransport (QUIC)** over HTTPS, decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back on a dedicated **reliable input stream** as `[u16 RecLen]`-prefixed binary records (see [`MODULE_INPUT.md`](./MODULE_INPUT.md)). Media (video, audio, cursor, gamepad rumble, ping) arrives as **unreliable datagrams** with application-level fragment reassembly; the first keyframe arrives on a reliable **bootstrap stream**; rare control messages (keyframe req, resize, set_*, pong, stats) flow as newline-JSON on the **reliable control stream**; clipboard rides its own **clipboard stream**. Every stream's first byte is a `StreamType` tag. See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) for the channel model.
 
 ---
 
@@ -15,8 +15,8 @@ The client is a single-page application embedded in the server binary via `go:em
 |------|---------|
 | `index.html` | HTML shell: canvas, cursor overlay, status overlay, `<script type="module">` |
 | `main.js` | Entry point, reads role, wires modules |
-| `connection.js` | WebTransport connect/reconnect, control + input stream setup, datagram reassembly, control dispatch |
-| `protocol.js` | 22-byte header parse, Config parse |
+| `connection.js` | WebTransport connect/reconnect, StreamType-tagged control/input/clipboard stream setup, bootstrap + datagram reassembly, control dispatch |
+| `protocol.js` | 22-byte media FrameHeader parse, 8-byte DatagramHeader parse, control/clipboard JSON helpers |
 | `decoder.js` | VideoDecoder config (codec from handshake), keyframe detect |
 | `renderer.js` | Canvas rendering |
 | `cursor.js` | Client-side cursor overlay (CursorUpdate) |
@@ -38,30 +38,36 @@ async function connect() {
     const role = isController ? "control" : "view";
     const sessionToken = getSessionToken(); // from URL hash or /auth POST
 
-    // 1. Open WebTransport session
-    const wt = new WebTransport(`https://${location.host}/wt?role=${role}`);
+    // 1. Open WebTransport session (role is NOT in the URL — it's in the auth msg)
+    const wt = new WebTransport(`https://${location.host}/wt`);
     await wt.ready;
 
-    // 2. Open the CONTROL stream (must be the first bidi stream)
+    // 2. Open the CONTROL stream; its FIRST byte is the StreamType tag 0x00.
     const ctl = await wt.createBidirectionalStream();
     const ctlW = ctl.writable.getWriter();
     const ctlR = ctl.readable.getReader();
+    await ctlW.write(new Uint8Array([0x00]));   // StreamControl tag
     await ctlW.write(jsonEncode({
         type: "auth", token: sessionToken, role
     }));
 
-    // 3. Read auth response (auth_ok or auth_failed)
+    // 3. Read auth response (auth_ok or auth_failed), then the config line.
     const authResp = await readJSON(ctlR);
     if (authResp.type !== "auth_ok") throw new Error("auth failed");
 
-    // 4. Open the INPUT stream (controller only)
+    // 4. Open the INPUT stream (controller only); first byte tag 0x01.
     let inp = null;
-    if (isController) inp = await wt.createBidirectionalStream();
+    if (isController) {
+        inp = await wt.createBidirectionalStream();
+        await inp.writable.getWriter().write(new Uint8Array([0x01])); // StreamInput
+    }
 
     // 5. Spin up reader loops
     readDatagrams(wt);              // video + audio + cursor + ping + rumble
-    readControl(ctlR);              // Config, Clipboard, JSON control
-    if (inp) readInputAcks(inp);    // InputAck on input stream
+    readUniStreams(wt);            // bootstrap stream (tag 0x10) → seed decoder
+    readControl(ctlR);             // config + JSON control (NOT clipboard)
+    if (inp) readInputAcks(inp);   // length-prefixed InputAck on input stream
+    // Clipboard stream (tag 0x02) is opened lazily on first clipboard use.
 
     // 6. Reconnect on close (uses cached session_token for resume)
     wt.closed.then(() => setTimeout(connect, RECONNECT_DELAY)); // 2000 ms
@@ -69,7 +75,8 @@ async function connect() {
 ```
 
 - Auto-reconnects on session close with 2-second delay (uses the cached
-  `session_token` to resume — server replays cached IDR).
+  `session_token` to resume — the server reseeds the decoder via a fresh
+  **bootstrap stream**, not a datagram replay).
 - WebTransport requires HTTPS + TLS 1.3 (QUIC mandates it; WebCodecs also
   requires a secure context — both conditions satisfied at once).
 - Role-based: `control` for input + video, `view` for video-only.
@@ -100,25 +107,30 @@ DATAGRAM (8-byte DatagramHeader + fragment payload)
         15 (GamepadRumble): gamepad.applyRumble(reassembledPayload)
         2  (Ping):         send JSON {"type":"pong","nonce":...} on the control stream
 
-CONTROL STREAM (22-byte FrameHeader + JSON payload, or JSON-from-client)
-    → switch Type (S → C frames):
-        6  (Config):    JSON.parse(payload) → configure decoder (ONLY if codec/width/height changed), set cursorMode
-        12 (Clipboard): clipboard.applyHostUpdate(payload)
-    → JSON from server (no FrameHeader): auth_ok, auth_failed
-    → Client → server JSON: keyframe, pong, stats, resize, set_*, clipboard, etc.
+BOOTSTRAP STREAM (incoming UNI; first byte tag 0x10, then [u32 Len][FrameHeader‖IDR])
+    → decode the IDR as a "key" chunk, set lastSeq from its FrameHeader.Sequence,
+      then close. Seeds the decoder before any datagram is decoded.
 
-INPUT STREAM (binary records C→S, S→C InputAck frames)
-    → switch Type (S → C):
-        14 (InputAck):  input.recordAck(seq, serverTs)
-    → C → S: 6-byte-header binary input records (see MODULE_INPUT)
+CONTROL STREAM (newline-delimited JSON, both directions — NO FrameHeader)
+    → S → C lines: auth_ok, auth_failed, config, hdr_unavailable, server_shutdown
+        config:  configure decoder (ONLY if codec/width/height changed), set cursorMode
+    → C → S lines: auth, keyframe, pong, stats, resize, set_* (NOT clipboard)
+
+CLIPBOARD STREAM (bidi; first byte tag 0x02, then [u32 Len][JSON] both ways)
+    → S → C: clipboard.applyHostUpdate(json)
+    → C → S: {"type":"clipboard", ...}
+
+INPUT STREAM ([u16 RecLen]-prefixed records both directions)
+    → S → C: 13-byte InputAck → input.recordAck(seq, serverTs)
+    → C → S: [u16 RecLen]-prefixed binary input records (see MODULE_INPUT)
 
 If reassembly deadline expires for a video Type, send JSON
 {"type":"keyframe"} on the control stream and bump a metric.
 ```
 
-**Decoder Configuration (driven by the Config handshake — fixes the round-1 codec mismatch):**
+**Decoder Configuration (driven by the config handshake — fixes the round-1 codec mismatch):**
 ```javascript
-// On Config frame:
+// On config message (a JSON line on the control stream, type == "config"):
 decoder.configure({
     codec: cfg.codec,          // full WebCodecs string from server, e.g. "avc1.42E01F" (H.264) or "hvc1.*" (HW HEVC)
     optimizeForLatency: true,
@@ -146,7 +158,7 @@ decodeVideo(seq, timestamp, payload):
 - H.264 (Annex B): scan NAL headers for type 5 (IDR). The keyframe access unit contains SPS+PPS+IDR.
 - HEVC (when HW available): scan for NAL types 19–21 (IDR_W_RADL / IDR_N_LP / CRA_NUT).
 
-**Fast-join rule:** the client sets `lastSeq` from the FIRST frame received (the cached IDR) and does NOT run gap detection on the transition to the first live frame (avoids a false "gap" → keyframe storm). Gap detection starts from the 2nd live frame.
+**Fast-join rule:** the client sets `lastSeq` from the **bootstrap-stream IDR** (read reliably before any datagram) and does NOT run gap detection on the transition to the first live datagram frame (avoids a false "gap" → keyframe storm). Gap detection starts from the 2nd live datagram frame.
 
 ### Audio Playback Pipeline
 
@@ -191,16 +203,24 @@ reused `ArrayBuffer` via `DataView` (zero garbage on the hot path) and maps
 ```javascript
 let inputSeq = 0;
 const sentAt = new Map();              // seq → performance.now(), for latency
-const buf = new ArrayBuffer(16), dv = new DataView(buf);  // reused; largest record fits
+const buf = new ArrayBuffer(16), dv = new DataView(buf);  // record body; reused
 
-function header(type) {                // 6-byte shared header
+function header(type) {                // 6-byte shared record header
     dv.setUint8(0, 1);                 // Version
     dv.setUint8(1, type);              // Type
     dv.setUint32(2, ++inputSeq, true); // Seq (LE)
     sentAt.set(inputSeq, performance.now());
     return inputSeq;
 }
-function send(len) { inpW.write(buf.slice(0, len)).catch(()=>{}); }    // inpW = input-stream writer
+// Frame as [u16 RecLen LE][record] so the server can delimit records on the
+// QUIC byte stream (a stream has no intrinsic message boundaries). The fresh
+// `out` buffer also makes `buf` safe to reuse immediately after write().
+function send(len) {                                   // inpW = input-stream writer
+    const out = new Uint8Array(2 + len);
+    new DataView(out.buffer).setUint16(0, len, true);  // RecLen = record byte count
+    out.set(new Uint8Array(buf, 0, len), 2);
+    inpW.write(out).catch(() => {});
+}
 
 if (isController) {
     // Key: HID usage from code; Flags bit0 = down
@@ -241,16 +261,18 @@ function recordAck(seq /*, serverTs */) {
   disable mouse acceleration; Safari ignores the option).
 - Every record carries `Seq`; the server's `InputAck` (binary type 14) echoes it
   for latency measurement.
-- **Control** messages (keyframe, resize, set_*, clipboard) still use
-  JSON on the **control stream**: `sendControl({type:"keyframe"})`.
+- **Control** messages (keyframe, resize, set_*, pong, stats) use newline-JSON
+  on the **control stream**: `sendControl({type:"keyframe"})`. Clipboard does
+  NOT — it has its own clipboard stream.
 
 ### Clipboard, File Transfer, Gamepad (client side)
 
 - **Clipboard** (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)): on Chrome/Edge,
   request `clipboard-read`/`clipboard-write` and use the `clipboardchange` event
-  to push copies (JSON text `{"type":"clipboard",...}`); write host clipboard
-  pushes (binary type 12) silently. On Firefox/Safari, intercept `copy`/`paste`
-  events (gesture-bound). Text + sanitized HTML only.
+  to push copies as `[u32 Len][JSON {"type":"clipboard",...}]` on the **clipboard
+  stream** (tag 0x02, opened lazily); apply host→client clipboard messages read
+  off the same stream silently. On Firefox/Safari (no `clipboardchange` event),
+  intercept `copy`/`paste` events (gesture-bound). Text + sanitized HTML only.
 - **File transfer** (see [`MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md)):
   `dragover`/`drop` on the canvas → open a new bidirectional stream on the WebTransport session → stream
   `file.stream()` in 64 KiB chunks. Show a drop overlay. A **Files** panel lists
@@ -282,9 +304,9 @@ Updates every 1 second with frame count and byte count deltas.
 The file defines `init()` twice (line 22 and line 292). The second silently shadows the first. Merge into a single initialization function.
 
 ### R-CLI-02 + R-CLI-03: Codec from Config Handshake (RESOLVED)
-The codec mismatch is fixed by the protocol handshake: the server sends a binary `FrameTypeConfig` (type 6) frame FIRST, whose JSON payload carries the full WebCodecs `codec` string (e.g., `avc1.42E01F` for H.264 or `hvc1.*` when HW HEVC is in use), plus `width/height/fps/audio*/cursorMode`. The client configures `VideoDecoder` from that — never hardcoded.
+The codec mismatch is fixed by the control-stream handshake: right after `auth_ok` the server sends a `{"type":"config",...}` JSON line FIRST, carrying the full WebCodecs `codec` string (e.g., `avc1.42E01F` for H.264 or `hvc1.*` when HW HEVC is in use), plus `width/height/fps/audio*/cursorMode`. The client configures `VideoDecoder` from that — never hardcoded.
 
-> Note: Config is a **binary** frame (type 6) with a JSON payload, NOT a JSON text control message. (Round-1 specs incorrectly described it as a text message — corrected here and in MODULE_PROTOCOL.)
+> Note: `config` is a **newline-JSON message on the control stream**, the same channel as `auth_ok`/`keyframe`/`resize` — NOT a binary `FrameHeader` frame. (The QUIC-transport switch removed the binary type-6 Config frame; type 6 is retired. See MODULE_PROTOCOL "Frame Types".)
 
 ### R-CLI-04: Add Pointer Lock
 Request `canvas.requestPointerLock()` on click for FPS-game-style mouse capture. Send relative mouse deltas when locked.
@@ -358,23 +380,25 @@ history). See [`MODULE_AUTH.md`](./MODULE_AUTH.md).
 
 ## Browser Compatibility
 
-**Supported browsers:** Chrome 107+, Edge 98+, Firefox 114+, Safari 18.2+. The floor is the **intersection** of WebTransport support (Chrome 97 / Edge 98 / Firefox 114 / Safari 18.2) and WebCodecs support (Chrome 107 / Safari 16.4+); Chrome 107 wins as the lower bound on Chromium, Safari 18.2 wins on Safari.
+**Supported browsers:** Chrome 107+, Edge 98+, Firefox 130+, Safari 18.2+. The floor is the **intersection** of WebTransport support (Chrome 97 / Edge 98 / Firefox 114 / Safari 18.2) and WebCodecs support (Chrome 107 / Firefox 130 / Safari 16.4+). Per engine the higher of the two wins: Chrome 107 on Chromium, Firefox 130 on Gecko, Safari 18.2 on WebKit.
 
-**Firefox is not supported.** WebCodecs support in Firefox lags meaningfully
-in feature parity (`optimizeForLatency`, hardware decode path) and the
-project explicitly does not test against it. Users on Firefox will see a
-graceful fail with an unsupported-browser notice.
+**Firefox is supported from 130+** (the first version shipping WebCodecs
+`VideoDecoder` un-flagged alongside its existing WebTransport support). Firefox's
+low-latency WebCodecs path is younger than Chromium's, so it is treated as a
+secondary target; earlier Firefox (114–129, which has WebTransport but no
+WebCodecs) gets a graceful unsupported-browser notice.
 
 | Feature | Required | Minimum supported version |
 |---------|----------|--------------------------|
 | WebTransport | Yes | Chrome 97+, Edge 98+, Firefox 114+, Safari 18.2+ |
-| WebCodecs VideoDecoder | Yes | Chrome 107+, Safari 18.2+ (paired with WebTransport floor) |
-| Pointer Lock | Optional | Chrome (all), Safari 13.1 |
-| Fullscreen API | Optional | Chrome (all), Safari (all) |
-| ES Modules | For refactored version | Chrome (all), Safari (all) |
+| WebCodecs VideoDecoder | Yes | Chrome 107+, Firefox 130+, Safari 18.2+ |
+| Pointer Lock | Optional | Chrome (all), Firefox (all), Safari 13.1 |
+| Fullscreen API | Optional | Chrome (all), Firefox (all), Safari (all) |
+| ES Modules | For refactored version | Chrome (all), Firefox (all), Safari (all) |
 
-**Minimum: Chrome 107.** Earlier versions have a less mature WebCodecs
-implementation that does not honor `optimizeForLatency` end-to-end.
+**Effective minimums: Chrome 107 / Firefox 130 / Safari 18.2.** On Chromium,
+earlier versions have a less mature WebCodecs implementation that does not honor
+`optimizeForLatency` end-to-end; on Gecko, WebCodecs is absent before 130.
 
 > AudioWorklet would be a future requirement when the deferred audio module is
 > un-paused; until then, the client does not load any audio code path.

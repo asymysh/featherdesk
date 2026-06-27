@@ -46,9 +46,9 @@ Add hardware-accelerated H.264 encoding via Intel VA-API as an alternative to th
 
 ## Acceptance Criteria
 
-1. `viewport-rds --hardware` streams using VA-API with <5% CPU
-2. `viewport-rds --software` streams using OpenH264 (unchanged from Track 1)
-3. `viewport-rds` (no flag) auto-detects and picks hardware if available
+1. `featherdesk --hardware` streams using VA-API with <5% CPU
+2. `featherdesk --software` streams using OpenH264 (unchanged from Track 1)
+3. `featherdesk` (no flag) auto-detects and picks hardware if available
 4. ffmpeg crash triggers automatic pipeline restart without dropping the WebSocket connection
 5. Browser client cannot tell which encoder is active (same protocol)
 6. /status endpoint reports active encoder type
