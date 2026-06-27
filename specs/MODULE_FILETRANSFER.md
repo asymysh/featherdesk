@@ -5,12 +5,13 @@
 The File Transfer module moves files between the browser client and the remote
 host. It is **core** (not an add-on). Two design decisions define it:
 
-1. **Separate WebSocket connection.** File transfer runs on its own
-   `/files` WebSocket, NOT the main media/input socket. Large chunks must never
-   stall the real-time video/input stream (TCP has no in-connection message
-   prioritization; a 64 KiB chunk queued ahead of a 16-byte input event would
-   add latency). A dedicated connection gives file transfer independent TCP
-   congestion control and back-pressure.
+1. **One QUIC stream per transfer**, multiplexed on the same WebTransport
+   session as media and input. Each active transfer is its own bidirectional
+   stream. QUIC's independent stream multiplexing means a long file-transfer
+   stream **does not block** the video datagram path, the input stream, or any
+   other concurrent transfer. This replaces the prior dedicated `/files`
+   WebSocket — under WebTransport the isolation we wanted is automatic, with
+   one fewer endpoint to operate.
 
 2. **Fixed destination folder.** Uploads always land in a single, configured
    folder (default: the OS Downloads directory). There is NO arbitrary remote
@@ -51,11 +52,14 @@ subfolders on first use (mode 0700). Both paths are overridable in
 ```go
 package filetransfer
 
-// Service manages transfers over the dedicated /files WebSocket.
+// Service manages file transfers carried over WebTransport bidirectional
+// streams on the main /wt session.
 type Service interface {
-    // Serve handles one /files WebSocket connection (one authenticated client).
-    // Blocks until the connection closes.
-    Serve(ctx context.Context, conn Conn) error
+    // ServeStream handles ONE bidirectional stream that has been identified
+    // (by its first message) as a file-transfer stream. Blocks until the
+    // stream closes. Called by the server module from its AcceptStream loop
+    // after the controller has authenticated.
+    ServeStream(ctx context.Context, s transport.Stream) error
 
     // ListOutgoing returns the files currently offered for download
     // (contents of the Outgoing folder).
@@ -85,25 +89,23 @@ type Config struct {
 
 ---
 
-## Wire Protocol (dedicated `/files` connection)
+## Wire Protocol (file-transfer streams on the main WebTransport session)
 
-### Authentication on the `/files` upgrade
+### Authentication & stream identification
 
-Browsers cannot set arbitrary headers on the `WebSocket()` constructor, so
-`Authorization: Bearer` does not work. The client carries the session token in
-the **`Sec-WebSocket-Protocol`** subprotocol header — a standard pattern (used
-by Kubernetes for `kubectl exec`) — as `bearer.<session_token>`:
+There is **no separate auth** — the WebTransport session was already
+authenticated on its control stream (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)),
+and only the **controller** role may open file-transfer streams. Viewers'
+attempts are rejected: the server reads the first message on a newly-accepted
+stream and, if the principal isn't the controller, calls `CancelRead` +
+`CancelWrite` with `CloseProtocolError`.
 
-```js
-const ws = new WebSocket("wss://host:port/files", ["bearer." + sessionToken]);
-```
-
-Server verifies the token at upgrade, echoes the protocol back, and requires
-the connecting principal to be the current **controller**. Anything else is
-rejected with HTTP 401 before upgrade. The same mechanism is used on `/ws` (see
-[`MODULE_SERVER.md`](./MODULE_SERVER.md) and
-[`MODULE_AUTH.md`](./MODULE_AUTH.md)) — URL `?token=` / `?resume=` query params
-are NOT used (they leak to proxy access logs and Referer headers).
+The server identifies a stream as a file-transfer stream by the first message:
+the first 18 bytes are the file-transfer framing header below with `MsgType =
+0x10 INIT` (uploads) or `0x01 LIST_REQUEST` (downloads). Streams whose first
+message doesn't match this header are not file-transfer streams and the server
+hands them to whichever module owns the corresponding type space (currently
+none other than file transfer).
 
 ### Wire framing
 
@@ -161,8 +163,8 @@ H: COMPLETE (echo) on success, or ERROR on mismatch (.part discarded)
 
 **Transfer ID ownership.** The **receiver** assigns `transfer_id` in `ACCEPT`,
 regardless of direction. On uploads the host receives → host assigns; on
-downloads the client receives → client assigns. IDs are unique per `/files`
-connection. This prevents collisions when both directions are active.
+downloads the client receives → client assigns. IDs are unique per WebTransport
+session. This prevents collisions when both directions are active.
 
 **Atomic write.** The receiver writes chunks into `<IncomingDir>/<name>.part`,
 fsyncs, then `os.Rename` to the final name **only after** SHA-256 verifies. On
@@ -202,7 +204,7 @@ writes to disk via `showSaveFilePicker` (Chrome/Edge streaming) or Blob + `<a>`
 ```
 dragover  on the video canvas → preventDefault + show drop overlay
 drop      → DataTransfer.files → for each File:
-            open /files WebSocket (if not already open)
+            open a new bidirectional stream on the existing WebTransport session
             INIT, then stream file.stream().getReader() as 64 KiB CHUNKs
 ```
 
@@ -231,9 +233,9 @@ correct model (same as Chrome Remote Desktop / AnyDesk).
 
 - **Why a separate connection:** on the single media socket, a 64 KiB file chunk
   queued ahead of input/video bytes adds 5-50 ms of video latency under load
-  (TCP can't reorder within a connection). A dedicated `/files` socket isolates
+  (TCP can't reorder within a connection). Under QUIC, the file-transfer stream isolates
   this completely.
-- **Throughput:** WebSocket over WSS reaches ~80-95% of raw TCP. On 1 Gbps,
+- **Throughput:** a QUIC reliable stream reaches near-line-rate of the underlying UDP path. On 1 Gbps,
   expect ~100-120 MB/s; the bottleneck is JS processing + disk I/O, not framing.
 - **Rate limiting:** `[filetransfer] rate_limit_bps` is a **single token bucket
   shared across all in-flight transfers** (not per-transfer). This bounds total
@@ -287,7 +289,7 @@ rate_limit_bps = 0                    # 0 = unlimited; else throttle to protect 
   6. Open with `O_CREATE|O_EXCL` (so a concurrent transfer can't race the
      existence check) and a restrictive mode (`0600`).
 - **Controller-only.** Only the authenticated controller may transfer files;
-  viewers cannot. The `/files` connection re-uses the main session's auth
+  viewers cannot. File-transfer streams reuse the main WebTransport session's auth
   (Bearer token / session token), validated at upgrade.
 - **Integrity.** Every transfer is verified by an end-to-end SHA-256; a mismatch
   discards the received file.
@@ -296,7 +298,7 @@ rate_limit_bps = 0                    # 0 = unlimited; else throttle to protect 
   bound memory and disk usage; reject transfers that would exceed them.
 - **No execution.** Uploaded files are written, never executed or opened by the
   host. The fixed folder should not be an auto-run / startup location.
-- **TLS.** The `/files` socket is WSS (same mandatory-TLS rule as the main socket).
+- **TLS.** File-transfer streams inherit the main session's TLS 1.3 channel (mandatory under QUIC).
 
 ---
 
@@ -319,5 +321,5 @@ rate_limit_bps = 0                    # 0 = unlimited; else throttle to protect 
 ## Status
 
 📋 **Specced — not yet implemented.** Core module. Drag-and-drop upload + file
-list download, fixed folders, dedicated `/files` connection. Compression and a
+list download, fixed folders, multiplexed on the main WebTransport session. Compression and a
 full remote file browser are explicitly out of scope for v1.

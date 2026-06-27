@@ -26,7 +26,7 @@ type EncodedFrame struct {
     Data      []byte // Contiguous Annex B bitstream (start codes retained).
                      // NOT split per-NAL -- avoids decompose/recompose copy.
                      // The server prepends the 22-byte header and sends
-                     // Data directly into the WebSocket frame.
+                     // Data directly into the assembled access unit (then fragmented into datagrams).
     Width     uint16
     Height    uint16
     Timestamp uint64 // CLOCK_MONOTONIC ns, carried through from capture
@@ -285,8 +285,8 @@ the policy; add-ons translate.
 
 ## Bandwidth Adaptation (Pipeline-Owned)
 
-The pipeline monitors network telemetry (RTT, packet loss from WebSocket
-Pong roundtrip + client stats messages) and feeds adaptive signals into
+The pipeline monitors network telemetry (RTT, packet loss from WebTransport / QUIC connection telemetry
++ client stats messages) and feeds adaptive signals into
 `stream.Params`:
 
 ```

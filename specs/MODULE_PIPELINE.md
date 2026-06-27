@@ -90,7 +90,7 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    - server.OnNewClient             → p.forceKeyframe() ONLY (server already gates on cached keyframe)
    - server.SetInputCallback        → input.Dispatcher.Dispatch (binary; nil if view-only)
    - server.SetClipboardCallback    → clipboard.Monitor.Set (direction + role gated by server)
-   - server.SetFileTransferService  → filetransfer.Service (nil if [filetransfer] disabled → /files returns 404)
+   - server.SetFileTransferService  → filetransfer.Service (nil if [filetransfer] disabled → server rejects new file-transfer streams with CloseProtocolError)
    - server.OnKeyframeRequest       → p.forceKeyframe() (server rate-limits before calling)
    - input gamepad rumble emitter   → server.SendGamepadRumble (nil if no gamepad add-on)
 13. Start goroutines (frame loop, clipboard monitor, audio loop, server).

@@ -1,5 +1,11 @@
 # Future Direction: Native Client
 
+> **HISTORICAL.** Written when WebSocket was the v1 transport. The current plan
+> ships QUIC/WebTransport as v1 (see [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md))
+> and a Tailscale-integrated native client as v2 (see the "Future plan" section
+> in [`../README.md`](../README.md)). The reasoning below is preserved for
+> context but the conclusions are superseded.
+
 > **Status: future scope.** Not implemented, not actively planned, not in any
 > release milestone. This document captures the architecture analysis so that
 > today's server work doesn't paint the project into a browser-only corner.

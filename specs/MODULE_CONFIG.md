@@ -95,24 +95,33 @@ add-on. Examples:
 # viewport.toml — example with every supported key shown at its default.
 
 [server]
-bind         = "0.0.0.0"          # interface to bind  (restart required)
-port         = 30084              # HTTPS+WSS port     (restart required)
+bind         = "0.0.0.0:30084"    # UDP listen address for HTTP/3 + WebTransport (restart required)
 allow_origin = ""                 # empty = same-origin only (SECURE DEFAULT).
                                   # Set to "*" only for trusted LANs. Server rejects
-                                  # WebSocket upgrades where Origin header doesn't match.
-max_clients  = 25                 # max concurrent WebSocket connections (reject with 503)
-max_message_bytes = 4096          # max WebSocket text message size (bytes). Rejects larger.
+                                  # WebTransport upgrades where the Origin header doesn't match.
+max_clients  = 25                 # max concurrent WebTransport sessions (reject with CloseAuthFailed 4401)
+max_message_bytes = 4096          # max control-stream JSON message size (bytes). Rejects larger.
 input_rate_limit  = 1000          # max input events/sec per client (mousemove coalesced)
 
 [server.tls]
 # If both cert + key are empty, a self-signed cert is generated on startup
 # (development only — browsers will warn). For production, set both to
 # absolute paths of a certificate chain and matching private key in PEM form.
+# TLS 1.3 is MANDATORY under QUIC; no version knob.
 cert = ""                         # (restart required)
 key  = ""                         # (restart required)
-min_version  = "1.2"              # minimum TLS version: "1.2" or "1.3"
-                                  # cipher suites restricted to AEAD only
-                                  # (GCM, ChaCha20-Poly1305). No CBC, RC4, 3DES.
+
+[transport]
+# Tunables for the QUIC / WebTransport transport (see MODULE_TRANSPORT.md).
+# Defaults are good; expose for ops debugging.
+keepalive_period        = "15s"   # idle keepalive
+max_idle_timeout        = "30s"   # close session after this much silence
+initial_max_data        = "10MiB" # initial connection-level flow control window
+initial_max_stream_data = "1MiB"  # per-stream flow control window
+max_streams_bidi        = 16      # cap on concurrent bidi streams per session
+max_streams_uni         = 16      # cap on concurrent uni streams (rarely used)
+enable_datagrams        = true    # MUST be true; required for video
+fragment_reassembly_ms  = 17      # drop deadline at 60 fps; use 34 at 30 fps
 
 [log]
 format = "auto"     # "auto" | "json" | "text"
@@ -254,7 +263,7 @@ max_bytes  = 1048576            # 1 MiB cap per payload
 formats    = ["text", "html"]   # supported: "text", "html" (image/file NOT supported)
 
 # ─────────────────────────────────────────────────────────────────────────
-# FILE TRANSFER (core; drag-drop, fixed folder, separate /files connection)
+# FILE TRANSFER (core; drag-drop, fixed folder, QUIC stream on the main WebTransport session)
 # ─────────────────────────────────────────────────────────────────────────
 
 [filetransfer]
@@ -466,13 +475,13 @@ layout          = "standard"  # v1: "standard" Standard Gamepad layout only
 
 | Section | Rule | Failure mode |
 |---------|------|--------------|
-| `server.port` | 1–65535 | startup error |
+| `server.bind` | `host:port` form; port 1–65535 | startup error |
 | `server.bind` | parseable as IP or hostname | startup error |
 | `server.tls.cert` / `server.tls.key` | both empty OR both set + readable | startup error |
 | `log.format` | one of `auto`/`json`/`text` | startup error |
 | `log.level` | one of `debug`/`info`/`warn`/`error` | startup error |
 | `log.output` | `stderr` / `stdout` / writable file path | startup error |
-| `metrics.port` | 1–65535, must differ from `server.port` | startup error |
+| `metrics.port` | 1–65535, must differ from the port in `server.bind` | startup error |
 | `capture.mode` | `auto` or `forced` | startup error |
 | `capture.force_addon` | required if `mode = "forced"`; must be a compiled-in build tag | startup error |
 | `encode.mode` | `auto` or `forced` | startup error |

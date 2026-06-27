@@ -71,7 +71,7 @@ in code. See [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 12 plug-and-play modules. Each module has its own spec
+The system is decomposed into 13 plug-and-play modules. Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
@@ -80,14 +80,15 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software encoder interface contract (concrete impls are add-ons) |
 | 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface contract (concrete impls are add-ons) |
 | 4 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) — transport-agnostic; see also [`./FUTURE_NATIVE_CLIENT.md`](./FUTURE_NATIVE_CLIENT.md) |
-| 5 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | HTTPS+WebSocket transport, client management, TLS |
-| 6 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs) |
-| 7 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: probe + select compiled-in add-ons, lifecycle, pacing, frame drops, wiring |
-| 8 | **Config** | [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
-| 9 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract (injection impls are add-ons per OS) |
-| 10 | **Clipboard** | [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
-| 11 | **File Transfer** | [`./MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder over a dedicated `/files` connection (core) |
-| 12 | **Gamepad** | [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md) | Browser Gamepad-API redirection contract + rumble (virtual-controller injection is per-OS add-ons; casual-gaming-grade only) |
+| 5 | **Transport** | [`./MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) | HTTP/3 + WebTransport (QUIC); datagrams + reliable streams; auth handshake |
+| 6 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | HTTP/3 + WebTransport transport, session management, TLS 1.3 |
+| 7 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs) |
+| 8 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: probe + select compiled-in add-ons, lifecycle, pacing, frame drops, wiring |
+| 9 | **Config** | [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
+| 10 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract (injection impls are add-ons per OS) |
+| 11 | **Clipboard** | [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
+| 12 | **File Transfer** | [`./MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder carried as QUIC bidirectional streams on the main WebTransport session (core) |
+| 13 | **Gamepad** | [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md) | Browser Gamepad-API redirection contract + rumble (virtual-controller injection is per-OS add-ons; casual-gaming-grade only) |
 
 > **Encoder, capture, and input implementations are not core modules.**
 > Every encoder (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF,
@@ -332,7 +333,7 @@ When adding a new vendor-specific encoder:
                      │                 ▼
                      │  ┌──────────────────────────────┐
                      │  │       CLIENT (Browser)        │
-                     │  │  WebSocket → decode → canvas │
+                     │  │  WebTransport datagrams + streams → decode → canvas │
                      │  │  #control / #view modes      │
                      │  │  Client-side cursor render   │
                      │  └──────────────────────────────┘
@@ -458,13 +459,14 @@ Header layout (little-endian):
 | InputAck | 14 | Echo of client input seq + server timestamp (RTT) |
 | GamepadRumble | 15 | 9-byte rumble payload (index + magnitudes + duration; see [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) |
 
-One WebSocket binary message = one frame (one access unit). The server NEVER splits a frame's NALs across messages.
+One datagram fragment chain = one frame (one access unit). The server NEVER splits a frame's NALs across messages.
 
 ---
 
 ### Contract 4: Client -> Server (two channels)
 
-Client→server uses the WebSocket opcode as the discriminator (see
+Client→server uses the WebTransport channel (datagram vs reliable stream) as the
+discriminator (see
 [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) and [`MODULE_INPUT.md`](./MODULE_INPUT.md)):
 
 - **Binary frames:** input events (compact 6-byte record header, types
@@ -817,13 +819,15 @@ featherdesk/
 │   │   ├── clipboard_windows.go # AddClipboardFormatListener + CF_HTML
 │   │   ├── clipboard_linux.go   # XFixes / wlr-data-control
 │   │   └── clipboard_darwin.go  # NSPasteboard changeCount polling
-│   ├── filetransfer/          # CORE file transfer (dedicated /files connection)
+│   ├── filetransfer/          # CORE file transfer (carried on the main WebTransport session)
 │   │   ├── service.go          # Transfer service, windowed flow control, SHA-256
 │   │   └── sandbox.go          # Fixed-folder path-traversal guard
+│   ├── transport/             # HTTP/3 + WebTransport server (QUIC) — quic-go + webtransport-go
+│   │   └── transport.go        # Transport interface impl, session accept loop
 │   ├── server/
-│   │   ├── server.go           # HTTPS/WSS server (TLS mandatory)
-│   │   ├── client.go           # Per-client state; binary-input vs text routing
-│   │   ├── files.go            # /files WebSocket endpoint (file transfer)
+│   │   ├── server.go           # Per-session orchestration (consumes transport.Session)
+│   │   ├── session.go          # Per-session goroutines (control, input, datagram pump, stream acceptor)
+│   │   ├── auth.go             # First-frame auth on the control stream
 │   │   └── metrics.go          # Prometheus /metrics handler (separate port)
 │   ├── config/
 │   │   ├── load.go             # TOML parse + validate

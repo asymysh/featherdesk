@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Client module is the browser-based viewer and controller. It connects to the server via WebSocket (WSS), decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back to the server as **binary** WebSocket frames (compact 6-byte-header records — see [`MODULE_INPUT.md`](./MODULE_INPUT.md)). Rare control messages (keyframe req, resize, clipboard, etc.) use **JSON text** frames; everything high-frequency is binary.
+The Client module is the browser-based viewer and controller. It connects to the server via **WebTransport (QUIC)** over HTTPS, decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back on a dedicated **reliable input stream** as compact 6-byte-header binary records (see [`MODULE_INPUT.md`](./MODULE_INPUT.md)). Media (video, audio, cursor, gamepad rumble, ping) arrives as **unreliable datagrams** with application-level fragment reassembly; rare control messages (keyframe req, resize, clipboard, etc.) flow as JSON on the **reliable control stream**. See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) for the channel model.
 
 ---
 
@@ -15,7 +15,7 @@ The client is a single-page application embedded in the server binary via `go:em
 |------|---------|
 | `index.html` | HTML shell: canvas, cursor overlay, status overlay, `<script type="module">` |
 | `main.js` | Entry point, reads role, wires modules |
-| `connection.js` | WebSocket connect/reconnect, binary frame dispatch, JSON control send |
+| `connection.js` | WebTransport connect/reconnect, control + input stream setup, datagram reassembly, control dispatch |
 | `protocol.js` | 22-byte header parse, Config parse |
 | `decoder.js` | VideoDecoder config (codec from handshake), keyframe detect |
 | `renderer.js` | Canvas rendering |
@@ -23,7 +23,7 @@ The client is a single-page application embedded in the server binary via `go:em
 | `audio.js` | AudioContext + Worklet, A/V sync |
 | `input.js` | Binary input encode (DataView), HID-usage map, pointer-lock, InputAck latency |
 | `clipboard.js` | clipboardchange / copy / paste interception; host-update apply |
-| `files.js` | Drag-drop upload + Files panel for downloads (separate `/files` WS) |
+| `files.js` | Drag-drop upload + Files panel for downloads — opens per-transfer QUIC streams on the main session |
 | `gamepad.js` | rAF poll of getGamepads, diff-send 0x40, connect/disconnect 0x41/0x42, rumble apply |
 | `stats.js` | FPS/bandwidth/latency display |
 
@@ -31,23 +31,50 @@ The client is a single-page application embedded in the server binary via `go:em
 
 ## Internal Architecture
 
-### Connection Management
+### Connection Management (WebTransport)
 
 ```javascript
-function connect() {
+async function connect() {
     const role = isController ? "control" : "view";
-    const token = getSessionToken(); // from URL hash or prompt
-    const ws = new WebSocket(`wss://${location.host}/ws?role=${role}&token=${token}`);
-    ws.binaryType = "arraybuffer";
-    ws.onmessage = (e) => handleFrame(e.data);
-    ws.onclose = () => setTimeout(connect, RECONNECT_DELAY); // 2000ms
+    const sessionToken = getSessionToken(); // from URL hash or /auth POST
+
+    // 1. Open WebTransport session
+    const wt = new WebTransport(`https://${location.host}/wt?role=${role}`);
+    await wt.ready;
+
+    // 2. Open the CONTROL stream (must be the first bidi stream)
+    const ctl = await wt.createBidirectionalStream();
+    const ctlW = ctl.writable.getWriter();
+    const ctlR = ctl.readable.getReader();
+    await ctlW.write(jsonEncode({
+        type: "auth", token: sessionToken, role
+    }));
+
+    // 3. Read auth response (auth_ok or auth_failed)
+    const authResp = await readJSON(ctlR);
+    if (authResp.type !== "auth_ok") throw new Error("auth failed");
+
+    // 4. Open the INPUT stream (controller only)
+    let inp = null;
+    if (isController) inp = await wt.createBidirectionalStream();
+
+    // 5. Spin up reader loops
+    readDatagrams(wt);              // video + audio + cursor + ping + rumble
+    readControl(ctlR);              // Config, Clipboard, JSON control
+    if (inp) readInputAcks(inp);    // InputAck on input stream
+
+    // 6. Reconnect on close (uses cached session_token for resume)
+    wt.closed.then(() => setTimeout(connect, RECONNECT_DELAY)); // 2000 ms
 }
 ```
 
-- Auto-reconnects on disconnect with 2-second delay
-- Uses `wss://` (secure WebSocket) for WebCodecs compatibility
-- Role-based connection: `control` for input + video, `view` for video-only
-- Token-based authentication (paired with R-SRV-01)
+- Auto-reconnects on session close with 2-second delay (uses the cached
+  `session_token` to resume — server replays cached IDR).
+- WebTransport requires HTTPS + TLS 1.3 (QUIC mandates it; WebCodecs also
+  requires a secure context — both conditions satisfied at once).
+- Role-based: `control` for input + video, `view` for video-only.
+- Token-based authentication via the **first control-stream message** (not the
+  URL or HTTP headers — browsers can't set the latter on WebTransport).
 
 ### Role Selection
 
@@ -59,20 +86,34 @@ The client determines its role from the URL:
 
 ### Handshake & Frame Dispatch
 
+Three channels carry different message types — see
+[`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) "Channel Model".
+
 ```
-WebSocket binary frame
-    → parse 22-byte header {version, type, seq, timestamp, w, h, payloadSize}
-    → switch type:
-        6  (Config):  JSON.parse(payload) → configure decoder (ONLY if codec/width/height changed), set cursorMode
-        1  (VideoH264): decodeVideo(seq, timestamp, payload)
-        7  (VideoHEVC): decodeVideo(seq, timestamp, payload)
-        4  (AudioPCM):  playAudio(timestamp, payload)
-        5  (reserved):  ignore (formerly VP8, rejected)
-        11 (CursorUpdate): cursor.update(payload)
+DATAGRAM (8-byte DatagramHeader + fragment payload)
+    → reassemble by (Type, FrameID), drop after fragment_reassembly_ms
+    → switch Type:
+        1  (VideoH264):    decodeVideo(seq, timestamp, reassembledPayload)
+        7  (VideoHEVC):    decodeVideo(seq, timestamp, reassembledPayload)
+        4  (AudioPCM):     playAudio(timestamp, reassembledPayload)
+        11 (CursorUpdate): cursor.update(reassembledPayload)  // latest-wins
+        15 (GamepadRumble): gamepad.applyRumble(reassembledPayload)
+        2  (Ping):         send JSON {"type":"pong","nonce":...} on the control stream
+
+CONTROL STREAM (22-byte FrameHeader + JSON payload, or JSON-from-client)
+    → switch Type (S → C frames):
+        6  (Config):    JSON.parse(payload) → configure decoder (ONLY if codec/width/height changed), set cursorMode
         12 (Clipboard): clipboard.applyHostUpdate(payload)
-        14 (InputAck): input.recordAck(seq, serverTs)
-        15 (GamepadRumble): gamepad.applyRumble(payload)
-        2  (Ping):    send {"type":"pong","nonce":...} over text
+    → JSON from server (no FrameHeader): auth_ok, auth_failed
+    → Client → server JSON: keyframe, pong, stats, resize, set_*, clipboard, etc.
+
+INPUT STREAM (binary records C→S, S→C InputAck frames)
+    → switch Type (S → C):
+        14 (InputAck):  input.recordAck(seq, serverTs)
+    → C → S: 6-byte-header binary input records (see MODULE_INPUT)
+
+If reassembly deadline expires for a video Type, send JSON
+{"type":"keyframe"} on the control stream and bump a metric.
 ```
 
 **Decoder Configuration (driven by the Config handshake — fixes the round-1 codec mismatch):**
@@ -93,7 +134,7 @@ The client NEVER hardcodes the codec. It comes from `Config.codec` so the decode
 ```
 decodeVideo(seq, timestamp, payload):
     → gap detection (skip on first frame / first post-IDR transition):
-        if started && seq > lastSeq + 1: ws.send('{"type":"keyframe"}')   // request IDR
+        if started && seq > lastSeq + 1: sendControl({type:"keyframe"})   // request IDR
     → lastSeq = seq
     → isKey = detectKeyframe(payload)        // H.264: scan NAL header for type 5 (IDR)
     → chunk = new EncodedVideoChunk({ type: isKey ? "key":"delta", timestamp, data: payload })
@@ -110,7 +151,7 @@ decodeVideo(seq, timestamp, payload):
 ### Audio Playback Pipeline
 
 ```
-WebSocket binary frame (Type == 4, AudioPCM)
+Datagram payload (Type == 4, AudioPCM, after reassembly)
     → extract S16LE payload (3840 bytes) + header.timestamp (monotonic ns)
     → A/V sync against latest video timestamp:
         skew = lastVideoTs - audioTs
@@ -130,7 +171,7 @@ AudioWorkletProcessor:
 ### Cursor Overlay (cursorMode == "separate")
 
 ```
-WebSocket binary frame (Type == 11, CursorUpdate)
+Datagram payload (Type == 11, CursorUpdate, after reassembly)
     → parse [x:u16][y:u16][visible:u8][imageChanged:u8][w:u16][h:u16][rgba?]
     → position a CSS/canvas overlay at (x,y) scaled to the canvas rect
     → if imageChanged: update the overlay bitmap from the RGBA data
@@ -142,7 +183,7 @@ WebSocket binary frame (Type == 11, CursorUpdate)
 
 ### Input Handling (binary)
 
-Input is sent as **binary** WebSocket frames using the compact record format
+Input is sent as binary records on the WebTransport input stream using the compact record format
 from [`MODULE_INPUT.md`](./MODULE_INPUT.md) — not JSON. The client encodes into a
 reused `ArrayBuffer` via `DataView` (zero garbage on the hot path) and maps
 `KeyboardEvent.code` → USB HID usage via a static table for layout neutrality.
@@ -159,7 +200,7 @@ function header(type) {                // 6-byte shared header
     sentAt.set(inputSeq, performance.now());
     return inputSeq;
 }
-function send(len) { if (ws.readyState === WebSocket.OPEN) ws.send(buf.slice(0, len)); }
+function send(len) { inpW.write(buf.slice(0, len)).catch(()=>{}); }    // inpW = input-stream writer
 
 if (isController) {
     // Key: HID usage from code; Flags bit0 = down
@@ -193,7 +234,7 @@ function recordAck(seq /*, serverTs */) {
 }
 ```
 
-- **Input is binary** (`ws.binaryType = 'arraybuffer'`), zero-alloc on the hot
+- **Input is binary**, written to the WebTransport input stream, zero-alloc on the hot
   path. `hidFromCode()` is a static `KeyboardEvent.code` → HID-usage table.
 - Pointer Lock toggles absolute (0x20) ↔ relative (0x21); request
   `canvas.requestPointerLock({ unadjustedMovement: true })` on click (Chrome/Edge
@@ -201,7 +242,7 @@ function recordAck(seq /*, serverTs */) {
 - Every record carries `Seq`; the server's `InputAck` (binary type 14) echoes it
   for latency measurement.
 - **Control** messages (keyframe, resize, set_*, clipboard) still use
-  JSON **text** frames: `ws.send('{"type":"keyframe"}')`.
+  JSON on the **control stream**: `sendControl({type:"keyframe"})`.
 
 ### Clipboard, File Transfer, Gamepad (client side)
 
@@ -211,7 +252,7 @@ function recordAck(seq /*, serverTs */) {
   pushes (binary type 12) silently. On Firefox/Safari, intercept `copy`/`paste`
   events (gesture-bound). Text + sanitized HTML only.
 - **File transfer** (see [`MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md)):
-  `dragover`/`drop` on the canvas → open the dedicated `/files` WebSocket → stream
+  `dragover`/`drop` on the canvas → open a new bidirectional stream on the WebTransport session → stream
   `file.stream()` in 64 KiB chunks. Show a drop overlay. A **Files** panel lists
   the host Outgoing folder for downloads (`showSaveFilePicker` on Chrome/Edge).
 - **Gamepad** (see [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)): poll
@@ -254,8 +295,10 @@ Implement F11 or double-click for fullscreen mode: `document.documentElement.req
 ### R-CLI-06: Add Adaptive Quality Feedback
 Measure decode latency and frame drop rate. Send periodic stats back to server to enable adaptive bitrate/resolution.
 
-### R-CLI-07: Handle WebSocket Send Errors (RESOLVED)
-`sendInput()` now checks `ws.readyState === OPEN` before sending and drops otherwise (see Input Handling).
+### R-CLI-07: Handle Stream Send Errors (RESOLVED)
+`send()` now writes through the WebTransport input-stream writer with an async
+catch; failures are silently dropped (the next reconnect will re-establish the
+stream). See "Input Handling (binary)".
 
 ### R-CLI-08: Touch Input (RESOLVED — native touch records)
 Touch uses `PointerEvent` and the binary `TouchContact` record (type 0x30), NOT
@@ -275,7 +318,7 @@ Split `compositor.js` into modules:
 client/
 ├── index.html
 ├── main.js          // Entry point, init
-├── connection.js    // WebSocket management (main /ws)
+├── connection.js    // WebTransport (/wt) + stream + datagram management
 ├── protocol.js      // 22-byte header parse + binary input encode helpers
 ├── decoder.js       // VideoDecoder setup and frame dispatch
 ├── renderer.js      // Canvas rendering
@@ -283,14 +326,17 @@ client/
 ├── audio.js         // AudioContext + Worklet [audio deferred]
 ├── input.js         // Binary input, HID-usage map, pointer-lock
 ├── clipboard.js     // clipboardchange/copy/paste interception
-├── files.js         // Drag-drop + Files panel (separate /files WS)
+├── files.js         // Drag-drop + Files panel (QUIC streams on the main session)
 ├── gamepad.js       // Gamepad-API poll + rumble apply
 └── stats.js         // FPS/bandwidth display
 ```
 Use ES modules (`import`/`export`) since all target browsers support them.
 
 ### R-CLI-11: Add Connection Token
-Carry the session token via the WebSocket `Sec-WebSocket-Protocol` subprotocol (`new WebSocket(url, ["bearer." + sessionToken])`), NOT as a URL query parameter (which leaks to proxy logs / Referer / browser history). See [`MODULE_AUTH.md`](./MODULE_AUTH.md).
+Carry the session token in the **first JSON message on the WebTransport
+control stream** — `{"type":"auth","token":"<bearer>","role":"control|view"}`
+— NOT as a URL query parameter (which leaks to proxy logs / Referer / browser
+history). See [`MODULE_AUTH.md`](./MODULE_AUTH.md).
 
 ---
 
@@ -312,7 +358,7 @@ Carry the session token via the WebSocket `Sec-WebSocket-Protocol` subprotocol (
 
 ## Browser Compatibility
 
-**Supported browsers:** Chrome 107+, Edge (Chromium-based), Safari 16.4+ (partial WebCodecs; full support Safari 26+).
+**Supported browsers:** Chrome 107+, Edge 98+, Firefox 114+, Safari 18.2+. The floor is the **intersection** of WebTransport support (Chrome 97 / Edge 98 / Firefox 114 / Safari 18.2) and WebCodecs support (Chrome 107 / Safari 16.4+); Chrome 107 wins as the lower bound on Chromium, Safari 18.2 wins on Safari.
 
 **Firefox is not supported.** WebCodecs support in Firefox lags meaningfully
 in feature parity (`optimizeForLatency`, hardware decode path) and the
@@ -321,8 +367,8 @@ graceful fail with an unsupported-browser notice.
 
 | Feature | Required | Minimum supported version |
 |---------|----------|--------------------------|
-| WebSocket (binary) | Yes | All supported browsers |
-| WebCodecs VideoDecoder | Yes | Chrome 107+, Safari 16.4+ (partial), Safari 26+ (full) |
+| WebTransport | Yes | Chrome 97+, Edge 98+, Firefox 114+, Safari 18.2+ |
+| WebCodecs VideoDecoder | Yes | Chrome 107+, Safari 18.2+ (paired with WebTransport floor) |
 | Pointer Lock | Optional | Chrome (all), Safari 13.1 |
 | Fullscreen API | Optional | Chrome (all), Safari (all) |
 | ES Modules | For refactored version | Chrome (all), Safari (all) |
@@ -341,7 +387,7 @@ implementation that does not honor `optimizeForLatency` end-to-end.
 |--------|--------|
 | Decode latency (1080p H.264) | <5ms |
 | Render (drawImage) | <1ms |
-| Input event → WebSocket send | <1ms |
+| Input event → input-stream write | <1ms |
 | Audio latency (buffer to speaker) | <50ms |
 | Reconnect time | 2-3 seconds |
 | Memory (1080p decode) | <100MB |

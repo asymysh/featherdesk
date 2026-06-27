@@ -133,7 +133,7 @@ readLoop detects EOF/error on stdout pipe
 
 ## Wire Format
 
-Audio is sent over the WebSocket using the standard 22-byte protocol framing. The **server** assigns the audio `Sequence` (independent from video) in `BroadcastAudio`.
+Audio is sent as fragmented unreliable datagrams using the standard 22-byte FrameHeader inside the first fragment (same shape as video, see MODULE_PROTOCOL). The **server** assigns the audio `Sequence` (independent from video) in `BroadcastAudio`.
 
 ```
 Header (22 bytes):

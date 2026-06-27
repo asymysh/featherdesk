@@ -44,12 +44,12 @@ JSON. This decision is grounded in measured data (see decision record below):
 binary decode is ~121× faster, zero-allocation, ~70-79% smaller on the wire, and
 has a far smaller attack surface than JSON.
 
-**Channel discrimination by WebSocket opcode:**
-- **Binary** WebSocket frames from the client = input events.
-- **Text** WebSocket frames from the client = rare human-triggered JSON control
-  (`keyframe`, `pong`, `stats`, `resize`, `set_*`, `clipboard`).
-
-This replaces the previous "client→server is JSON-only" rule.
+**Channel: input flows on the WebTransport input stream (a dedicated reliable
+bidirectional stream).** See [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md):
+- Binary input records (client→server) on the input stream — 6-byte header.
+- InputAck (server→client) on the same input stream — 22-byte header.
+- Rare JSON control (keyframe, pong, stats, resize, set_*, clipboard) flows on
+  the separate **control** stream, not here.
 
 ### Shared 6-byte record header
 
@@ -273,7 +273,7 @@ type InjectorConfig struct {
 // Dispatcher decodes binary input records and routes Events to injectors.
 // Owned by the server; created with whichever add-ons were compiled in.
 type Dispatcher interface {
-    // Dispatch decodes one binary WebSocket frame and injects it.
+    // Dispatch decodes one binary input record and injects it.
     // Returns the record Seq (for InputAck) and any injection error.
     // Performs validation + clamping before injection.
     Dispatch(frame []byte) (seq uint32, err error)
@@ -371,7 +371,7 @@ normal key (their `SecureAttention` is absent, step 3b drops with a log).
 ## Dispatch Flow
 
 ```
-WebSocket BINARY frame (client → server)
+Input stream binary record (client → server)
     → byte[1] (Type):
         0x50            → reserved for future webcam — current binaries drop
         0x01-0x4F       → input.Dispatcher.Dispatch(frame):

@@ -99,7 +99,7 @@ func (c *Converter) Close()
 retained). A keyframe contains SPS + PPS + IDR in order. The output is NOT split
 per-NAL -- this avoids the decompose/recompose copy overhead. The server
 prepends the 22-byte protocol header and sends the bitstream directly into
-one WebSocket message. The buffer is from a `sync.Pool` -- steady-state
+one server-side frame (then fragmented into datagrams by the server). The buffer is from a `sync.Pool` -- steady-state
 encoding is zero-alloc after warmup.
 
 ---

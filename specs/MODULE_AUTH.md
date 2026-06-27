@@ -2,11 +2,13 @@
 
 ## Overview
 
-The Authentication module gates WebSocket connections before they're upgraded
-to streams. It is a **base feature** — present on every FeatherDesk binary
+The Authentication module gates WebTransport sessions on the first control-stream
+message. It is a **base feature** — present on every FeatherDesk binary
 regardless of which add-ons are compiled in.
 
-Auth runs in the server layer (`MODULE_SERVER.md`) at the WebSocket upgrade
+Auth runs in the server layer (`MODULE_SERVER.md`) on the **first message of
+the WebTransport control stream** (see [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md)
+"Connection Lifecycle"). The previous WebSocket-upgrade-time check
 boundary. Successful auth produces a **session token** that the client stores
 for reconnection without re-authentication.
 
@@ -35,12 +37,12 @@ Mode is set at server startup; changing it requires restart.
 mode = "none"
 ```
 
-Server accepts every WebSocket upgrade. **For local dev or trusted-LAN
+Server accepts every WebTransport session. **For local dev or trusted-LAN
 deployments only.** Logs a warning at startup so operators know auth is off.
 
 The server prints:
 ```
-⚠ AUTH DISABLED — all WebSocket connections accepted unauthenticated.
+⚠ AUTH DISABLED — all WebTransport sessions accepted unauthenticated.
   This is intended for local development. Do NOT use in production.
 ```
 
@@ -67,18 +69,22 @@ session_ttl_minutes = 60             # successful auth lifetime before re-auth
   ```
 - If `token_file` is set, token is also written to that path (mode 0600).
   This is how systemd / Docker / k8s pick it up.
-- Client authenticates by carrying the token in the WebSocket
-  **`Sec-WebSocket-Protocol`** subprotocol header as `bearer.<token>`
-  — set via the second argument to `new WebSocket(url, ["bearer." + token])`.
+- Client authenticates by sending a JSON message as the **first write on the
+  WebTransport control stream** (the first bidirectional stream opened after
+  the WebTransport session is established):
+  ```json
+  {"type":"auth","token":"<bearer>","role":"control|view"}
+  ```
   Browsers cannot set arbitrary headers (e.g. `Authorization`) on the
-  `WebSocket()` constructor; this subprotocol pattern is the standard
-  browser-compatible workaround (used by Kubernetes `kubectl exec`, etc.).
-  Server reads `r.Header.Get("Sec-WebSocket-Protocol")`, validates, and echoes
-  the protocol back in the upgrade response.
-- **NOT** as a URL query parameter — query params leak into proxy access logs,
+  `WebTransport()` constructor; first-frame auth on the control stream is the
+  standard browser-compatible pattern and works identically for native clients.
+  Server reads the first message, validates, replies `{"type":"auth_ok",...}`
+  or `{"type":"auth_failed",...}` + `CloseWithError(4401)`.
+- **NOT** in a URL query parameter — query params leak into proxy access logs,
   Referer headers, and browser history.
-- Native clients (future) can use `Authorization: Bearer <token>` directly.
-- Wrong/missing token → 401 Unauthorized, no WebSocket upgrade.
+- The 5-second auth timer ends in `CloseWithError(4408 CloseAuthTimeout)` if the
+  client doesn't authenticate in time.
+- Wrong/missing/expired token → `CloseAuthFailed (4401)`.
 
 ### Token rotation
 
@@ -114,13 +120,12 @@ session_ttl_minutes = 60
   `Authorization: Basic <base64(":password")>` (username field empty).
 - Server verifies via constant-time argon2id comparison.
 - On success, server returns `{"session_token":"...","ttl_sec":3600}`.
-- Client then upgrades to WebSocket carrying the session token in the
-  `Sec-WebSocket-Protocol` header as `bearer.<session_token>` (browser-
-  compatible — see Mode `token` "Behavior" above). Native clients may use
-  `Authorization: Bearer` instead.
+- Client then opens a WebTransport session and sends the session token in
+  the first message of the control stream — same first-frame-auth pattern as
+  Mode `token` above. Works identically in browsers and native clients.
 - Failed attempts are rate-limited (5 attempts per IP per minute);
   exceeding triggers a 60-second IP block.
-- The password is NEVER sent on the WebSocket URL -- only on the HTTPS `/auth` POST.
+- The password is NEVER sent on the WebTransport URL or stream — only on the HTTPS `/auth` POST.
 
 ### Why argon2id
 
@@ -192,7 +197,7 @@ Sunshine-style first-launch pairing:
    │ <─────────────────────────────
    │ JS redirects to /            │
    │                              │
-   │ wss://.../ws (cookie sent)   │
+   │ https://.../wt (control stream auth)│
    ├──────────────────────────────>
    │                              │ device token validated
    │                              │ stream begins
@@ -256,7 +261,7 @@ The client stores `session_token` (in-memory; not localStorage — avoid
 persistent token leakage). On reconnect within `session_ttl_sec`:
 
 ```
-wss://host:port/ws  (with Sec-WebSocket-Protocol: bearer.<session_token>)
+https://host:port/wt   (WebTransport; bearer carried in control-stream first frame)
 ```
 
 Server-side flow:
@@ -264,7 +269,7 @@ Server-side flow:
 2. If found AND not expired: skip auth, jump straight to "resumed" Config
    handshake + cached IDR replay (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)
    resume flow)
-3. If not found / expired: WebSocket close code 4401. Client falls back to
+3. If not found / expired: session closed with CloseAuthFailed (4401). Client falls back to
    full auth re-flow with stored credentials (token / password / device token).
    NOTE: resume happens post-WS-upgrade, so HTTP 401 is not possible here --
    always use WS close code 4401.
@@ -272,14 +277,14 @@ Server-side flow:
 ### Session token properties
 
 - 32 bytes random, base64url-encoded (43 characters, no padding).
-- Each WebSocket connection gets its own token from the initial auth. Multiple
+- Each WebTransport session gets its own token from the initial auth. Multiple
   concurrent connections from the same authenticated identity are allowed
   (mirrored streams), but each has a distinct token.
 - Server-side storage: in-memory only (lost on restart). Operators wanting
   durable session persistence handle that externally.
 - TTL: configurable `[auth] session_ttl_minutes` (default 60). This is the
   **auth session lifetime** -- how long the token remains valid for new
-  WebSocket connections. Distinct from `[reconnect] cache_ttl_seconds`
+  WebTransport sessions. Distinct from `[reconnect] cache_ttl_seconds`
   (default 300), which is how long the server caches stream state for
   fast-resume after a disconnect.
 
@@ -292,9 +297,9 @@ controlled by URL query param:
 
 | URL | Role | Permissions |
 |-----|------|------------|
-| `wss://host/ws?role=control` + `bearer.<token>` subprotocol | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, `/files` connect, gamepad |
-| `wss://host/ws?role=view` + `bearer.<token>` subprotocol | Viewer | Receive video/audio/cursor/clipboard-pushes only |
-| `wss://host/ws` (no role; token via subprotocol) | Auto: first connection = controller, rest = viewer | — |
+| `https://host/wt?role=control` + control-stream auth `{role:"control"}` | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, file transfer streams, gamepad |
+| `https://host/wt?role=view` + control-stream auth `{role:"view"}` | Viewer | Receive video/audio/cursor/clipboard-pushes only |
+| `https://host/wt` (no role; control-stream auth omits `role`) | Auto: first connection = controller, rest = viewer | — |
 
 **One controller per session.** Subsequent `?role=control` connections become
 viewers (the first controller keeps the slot until they disconnect; if
@@ -325,7 +330,11 @@ const (
 )
 
 type Authenticator interface {
-    // Authenticate validates a WebSocket upgrade request.
+    // Authenticate validates the first JSON message on the WebTransport
+    // control stream. The Token + Role (and optional resume) fields are
+    // parsed from that message before Authenticate is invoked; the
+    // *http.Request is the original WebTransport upgrade request (carries
+    // Origin, RemoteAddr, etc. — useful for rate limiting and ACLs).
     // Returns the authenticated identity on success, or error with HTTP
     // status code. The SERVER creates the session token -- the Authenticator
     // only validates credentials.
@@ -355,7 +364,7 @@ type Server struct {
     sessionTTL    time.Duration
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleWebTransport(w http.ResponseWriter, r *http.Request) {
     // 1. Try resume first
     if tok := r.URL.Query().Get("resume"); tok != "" {
         if sess := s.resumeSession(tok); sess != nil {
@@ -409,7 +418,7 @@ internal/auth/
 
 | Concern | Mitigation |
 |---------|-----------|
-| Token leakage in URL | Token sent via the WebSocket `Sec-WebSocket-Protocol` subprotocol (`bearer.<token>`) for browsers, or `Authorization: Bearer` for native clients. NEVER as a URL query parameter. |
+| Token leakage in URL | Token sent in the first WebTransport control-stream message (JSON body, inside the encrypted QUIC stream). NEVER as a URL query parameter or HTTP header. |
 | Replay attack on token | Session tokens are scoped to TTL -- once expired, must re-auth |
 | Brute-force password | Argon2id (memory-hard), per-IP rate limit (5/min), 60s block on exceed |
 | Brute-force PIN | 8-digit default (100M space), global max 10 attempts per window, exponential backoff after 3 |
