@@ -46,10 +46,12 @@ for (;;) {
 ### Normalization to the canonical format
 
 The mix format is whatever the endpoint runs (commonly 32-bit float at 48 kHz
-stereo, but it can be 44.1 kHz, 24-bit, 5.1, etc.). The add-on converts to the
-**canonical 48 kHz / stereo / S16LE** that the core + client expect:
+stereo, but it can be 44.1 kHz, 24-bit, 5.1/7.1, etc.). The add-on converts to
+the **canonical 48 kHz / S16LE**, **following the host layout** (stereo / 5.1 /
+7.1, capped at 7.1):
 - float32 → S16LE (clamp + scale),
-- down/up-mix channels to stereo,
+- reorder the endpoint's channel mask into the canonical Vorbis order
+  (`config.audioLayout`); downmix to stereo only if `[audio] channels = "stereo"`,
 - resample if the device rate ≠ 48 kHz (linear/`soxr` — only when needed).
 
 ### The silence gotcha (load-bearing)

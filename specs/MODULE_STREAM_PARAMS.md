@@ -62,6 +62,14 @@ type Params struct {
     HDR        bool
     ColorSpace string // "bt709" (SDR) | "bt2020" (HDR)
 
+    // Chroma subsampling. "420" (default, universally decodable) | "422" | "444".
+    // 4:2:2/4:4:4 sharpen text/fine detail (the remote-desktop use case) but need
+    // BOTH an encoder that supports them AND a client that can decode them — so
+    // they are CAPABILITY-NEGOTIATED with a transparent fall-back to "420" (see
+    // "Chroma Subsampling" below). Reliable on the native client; best-effort in
+    // the browser.
+    ChromaSubsampling string
+
     // ── Keyframe behavior ───────────────────────────────────────
     // 0 = on-demand only (current default — client requests {"type":"keyframe"}
     //     on the control stream)
@@ -99,6 +107,13 @@ var (
     // (terminal case), the pipeline rejects the HDR request, sends the client
     // {"type":"hdr_unavailable"} on the control stream, and stays SDR.
     ErrHDRUnsupported = errors.New("stream: encoder does not support HDR/10-bit")
+
+    // ErrChromaUnsupported is returned by an encoder that cannot produce the
+    // requested 4:2:2/4:4:4 subsampling (e.g. OpenH264 is 4:2:0-only). The
+    // pipeline falls back to "420". A CLIENT that cannot DECODE the advertised
+    // chroma replies {"type":"chroma_unsupported"} and the server likewise
+    // downgrades to "420" + new config + keyframe (see "Chroma Subsampling").
+    ErrChromaUnsupported = errors.New("stream: encoder does not support requested chroma subsampling")
 
     // ErrFallbackToSoftware is returned by EncodeSurface (HW encoder) or
     // NextSurface (capturer) when the GPU path fails (surface import error,
@@ -238,6 +253,58 @@ restart-requiring on every add-on.
   metadata only.
 - **AV1 HDR** (HEVC alternative): not in scope until AV1 HW encoders are
   ubiquitous (currently RDNA3+/RTX 40+/M2+ only).
+
+---
+
+## Chroma Subsampling (4:2:0 / 4:2:2 / 4:4:4)
+
+`Params.ChromaSubsampling` selects the chroma format. **4:2:0** is the universal
+default; **4:2:2/4:4:4** sharpen text and fine UI detail — the remote-desktop win
+(this is Parsec's headline feature) — but are gated by both encoder and decoder
+support, so they are **capability-negotiated with a transparent fall-back to
+4:2:0**. They are **reliable on the native client (v2)** and **best-effort in the
+browser**.
+
+### Encoder support (advertised via probe; see MODULE_ENCODE / MODULE_HARDWARE_ENCODE)
+
+| Encoder | 4:2:0 | 4:2:2 | 4:4:4 |
+|---------|:----:|:----:|:----:|
+| OpenH264 | ✅ | ❌ | ❌ (4:2:0-only — picking 444 here falls back) |
+| x264 (subprocess) | ✅ | ✅ | ✅ |
+| NVENC | ✅ | 🔶 (HEVC RExt) | ✅ (H.264 + HEVC on Turing+) |
+| AMF / QSV / VideoToolbox | ✅ | 🔶 vendor-dependent | 🔶 vendor-dependent |
+
+### Codec string carries the chroma (so the client can probe it)
+
+The chroma is encoded in the **profile** of the WebCodecs codec string the
+`config` message advertises — the client passes it to `VideoDecoder` and probes it:
+- H.264 4:2:0 = High (`avc1.64…`); **4:2:2** = High 4:2:2 (`avc1.7A…`); **4:4:4** =
+  High 4:4:4 Predictive (`avc1.F4…`).
+- HEVC 4:2:0 = Main; **4:2:2/4:4:4** = Range Extensions profiles (`hvc1.4…` RExt).
+
+### Negotiation + fall-back (two gates, both end at 4:2:0)
+
+```
+1. Pipeline wants ChromaSubsampling = "444".
+2. ENCODER gate: the active encoder advertises its max chroma. If it can't do 444,
+   it returns stream.ErrChromaUnsupported → pipeline downgrades to the encoder's
+   best (e.g. 420 for OpenH264; 422 if that's the ceiling).
+3. CLIENT gate: the server advertises the resulting codec string in `config`. The
+   client runs VideoDecoder.isConfigSupported({codec}); if it can't decode it, the
+   client sends {"type":"chroma_unsupported"} on the control stream.
+4. The server downgrades to "420", re-sends `config` (4:2:0 codec string), and
+   forces a keyframe. 4:2:0 is guaranteed decodable everywhere — this gate always
+   terminates.
+```
+
+This mirrors the HDR terminal-case pattern. A change to `ChromaSubsampling` is
+**restart-requiring** on the encoder (new profile), like a resolution change.
+
+### What's not in scope
+
+- **Per-client chroma** (one viewer 4:4:4, another 4:2:0): the stream is one
+  broadcast, so chroma is session-wide — if any negotiated client can't decode
+  4:4:4, the whole session falls to 4:2:0 (or the operator pins 4:2:0).
 
 ---
 

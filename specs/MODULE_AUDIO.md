@@ -78,29 +78,43 @@ type AudioEncoder interface {
 
 // PCMChunk is one fixed-size PCM frame stamped at CAPTURE time.
 type PCMChunk struct {
-    Data      []byte // FrameSamples*Channels*2 bytes, S16LE interleaved stereo
+    Data      []byte // FrameSamples*Channels*2 bytes, S16LE interleaved, channel
+                     // order per Format.Layout (stereo / 5.1 / 7.1)
     Timestamp uint64 // CLOCK_MONOTONIC ns, sampled in the capture read loop —
                      // NOT when the pipeline consumes it (see "Realtime").
 }
 
 // Format is the canonical capture/transport format.
 type Format struct {
-    SampleRate int // 48000 (fixed for v1)
-    Channels   int // 2 (stereo, fixed for v1)
+    SampleRate int          // 48000 (fixed for v1)
+    Channels   int          // 1..8 — follows the host output (stereo, 5.1=6, 7.1=8)
+    Layout     ChannelLayout // channel order/positions (see "Surround")
 }
+
+// ChannelLayout names the speaker mapping so the client renders/downmixes
+// correctly. Order is the standard Vorbis/Opus mapping-family-1 order.
+type ChannelLayout uint8
+const (
+    LayoutMono     ChannelLayout = iota // 1ch: M
+    LayoutStereo                        // 2ch: L R
+    Layout5_1                           // 6ch: L R C LFE Ls Rs
+    Layout7_1                           // 8ch: L R C LFE Rls Rrs Ls Rs
+)
 
 // AudioConfig is the core config (from [audio] TOML). Per-add-on device
 // selection lives in [addon_module_<tag>].
 type AudioConfig struct {
-    FrameMs int          // 10 or 20 (default 20). Drives PCMChunk size + Opus frame.
-    Logger  *slog.Logger
+    FrameMs  int          // 10 or 20 (default 20). Drives PCMChunk size + Opus frame.
+    Channels string       // "auto" (follow host, ≤7.1) | "stereo" (force downmix at host)
+    Logger   *slog.Logger
 }
 
 const (
     DefaultSampleRate = 48000
-    DefaultChannels   = 2
-    DefaultFrameMs    = 20                 // 20 ms @ 48 kHz = 960 samples/chan
-    // ChunkBytes for the default 20 ms frame = 960 * 2ch * 2B = 3840.
+    DefaultChannels   = 2   // stereo when the host is stereo (the common case)
+    MaxChannels       = 8   // 7.1
+    DefaultFrameMs    = 20  // 20 ms @ 48 kHz = 960 samples/chan
+    // ChunkBytes(ch) for a 20 ms frame = 960 * ch * 2B (e.g. stereo 3840, 5.1 11520).
 )
 ```
 
@@ -134,15 +148,39 @@ capture — same process, same clock.
 | **Raw PCM** (built-in fallback) | — | none | 1.536 Mbps | a lost packet = a ~20 ms gap (no concealment) | `FrameTypeAudioPCM` (0x04) |
 
 - The server advertises the codec in the **`config`** control-stream message
-  (`audioCodec`, `audioSampleRate`, `audioChannels`) — the client never hardcodes
-  it. This kills the old `Width`/`Height` overload (those fields are unused/zero
-  for audio now).
+  (`audioCodec`, `audioSampleRate`, `audioChannels`, `audioLayout`) — the client
+  never hardcodes them. This kills the old `Width`/`Height` overload (those fields
+  are unused/zero for audio now).
 - **Opus settings:** application = `OPUS_APPLICATION_AUDIO` (general system audio,
   not just voice), 20 ms frames, VBR, **in-band FEC enabled**, complexity tuned
-  for low latency. A 20 ms Opus packet is ~100–300 bytes → **one datagram**, no
-  fragmentation.
+  for low latency. A stereo 20 ms Opus packet is ~100–300 bytes → **one datagram**,
+  no fragmentation. 5.1/7.1 packets are larger but still typically one datagram
+  (and fragment cleanly as a media type if not).
+- **Multichannel** uses **Opus multistream** (`opus_multistream_encoder`, channel
+  mapping family 1) for 5.1 (6ch) / 7.1 (8ch). PCM passthrough simply carries the
+  interleaved N-channel S16LE.
 - Opus is strongly preferred for any non-LAN use: its FEC/PLC is what keeps audio
   clean under datagram loss, which is the premise of audio-master sync (below).
+
+---
+
+## Surround (5.1 / 7.1)
+
+Audio follows the **host's output layout**: if the remote machine is set to 5.1
+or 7.1, the capture add-on delivers 6/8 channels and they stream through
+end-to-end; if the host is stereo, you get stereo. There is **no upmixing**.
+
+- `[audio] channels = "auto"` (default) — follow the host layout, capped at 7.1.
+  `"stereo"` forces a host-side downmix (useful to save bandwidth or when the
+  client is known to be stereo).
+- **Channel order** is the standard Vorbis/Opus mapping-family-1 order
+  (`L R C LFE Ls Rs` for 5.1; `L R C LFE Rls Rrs Ls Rs` for 7.1). The capture
+  add-on reorders the OS device layout into this canonical order; `config.audioLayout`
+  tells the client which layout to expect.
+- **Client downmix.** Most viewers are stereo. If the decoded channel count
+  exceeds the client's output device channels, the client **downmixes to stereo**
+  (standard ITU-R coefficients: `C` and `LFE` folded in, surrounds attenuated).
+  A surround-capable client plays all channels.
 
 ---
 
@@ -230,8 +268,12 @@ capture clock (the pre-audio behavior) — there is no master to slave to.
    - **Opus:** WebCodecs `AudioDecoder({codec:"opus", …})` → `AudioData`; fall back
      to a small wasm libopus decoder where `AudioDecoder` lacks Opus (older Safari).
    - **PCM:** convert S16LE → Float32 (÷32768) directly, no decoder.
-3. Push decoded Float32 into an `AudioWorklet` ring buffer (~40 ms).
-4. The worklet plays gaplessly; its playout position drives the video sync clock
+3. If `config.audioChannels` exceeds the output device's channel count, **downmix**
+   to the device layout (e.g. 5.1 → stereo) before buffering; else keep all
+   channels. (`AudioContext.destination.maxChannelCount` reports the device.)
+4. Push decoded Float32 (interleaved per `config.audioLayout`) into an
+   `AudioWorklet` ring buffer (~40 ms), configured for the playout channel count.
+5. The worklet plays gaplessly; its playout position drives the video sync clock
    (see "A/V Sync"). On a genuine gap with no Opus FEC recovery, the worklet
    outputs PLC/silence for that 20 ms rather than stalling.
 
@@ -243,7 +285,9 @@ capture clock (the pre-audio behavior) — there is no master to slave to.
 [audio]
 enabled    = false   # opt-in. Requires a compiled-in audio capture add-on.
 frame_ms   = 20      # 10 or 20 (lower = less latency, ~2× packet rate)
-# codec is chosen by build tags: `opus` ⇒ Opus, else raw PCM passthrough.
+channels   = "auto"  # "auto" = follow the host output layout (≤7.1); "stereo" =
+                     # force a host-side downmix to 2.0
+# codec is chosen by build tags: `opus` ⇒ Opus (multistream for 5.1/7.1), else PCM.
 
 [addon_module_wasapi]   # Windows
 device = ""             # "" = default render endpoint (loopback). Or an endpoint id.
@@ -296,7 +340,7 @@ audio silently disabled (matches the gamepad/input "needs an add-on" pattern).
 | Capture latency | <25 ms (20 ms frame + pipeline) |
 | Opus encode latency | <5 ms / frame |
 | End-to-end audio added latency | <60 ms (capture + ~40 ms client buffer) |
-| Bandwidth (Opus) | 96–128 kbps |
-| Bandwidth (PCM) | 1.536 Mbps |
+| Bandwidth (Opus, stereo) | 96–128 kbps (5.1 ≈ 256–384, 7.1 ≈ 384–512 kbps) |
+| Bandwidth (PCM, stereo) | 1.536 Mbps (768 kbps/ch → 5.1 ≈ 4.6, 7.1 ≈ 6.1 Mbps) |
 | A/V desync bound | ≤ ~40 ms (audio jitter buffer) |
 | CPU (Opus encode) | <1% |

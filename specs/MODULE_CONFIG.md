@@ -189,6 +189,12 @@ bit_depth   = 8                  # 8 or 10
 hdr         = false
 color_space = "bt709"            # "bt709" (SDR) | "bt2020" (HDR)
 
+# Chroma subsampling. "420" = universal (default). "422"/"444" sharpen text/detail
+# but are capability-negotiated: used only if the encoder AND client support them,
+# otherwise transparently falls back to "420" (reliable on native client,
+# best-effort in browser). See MODULE_STREAM_PARAMS "Chroma Subsampling".
+chroma      = "420"              # "420" | "422" | "444"
+
 [stream.adaptive]
 # Bandwidth adaptation policy. Two-tier: fast (send-side, per-frame) +
 # slow (client feedback, 100ms windows). See MODULE_STREAM_PARAMS.md.
@@ -287,8 +293,10 @@ rate_limit_bps = 0              # 0 = unlimited; else throttle to protect video
 
 [gamepad]
 enabled         = false        # opt-in. Requires a gamepad-capable input add-on (vigem, uinput, gcvirtual).
-max_controllers = 4            # 1..4 — XInput cap
+max_controllers = 4            # 1..4 — XInput cap; also the co-op player cap
 allow_rumble    = true         # forward host game vibration requests to the client
+allow_coop      = false        # opt-in: let "role":"player" clients each claim a pad slot
+                               # (local co-op over the network). See MODULE_GAMEPAD "Co-op".
 
 # ═════════════════════════════════════════════════════════════════════════
 # ADD-ON MODULE CONFIGS
@@ -476,6 +484,8 @@ layout          = "standard"  # v1: "standard" Standard Gamepad layout only
 [audio]
 enabled  = false    # opt-in. Requires a compiled-in audio capture add-on.
 frame_ms = 20       # 10 or 20 (lower = less latency, ~2× packet rate)
+channels = "auto"   # "auto" = follow the host output layout (stereo / 5.1 / 7.1, ≤7.1);
+                    # "stereo" = force a host-side downmix to 2.0
 
 [addon_module_wasapi]      # Windows — WASAPI loopback
 device = ""                # "" = default render endpoint; or a specific endpoint id
@@ -514,6 +524,7 @@ target = ""                # "" = auto-detect the default sink's .monitor
 | `stream.fps` | 1–240 | startup error |
 | `stream.bitrate_bps` | 0 (QP mode) or ≥ 100000 (100 kbps minimum) | startup error |
 | `stream.qp` | 0–51 | startup error |
+| `stream.chroma` | `420`/`422`/`444` (422/444 auto-fall-back to 420 if unsupported) | startup error |
 | `stream.width` / `stream.height` | 0 (native) or ≥ 320 | startup error |
 | `auth.mode` | one of `none`/`token`/`password`/`pin`; `none` prints security warning | startup error |
 | `auth.password_hash` | required if `mode = "password"` | startup error |
@@ -531,6 +542,7 @@ target = ""                # "" = auto-detect the default sink's .monitor
 | `gamepad.enabled` requires a gamepad-capable add-on (`vigem`/`uinput`/`gcvirtual`) | else warn, gamepad records dropped | startup warning |
 | `input.enabled` requires an input add-on compiled in | else view-only (warn, not error) | startup warning |
 | `audio.frame_ms` | 10 or 20 | startup error |
+| `audio.channels` | `auto` or `stereo` | startup error |
 | `audio.enabled` requires an audio capture add-on (`wasapi`/`sck_audio`/`pipewire`) | else warn, audio disabled | startup warning |
 | Unknown key anywhere | strict mode | startup error |
 

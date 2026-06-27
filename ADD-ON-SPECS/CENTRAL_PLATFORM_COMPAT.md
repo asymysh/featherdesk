@@ -114,12 +114,18 @@ The wire protocol (`../specs/MODULE_PROTOCOL.md`) is identical on all platforms:
 - 22-byte media `FrameHeader` (Version, Type, Sequence, Timestamp, W, H, PayloadSize) — media channels only (datagram fragment 0 + bootstrap stream)
 - `config` JSON message on the **control stream** as handshake — carries codec string, dims, cursorMode (the binary type-6 Config frame is retired)
 - `FrameTypeVideoH264` (type 1) for video — slot 5 reserved (formerly VP8, rejected)
-- `FrameTypeAudioPCM` (type 4) for audio (deferred)
+- `FrameTypeAudioOpus` (type 8, default) / `FrameTypeAudioPCM` (type 4) for audio — host→client, stereo / 5.1 / 7.1 (impl deferred)
 - **Binary** `[u16 RecLen]`-prefixed input records on the **input stream** (C→S); JSON on the **control stream** for keyframe/resize/etc. — input is NOT JSON
 
 The codec in the `config` message is the **full WebCodecs codec string**:
 - H.264: `"avc1.42E01F"` (Constrained Baseline 3.1) — universal default
 - AV1: `"av01.0.04M.08"` — RTX 40+ NVIDIA (Ada Lovelace), RDNA3+ AMD (RX 7000+), Intel Arc. **No Apple Silicon has AV1 HW encode** (M3+ has decode only).
+
+**Chroma subsampling** (`[stream] chroma`): `420` (universal default) / `422` / `444`.
+4:2:2/4:4:4 sharpen text but are capability-negotiated with a transparent fall-back
+to 4:2:0 (encoder support varies — OpenH264 is 4:2:0-only, x264 does all, NVENC 4:4:4
+on Turing+; and browser decode of 4:4:4 is best-effort, reliable on the native
+client). See [`../specs/MODULE_STREAM_PARAMS.md`](../specs/MODULE_STREAM_PARAMS.md).
 
 ---
 

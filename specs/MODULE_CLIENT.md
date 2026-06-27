@@ -132,11 +132,16 @@ If reassembly deadline expires for a video Type, send JSON
 **Decoder Configuration (driven by the config handshake — fixes the round-1 codec mismatch):**
 ```javascript
 // On config message (a JSON line on the control stream, type == "config"):
-decoder.configure({
-    codec: cfg.codec,          // full WebCodecs string from server, e.g. "avc1.42E01F" (H.264) or "hvc1.*" (HW HEVC)
-    optimizeForLatency: true,
-    // Annex B in-band SPS/PPS → no `description` needed (avc Annex B mode)
-});
+const decCfg = { codec: cfg.codec, optimizeForLatency: true };
+//                                 ↑ Annex B in-band SPS/PPS → no `description` needed
+
+// Chroma gate: 4:2:2/4:4:4 codec strings (avc1.7A…/F4…, hvc1 RExt) aren't decodable
+// in every browser. Probe first; if unsupported, ask the server to downgrade.
+if (!(await VideoDecoder.isConfigSupported(decCfg)).supported) {
+    if (cfg.chroma !== "420") { sendControl({type:"chroma_unsupported"}); return; }
+    // (server re-sends config with the 4:2:0 codec string + a keyframe)
+}
+decoder.configure(decCfg);
 streamWidth = cfg.width; streamHeight = cfg.height; cursorMode = cfg.cursorMode;
 ```
 
@@ -184,7 +189,9 @@ Datagram media payload (Type == 8 AudioOpus, or Type == 4 AudioPCM)
         "opus":     AudioDecoder.decode(EncodedAudioChunk{data})  → AudioData
                     (wasm libopus fallback where AudioDecoder lacks Opus)
         "pcm/s16le": S16LE → Float32 (÷32768) directly, no decoder
-    → post Float32 + capture-timestamp to the AudioWorklet
+    → if config.audioChannels > AudioContext.destination.maxChannelCount:
+        downmix (5.1/7.1 → stereo, ITU-R coefficients) using config.audioLayout
+    → post Float32 (interleaved per audioLayout) + capture-timestamp to the AudioWorklet
     → AUDIO IS NEVER HELD OR DROPPED FOR SYNC. A lost packet is concealed by
       Opus FEC/PLC (or a 20 ms silence for PCM). Audio plays gaplessly.
 

@@ -46,8 +46,10 @@ cfg.excludesCurrentProcessAudio = YES;   // don't capture FeatherDesk's own outp
 ### Format & normalization
 
 SCK delivers Float32 PCM at the configured rate/channels. The add-on converts to
-the canonical **48 kHz / stereo / S16LE** (SCK already gives 48 k stereo when
-asked, so usually just float32 → S16LE).
+the canonical **48 kHz / S16LE**, following the host layout (stereo / 5.1 / 7.1).
+SCK can be asked for the host's channel count; the add-on reorders to canonical
+Vorbis order (`config.audioLayout`) and downmixes to stereo only when
+`[audio] channels = "stereo"`.
 
 ### Timestamp & clock mapping
 

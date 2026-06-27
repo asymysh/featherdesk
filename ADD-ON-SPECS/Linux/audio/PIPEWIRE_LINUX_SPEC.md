@@ -54,9 +54,10 @@ changes without re-discovery. A specific `target` (from config) pins a sink.
 
 ### Format & normalization
 
-The add-on negotiates F32 or S16 at 48 kHz stereo via the SPA pod; if the graph
-delivers another rate/layout it resamples/remixes to the canonical
-**48 kHz / stereo / S16LE**. PipeWire itself usually runs at 48 kHz.
+The add-on negotiates F32 or S16 at 48 kHz via the SPA pod, **following the host
+layout** (stereo / 5.1 / 7.1, capped at 7.1); it reorders the graph's channel
+positions into the canonical Vorbis order (`config.audioLayout`) and downmixes to
+stereo only when `[audio] channels = "stereo"`. PipeWire usually runs at 48 kHz.
 
 ### Timestamp
 

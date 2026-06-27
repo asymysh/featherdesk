@@ -161,6 +161,17 @@ rest of the system relies on:
 So the client's input scaling (which maps pointer coordinates into the advertised
 `config` width/height) is always correct regardless of native capture size.
 
+### Chroma subsampling
+
+HW encoders subsample **inside the encoder** — the input GPU surface is RGB/4:4:4,
+and the encoder produces `Params.ChromaSubsampling` (4:2:0 default, or 4:2:2/4:4:4
+where the silicon supports it: NVENC 4:4:4 on Turing+, others vendor-dependent).
+No CPU converter is involved. The add-on **advertises its supported chroma** in its
+probe capabilities and returns `stream.ErrChromaUnsupported` if asked for one it
+can't emit, so the pipeline falls back to 4:2:0 (see MODULE_STREAM_PARAMS). The
+client-side decode gate (`isConfigSupported` → `chroma_unsupported`) is identical
+to the SW path.
+
 ---
 
 ## Selection (Pipeline Owns This)

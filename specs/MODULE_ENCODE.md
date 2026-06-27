@@ -157,6 +157,24 @@ The Converter is **shared across all SW encoder add-ons** — it lives in
 `internal/encode/convert/` and is built unconditionally when any SW encoder
 build tag is enabled.
 
+### Chroma subsampling (4:2:0 / 4:2:2 / 4:4:4)
+
+`I420` is 4:2:0 — the default. For `Params.ChromaSubsampling = "422"|"444"` the
+path generalizes: the Converter emits **I422** (`*ToI422`) or **I444** (`*ToI444`)
+instead, and the input frame carries its subsampling (the `*I420Frame` type is the
+4:2:0 case of a `*YUVFrame{Subsampling}`). The SW encoder must accept the matching
+format:
+
+- **OpenH264** is **4:2:0-only** → it returns `stream.ErrChromaUnsupported` for
+  422/444; the pipeline falls back to 4:2:0 (see MODULE_STREAM_PARAMS).
+- **x264** supports 4:2:0 / 4:2:2 / 4:4:4 (`-pix_fmt yuv420p|yuv422p|yuv444p` +
+  the matching High profile).
+- HW encoders subsample **inside the encoder** from the GPU surface (see
+  MODULE_HARDWARE_ENCODE), so the converter is not involved on that path.
+
+Each SW encoder add-on **advertises its supported chroma** in its probe
+capabilities; the pipeline never asks an encoder for a chroma it can't produce.
+
 ---
 
 ## Per-Add-On Implementation Pointers

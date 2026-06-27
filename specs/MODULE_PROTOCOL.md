@@ -272,7 +272,7 @@ ordered, **both directions**. A reader frames a message by reading to the next
 {"type": "auth_ok",   "session": { ... }}
 {"type": "auth_failed","reason": "bad token"}
 {"type": "config",    "codec": "avc1.42E01F", "width": 1920, "height": 1080,
-                      "fps": 60, "hdr": false, "color_space": "bt709",
+                      "fps": 60, "hdr": false, "color_space": "bt709", "chroma": "420",
                       "cursorMode": "separate", "session_token": "…",
                       "session_ttl_sec": 3600, "resumed": false}
 {"type": "hdr_unavailable"}                          // HDR requested but no HEVC/10-bit encoder
@@ -286,6 +286,8 @@ ordered, **both directions**. A reader frames a message by reading to the next
 {"type": "set_bitrate", "kbps": 8000}                // dynamic bitrate (control role only)
 {"type": "set_fps", "fps": 30}                       // dynamic frame rate (control role only)
 {"type": "set_hdr", "hdr": true}                     // toggle HDR pipeline
+{"type": "chroma_unsupported"}                       // client can't DECODE the config's chroma
+                                                     // → server downgrades to 4:2:0 + new config + keyframe
 ```
 
 - **Input events are NOT here** — they are binary on the input stream.
@@ -408,10 +410,12 @@ JSON message on the control stream, BEFORE any video/audio/IDR media flows:
     "fps": 60,
     "hdr": false,
     "color_space": "bt709",
+    "chroma": "420",
     "audio": true,
     "audioCodec": "opus",
     "audioSampleRate": 48000,
     "audioChannels": 2,
+    "audioLayout": "stereo",
     "cursorMode": "separate",
     "session_token": "Yhgz...43chars...AbCd",
     "session_ttl_sec": 3600,
@@ -420,6 +424,10 @@ JSON message on the control stream, BEFORE any video/audio/IDR media flows:
 ```
 - `codec` is the **full WebCodecs codec string** (e.g., `avc1.42E01F` for H.264 Constrained Baseline L3.1, or `hvc1.2.4.L93.B0` for HEVC Main10 HDR), not a short label — the client passes it straight to `VideoDecoder.configure({codec})`.
 - `hdr` and `color_space` advertise the HDR mode (see [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md)).
+- `chroma` is the negotiated subsampling (`420`/`422`/`444`). The client probes the
+  `codec` string with `VideoDecoder.isConfigSupported()`; if it can't decode the
+  advertised chroma it replies `{"type":"chroma_unsupported"}` and the server
+  downgrades to `420` (see MODULE_STREAM_PARAMS "Chroma Subsampling").
 - `cursorMode` is `"separate"` (client renders cursor from `CursorUpdate` messages) or `"embedded"` (cursor is burned into the video frame).
 - `session_token` is issued by the server after successful auth (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); client stores it (in-memory only) for reconnection.
 - `session_ttl_sec` is the auth session lifetime (from `[auth] session_ttl_minutes`). The reconnect state cache has a separate, shorter TTL (`[reconnect] cache_ttl_seconds`, default 300s).
@@ -441,10 +449,12 @@ type ConfigPayload struct {
     FPS              int    `json:"fps"`
     HDR              bool   `json:"hdr"`
     ColorSpace       string `json:"color_space"`      // "bt709" | "bt2020"
+    Chroma           string `json:"chroma"`           // "420" | "422" | "444" (negotiated)
     Audio            bool   `json:"audio"`
     AudioCodec       string `json:"audioCodec"`       // "opus" | "pcm/s16le"
     AudioSampleRate  int    `json:"audioSampleRate"`
-    AudioChannels    int    `json:"audioChannels"`
+    AudioChannels    int    `json:"audioChannels"`    // 1..8 (stereo / 5.1 / 7.1)
+    AudioLayout      string `json:"audioLayout"`      // "stereo" | "5.1" | "7.1"
     CursorMode       string `json:"cursorMode"`       // "separate" | "embedded"
     SessionToken     string `json:"session_token"`    // for reconnection
     SessionTTLSec    int    `json:"session_ttl_sec"`
