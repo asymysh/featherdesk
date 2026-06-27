@@ -3,7 +3,7 @@
 ## Pluggable architecture: every encoder is an opt-in add-on
 
 The Linux default binary contains **no encoders**. Every encoder is a separate
-build-tagged add-on. Users compile in exactly the encoders they want.
+add-on shared library. Users drop in exactly the encoders they want.
 
 ```
 specs/addons/linux/encoders/
@@ -20,18 +20,19 @@ specs/addons/linux/encoders/
 
 ## Recommended combinations
 
-| Deployment | Recommended add-on set | Binary |
-|-----------|-----------------------|--------|
-| Generic Linux server (any GPU, commercial) | `openh264` + `libva` | `featherdesk-linux-default` |
-| Home / personal (any GPU, fastest SW) | `x264` + `libva` | `featherdesk-linux-home` |
-| NVIDIA workstation (low latency priority) | `openh264` + `nvenc` | `featherdesk-linux-nvenc` |
-| AMD workstation (quality priority) | `openh264` + `libva` + `amf_rocm` | `featherdesk-linux-amf` |
-| Container / no GPU (commercial) | `openh264` only | `featherdesk-linux-cpu` |
-| Container / no GPU (home, fastest) | `x264` only | `featherdesk-linux-cpu-home` |
+| Deployment | Recommended add-on set |
+|-----------|-----------------------|
+| Generic Linux server (any GPU, commercial) | `openh264` + `libva` |
+| Home / personal (any GPU, fastest SW) | `x264` + `libva` |
+| NVIDIA workstation (low latency priority) | `openh264` + `nvenc` |
+| AMD workstation (quality priority) | `openh264` + `libva` + `amf_rocm` |
+| Container / no GPU (commercial) | `openh264` only |
+| Container / no GPU (home, fastest) | `x264` only |
 
-The build tags compose; users can stack any combination:
+Each add-on is a standalone shared library; drop in any combination you want.
+Build them one at a time, e.g.:
 ```bash
-go build -tags "openh264,x264,libva,nvenc,amf_rocm" -o featherdesk-linux-full ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-openh264.so ./internal/encode/openh264
 ```
 
 ---
@@ -63,7 +64,7 @@ and [`SW/X264_SUBPROCESS_LINUX_SPEC.md`](./SW/X264_SUBPROCESS_LINUX_SPEC.md).
 
 ## Codec fallback order at runtime
 
-When multiple encoders are compiled in, the pipeline probes in this order:
+When multiple encoders are loaded, the pipeline probes in this order:
 
 ```
 1. NVENC available (hardware + add-on)?    → use NVENC

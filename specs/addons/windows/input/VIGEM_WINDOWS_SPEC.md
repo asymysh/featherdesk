@@ -132,7 +132,7 @@ until next call"; the client refreshes on each event.
 ## Build & Distribution
 
 ```bash
-go build -tags "vigem" -o featherdesk-windows.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-vigem.dll ./internal/input/vigem
 ```
 
 CGo config:
@@ -165,7 +165,7 @@ The ViGEmBus driver is a signed kernel driver; install once, reboot once:
 ## Constructor & Probe
 
 ```go
-// internal/input/vigem/vigem_windows.go  (build tag: vigem)
+// internal/input/vigem/vigem_windows.go  (built into the add-on's shared library)
 
 // Probe returns true if ViGEmClient.dll loads AND vigem_connect succeeds
 // (driver present and not in a broken state).
@@ -201,13 +201,15 @@ the log.
 
 ```
 internal/input/vigem/
-├── vigem_windows.go      // build tag: vigem (GamepadInjector impl, CGo)
+├── vigem_windows.go      // built into the add-on's shared library (GamepadInjector impl, CGo)
 ├── buttons.go            // W3C bit -> XUSB_GAMEPAD_* mask table
 ├── rumble.go             // notification callback + emitter wiring
-├── stub.go               // build tag: !vigem (no-op, never registers)
 ├── vendor/vigem/         // ViGEm/Client.h + import lib (dynamic)
 └── vigem_test.go
 ```
+
+No `!vigem` stub file is needed — the add-on is its own shared library; an absent
+add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 
@@ -222,7 +224,7 @@ driver_check    = true   # at startup verify the driver is loaded; false skips a
 controller_type = "x360" # v1 supports "x360" only; "ds4" is reserved for a future release
 ```
 
-If absent, defaults apply. Strictly validated only when this add-on is compiled in.
+If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ---
 

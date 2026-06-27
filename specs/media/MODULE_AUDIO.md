@@ -27,11 +27,11 @@ connected clients, tightly synchronized to the video. It follows the same
 
 - The **core** module (this spec) defines the `AudioCapturer` + `AudioEncoder`
   interface contracts, the wire framing, and the A/V-sync model.
-- **Capture** is a per-OS build-tagged add-on (WASAPI loopback / ScreenCaptureKit
+- **Capture** is a per-OS add-on shared library (WASAPI loopback / ScreenCaptureKit
   audio / PipeWire). The default binary ships **none** — no audio add-on means no
   audio, exactly like "no input add-on means view-only".
 - **Codec** is pluggable and **advertised in the `config` message** (like the
-  video codec): **Opus** when the `opus` build tag is present (compressed,
+  video codec): **Opus** when the `opus` add-on is loaded (compressed,
   loss-resilient), otherwise **raw PCM** passthrough (zero dependency).
 
 There is **no subprocess** (`pw-cat`/`parec` are gone) and **no custom logger**
@@ -60,7 +60,7 @@ type AudioCapturer interface {
     Close() error
 }
 
-// AudioEncoder turns PCM chunks into wire payloads. Build-tagged:
+// AudioEncoder turns PCM chunks into wire payloads. Selected by loaded add-on:
 //   opus  → internal/audio/opus/  (libopus, BSD, in-process CGo)
 //   <none>→ PCM passthrough (built-in; copies the S16LE bytes through)
 type AudioEncoder interface {
@@ -102,7 +102,7 @@ const (
 )
 
 // AudioConfig is the core config (from [audio] TOML). Per-add-on device
-// selection lives in [addon_module_<tag>].
+// selection lives in [addon_module_<id>].
 type AudioConfig struct {
     FrameMs  int          // 10 or 20 (default 20). Drives PCMChunk size + Opus frame.
     Channels string       // "auto" (follow host, ≤7.1) | "stereo" (force downmix at host)
@@ -126,7 +126,7 @@ const (
 
 ## Pluggable Capture Add-Ons (one per OS)
 
-| OS | Build tag | Mechanism | Driver? | Spec |
+| OS | Add-on ID | Mechanism | Driver? | Spec |
 |----|-----------|-----------|---------|------|
 | **Windows** | `wasapi` | WASAPI **loopback** on the default render endpoint (`AUDCLNT_STREAMFLAGS_LOOPBACK`) | none | [`../addons/windows/audio/WASAPI_WINDOWS_SPEC.md`](../addons/windows/audio/WASAPI_WINDOWS_SPEC.md) |
 | **macOS** | `sck_audio` | ScreenCaptureKit `SCStreamConfiguration.capturesAudio` (macOS 13+) | none | [`../addons/macos/audio/SCK_AUDIO_MACOS_SPEC.md`](../addons/macos/audio/SCK_AUDIO_MACOS_SPEC.md) |
@@ -142,9 +142,9 @@ capture — same process, same clock.
 
 ## Codec (pluggable, advertised in `config`)
 
-| Codec | Build tag | Library | Bandwidth | On loss | Wire type |
+| Codec | Add-on ID | Library | Bandwidth | On loss | Wire type |
 |-------|-----------|---------|-----------|---------|-----------|
-| **Opus** (default when compiled) | `opus` | libopus (BSD, CGo) | ~96–128 kbps VBR | **FEC + PLC conceals** dropped packets | `FrameTypeAudioOpus` (0x08) |
+| **Opus** (default when loaded) | `opus` | libopus (BSD, CGo) | ~96–128 kbps VBR | **FEC + PLC conceals** dropped packets | `FrameTypeAudioOpus` (0x08) |
 | **Raw PCM** (built-in fallback) | — | none | 1.536 Mbps | a lost packet = a ~20 ms gap (no concealment) | `FrameTypeAudioPCM` (0x04) |
 
 - The server advertises the codec in the **`config`** control-stream message
@@ -231,7 +231,7 @@ realtime).
   - video **behind** by more than ~1 frame interval → drop frame(s) to catch up.
 - Desync is therefore **self-correcting and bounded by the audio buffer (~40 ms)**.
 
-If audio is disabled or no audio add-on is compiled, video presents on its own
+If audio is disabled or no audio add-on is loaded, video presents on its own
 capture clock (the pre-audio behavior) — there is no master to slave to.
 
 ---
@@ -283,11 +283,11 @@ capture clock (the pre-audio behavior) — there is no master to slave to.
 
 ```toml
 [audio]
-enabled    = false   # opt-in. Requires a compiled-in audio capture add-on.
+enabled    = false   # opt-in. Requires a loaded audio capture add-on.
 frame_ms   = 20      # 10 or 20 (lower = less latency, ~2× packet rate)
 channels   = "auto"  # "auto" = follow the host output layout (≤7.1); "stereo" =
                      # force a host-side downmix to 2.0
-# codec is chosen by build tags: `opus` ⇒ Opus (multistream for 5.1/7.1), else PCM.
+# codec is chosen by which add-on is loaded: `opus` ⇒ Opus (multistream for 5.1/7.1), else PCM.
 
 [addon_module_wasapi]   # Windows
 device = ""             # "" = default render endpoint (loopback). Or an endpoint id.
@@ -299,7 +299,7 @@ exclude_current_process = true  # don't capture FeatherDesk's own output
 target = ""             # "" = auto-detect the default sink's .monitor
 ```
 
-`[audio] enabled = true` with no audio add-on compiled in → startup **warning**,
+`[audio] enabled = true` with no audio add-on loaded → startup **warning**,
 audio silently disabled (matches the gamepad/input "needs an add-on" pattern).
 
 ---
@@ -310,9 +310,9 @@ audio silently disabled (matches the gamepad/input "needs an add-on" pattern).
 |----|-----|-----|
 | R-AUD-01 | race in `pw-cat reconnect()` | N/A — no subprocess; native capture add-ons own their lifecycle |
 | R-AUD-02/03 | SIGTERM/backoff for `pw-cat` | N/A — no subprocess |
-| R-AUD-04 | extract to `pkg/audio` | Core `AudioCapturer`/`AudioEncoder` in `pkg/audio`; impls in `internal/audio/<tag>/` |
+| R-AUD-04 | extract to `pkg/audio` | Core `AudioCapturer`/`AudioEncoder` in `pkg/audio`; impls in `internal/audio/<id>/` |
 | R-AUD-05 | custom logger | **Done** — `*slog.Logger` everywhere |
-| R-AUD-06 | Opus "future" | **Now the default codec** (build tag `opus`); PCM is the fallback |
+| R-AUD-06 | Opus "future" | **Now the default codec** (`opus` add-on); PCM is the fallback |
 | R-AUD-07 | configurable buffer | Buffers are small + fixed for realtime; `frame_ms` is the only knob |
 | R-AUD-09 | ALSA/Pulse fallback | Lives inside the `pipewire` Linux add-on |
 | R-AUD-10 | overloaded Width/Height | **Done** — audio params moved to the `config` message |

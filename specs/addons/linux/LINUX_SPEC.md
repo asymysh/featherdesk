@@ -14,7 +14,7 @@ hardware encoder path still to be built.
 ### Every capture backend is an add-on (pluggable architecture)
 
 The Linux default binary contains **no capture backends**. Every capture path is
-a build-tagged add-on, mirroring the encoder architecture. Users compile in
+an add-on shared library, mirroring the encoder architecture. Users drop in
 exactly the capture method(s) they need.
 
 ```
@@ -26,7 +26,7 @@ capture/
 
 ### Add-on summary
 
-| Add-on | Build tag | Hardware | Spec | When to use |
+| Add-on | Add-on ID | Hardware | Spec | When to use |
 |--------|-----------|----------|------|------------|
 | **KMS+EGL DMA-BUF** | `kms_egl` | Any GPU, any display server | [`capture/KMS_EGL_LINUX_SPEC.md`](./capture/KMS_EGL_LINUX_SPEC.md) | Universal default — requires `CAP_SYS_ADMIN` |
 | **NvFBC** | `nvfbc` | NVIDIA proprietary driver only | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower than KMS+EGL on NVIDIA proprietary; official NVIDIA path; pairs with NVENC encoder for full zero-copy GPU-resident pipeline |
@@ -51,8 +51,8 @@ XShm or PipeWire portal add-on.
 ### Runtime probe order
 
 ```
-1. nvfbc add-on compiled in AND NVIDIA proprietary driver present?  → use NvFBC
-2. kms_egl add-on compiled in AND root / CAP_SYS_ADMIN?             → use KMS+EGL
+1. nvfbc add-on loaded AND NVIDIA proprietary driver present?       → use NvFBC
+2. kms_egl add-on loaded AND root / CAP_SYS_ADMIN?                  → use KMS+EGL
 3. None of the above?                                                → fatal: no capture
 ```
 
@@ -67,7 +67,7 @@ paths (wlr-screencopy, XShm, X11grab, etc.) were considered and rejected.
 ### Every encoder is an add-on (pluggable architecture)
 
 The Linux default binary contains **no encoders**. Every encoder — software and
-hardware — is a build-tagged add-on. Users compile in exactly the encoders they
+hardware — is an add-on shared library. Users drop in exactly the encoders they
 want. The full set:
 
 ```

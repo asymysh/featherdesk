@@ -53,28 +53,28 @@ otherwise silently fall back to defaults.
 
 **Exception: add-on module sections.**
 
-Sections matching `[addon_module_<name>]` are validated only when the
-matching add-on is compiled into the binary (i.e. `<name>` matches an
-active Go build tag).
+Sections matching `[addon_module_<id>]` are validated only when the matching
+add-on **library is loaded** (i.e. `<id>` matches a `featherdesk-addon-<id>.*`
+library found in the add-ons directory; see `[addons] dir`).
 
-- Add-on section present + add-on compiled in → strict validation (unknown keys fail)
-- Add-on section present + add-on NOT compiled in → silently ignored
-- Add-on section absent + add-on compiled in → add-on uses built-in defaults
-- Add-on section absent + add-on NOT compiled in → no effect
+- Add-on section present + add-on loaded → strict validation (unknown keys fail)
+- Add-on section present + add-on NOT loaded → silently ignored
+- Add-on section absent + add-on loaded → add-on uses built-in defaults
+- Add-on section absent + add-on NOT loaded → no effect
 
-This lets one config file serve any compiled variant of the binary
-without having to maintain per-variant configs.
+This lets one config file serve any set of loaded add-ons without having to
+maintain per-deployment configs.
 
 ### Section naming convention
 
 ```
-[addon_module_<build_tag>]
+[addon_module_<id>]
 ```
 
-Where `<build_tag>` is the **exact** Go build tag used to compile the
-add-on. Examples:
+Where `<id>` is the **exact** add-on ID (the `<id>` in `featherdesk-addon-<id>`).
+Examples:
 
-| Build tag | TOML section |
+| Add-on ID | TOML section |
 |-----------|-------------|
 | `openh264` | `[addon_module_openh264]` |
 | `x264` | `[addon_module_x264]` |
@@ -86,7 +86,7 @@ add-on. Examples:
 | `dxgi_dd` | `[addon_module_dxgi_dd]` |
 | `kms_egl` | `[addon_module_kms_egl]` |
 | `sck` | `[addon_module_sck]` |
-| `opus` | _(no section — codec build tag; selects the audio codec)_ |
+| `opus` | _(no section — codec add-on; selects the audio codec)_ |
 | `wasapi` | `[addon_module_wasapi]` |
 | `sck_audio` | `[addon_module_sck_audio]` |
 | `pipewire` | `[addon_module_pipewire]` |
@@ -142,19 +142,30 @@ bind    = "127.0.0.1"             # private by default; not authenticated
 port    = 9090                    # Prometheus scrape port  (restart required)
 path    = "/metrics"
 
+[addons]
+# Directory the host scans at startup for add-on shared libraries
+# (featherdesk-addon-<id>.{so,dylib,dll}). Each is dlopen'd, its ABIVersion
+# checked, and its capability descriptor registered. Default is per-OS:
+#   Linux:   $XDG_DATA_HOME/featherdesk/addons  (or ~/.local/share/featherdesk/addons)
+#   macOS:   ~/Library/Application Support/FeatherDesk/addons
+#   Windows: %PROGRAMDATA%\FeatherDesk\addons
+dir          = ""                 # "" = per-OS default above (restart required)
+abi_strict   = false              # true = a single ABI-mismatched library aborts startup
+                                  # false = skip incompatible libraries with a warning
+
 [capture]
-# Mode controls how the runtime picks among compiled-in capture add-ons.
+# Mode controls how the runtime picks among loaded capture add-ons.
 #   auto    = probe in default order
 #   forced  = use force_addon only, fail at startup if unavailable
 mode         = "auto"
 force_addon  = ""                 # e.g. "kms_egl", "nvfbc", "sck", "dxgi_dd" (restart required)
 
 [encode]
-# Mode controls how the runtime picks among compiled-in encoder add-ons.
+# Mode controls how the runtime picks among loaded encoder add-ons.
 #   auto    = HW HEVC → HW H.264 → SW H.264 probe order
 #   forced  = use force_addon only, fail at startup if unavailable
 mode         = "auto"
-force_addon  = ""                 # e.g. "libva", "nvenc", "vt_hw", "openh264", "x264"
+force_addon  = ""                 # e.g. "libva", "nvenc", "vt_hw", "openh264", "x264" (restart required)
 
 [encode.cursor]
 mode = "separate"                 # "separate" (client renders) | "embedded" (server blends)
@@ -258,11 +269,11 @@ require_same_auth     = true         # don't allow resume with different credent
 # NOTE: max connections is server.max_clients (not here)
 
 # ─────────────────────────────────────────────────────────────────────────
-# INPUT (injection — requires a compiled-in input add-on; see MODULE_INPUT.md)
+# INPUT (injection — requires a loaded input add-on; see MODULE_INPUT.md)
 # ─────────────────────────────────────────────────────────────────────────
 
 [input]
-enabled        = true     # master switch. false = view-only even if an add-on is compiled in.
+enabled        = true     # master switch. false = view-only even if an add-on is loaded.
 relative_mouse = true     # honor pointer-lock relative-mode frames (FPS gaming)
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -302,27 +313,27 @@ allow_coop      = false        # opt-in: let "role":"player" clients each claim 
 # ADD-ON MODULE CONFIGS
 # ═════════════════════════════════════════════════════════════════════════
 #
-# Each compiled-in add-on may have its own [addon_module_<name>] section.
-# Section name MUST match the build tag exactly (e.g. `-tags openh264`
-# pairs with `[addon_module_openh264]`).
+# Each loaded add-on may have its own [addon_module_<id>] section.
+# Section name MUST match the add-on ID exactly (e.g. the
+# `featherdesk-addon-openh264` library pairs with `[addon_module_openh264]`).
 #
 # Rules:
-#   - Sections for add-ons NOT compiled into the binary are SILENTLY IGNORED
+#   - Sections for add-ons NOT loaded are SILENTLY IGNORED
 #     (not strict-rejected). This lets a single config file work for any
-#     binary variant.
-#   - Sections for add-ons that ARE compiled in undergo strict validation —
+#     set of loaded add-ons.
+#   - Sections for add-ons that ARE loaded undergo strict validation —
 #     unknown keys fail parsing.
 #   - The active encoder reads ONLY its own [addon_module_*] section. The
 #     main [encode] section provides selection (mode, force_addon, cursor);
 #     dynamic per-frame parameters (width, height, fps, qp, bitrate, hdr)
 #     live in [stream] and are passed via stream.Params; the add-on section
-#     provides BUILD-TIME tuning that doesn't change at runtime.
+#     provides STATIC tuning (read once at startup) that doesn't change at runtime.
 #   - If an add-on section is absent, the add-on uses its built-in defaults.
 #
 # What lives where:
 #   [stream]              — dynamic, runtime-mutable (width, fps, bitrate, qp, hdr)
 #   [encode]              — codec-agnostic selection (mode, force_addon, cursor)
-#   [addon_module_*]      — build-time tuning specific to one add-on
+#   [addon_module_*]      — static (startup-read) tuning specific to one add-on
 #
 # ─────────────────────────────────────────────────────────────────────────
 # SW H.264 add-ons
@@ -366,7 +377,7 @@ profile          = "h264_high"    # "h264_baseline" | "h264_main" | "h264_high" 
 multipass        = "disabled"     # "disabled" | "qres" | "fullres"
 
 [addon_module_amf]
-# AMD AMF SDK on Windows. (Linux uses [addon_module_amf_rocm] — same keys, different build tag.)
+# AMD AMF SDK on Windows. (Linux uses [addon_module_amf_rocm] — same keys, different add-on ID.)
 usage            = "lowlatency"   # "transcoding" | "ultralowlatency" | "lowlatency" | "webcam"
 quality          = "speed"        # "speed" | "balanced" | "quality"
 profile          = "high"         # "baseline" | "main" | "high"
@@ -478,11 +489,11 @@ layout          = "standard"  # v1: "standard" Standard Gamepad layout only
 # AUDIO (host→client system audio; DESIGN LOCKED, implementation deferred behind
 # the video trigger — see MODULE_AUDIO.md). Schema below IS enforced once the
 # audio add-ons land; the [audio] section + struct field exist now so a config
-# carrying them parses. Codec is chosen by build tags (`opus` ⇒ Opus, else PCM).
+# carrying them parses. Codec is chosen by the loaded audio codec add-on (`opus` ⇒ Opus, else PCM).
 # ─────────────────────────────────────────────────────────────────────────
 
 [audio]
-enabled  = false    # opt-in. Requires a compiled-in audio capture add-on.
+enabled  = false    # opt-in. Requires a loaded audio capture add-on.
 frame_ms = 20       # 10 or 20 (lower = less latency, ~2× packet rate)
 channels = "auto"   # "auto" = follow the host output layout (stereo / 5.1 / 7.1, ≤7.1);
                     # "stereo" = force a host-side downmix to 2.0
@@ -517,9 +528,9 @@ target = ""                # "" = auto-detect the default sink's .monitor
 | `log.output` | `stderr` / `stdout` / writable file path | startup error |
 | `metrics.port` | 1–65535, must differ from the port in `server.bind` | startup error |
 | `capture.mode` | `auto` or `forced` | startup error |
-| `capture.force_addon` | required if `mode = "forced"`; must be a compiled-in build tag | startup error |
+| `capture.force_addon` | required if `mode = "forced"` (phase A); must name a loaded add-on ID (phase B, in `pipeline.New` after the add-ons dir is scanned) | startup error |
 | `encode.mode` | `auto` or `forced` | startup error |
-| `encode.force_addon` | required if `mode = "forced"`; must be a compiled-in build tag | startup error |
+| `encode.force_addon` | required if `mode = "forced"` (phase A); must name a loaded add-on ID (phase B, in `pipeline.New` after the add-ons dir is scanned) | startup error |
 | `encode.cursor.mode` | `separate` or `embedded` | startup error |
 | `stream.fps` | 1–240 | startup error |
 | `stream.bitrate_bps` | 0 (QP mode) or ≥ 100000 (100 kbps minimum) | startup error |
@@ -540,7 +551,7 @@ target = ""                # "" = auto-detect the default sink's .monitor
 | `filetransfer.max_concurrent` | 1–16 | startup error |
 | `gamepad.max_controllers` | 1–4 | startup error |
 | `gamepad.enabled` requires a gamepad-capable add-on (`vigem`/`uinput`/`gcvirtual`) | else warn, gamepad records dropped | startup warning |
-| `input.enabled` requires an input add-on compiled in | else view-only (warn, not error) | startup warning |
+| `input.enabled` requires an input add-on loaded | else view-only (warn, not error) | startup warning |
 | `audio.frame_ms` | 10 or 20 | startup error |
 | `audio.channels` | `auto` or `stereo` | startup error |
 | `audio.enabled` requires an audio capture add-on (`wasapi`/`sck_audio`/`pipewire`) | else warn, audio disabled | startup warning |
@@ -634,9 +645,17 @@ type TransportSection struct {
 type Duration struct{ time.Duration }
 type ByteSize int64
 
-// Load parses + validates the config at path, applies defaults, and returns
-// a fully-populated Config. Errors are clear and actionable (file + line + key).
+// Load does PHASE-A validation only (syntax, defaults, intra-section rules). It
+// captures unknown [addon_module_*] sections RAW (as toml.Primitive) instead of
+// failing on them — their strict decode is deferred to phase B, when the loaded
+// add-on set is known. Errors are clear and actionable (file + line + key).
 func Load(path string) (*Config, error)
+
+// Validate does PHASE-B (load-aware) validation: force_addon must name a loaded
+// add-on ID, and each captured [addon_module_<id>] primitive is strict-decoded
+// iff its add-on is loaded (else silently ignored). Called from pipeline.New
+// after the add-ons directory has been scanned.
+func Validate(cfg *Config, loaded AddonSet) error
 
 // Watch sets up signal handling for hot reload. Calls fn on every successful
 // reload. fn must not block — apply changes asynchronously.
@@ -644,7 +663,10 @@ func Watch(ctx context.Context, path string, fn func(*Config)) error
 ```
 
 The TOML parser is `github.com/BurntSushi/toml` with strict mode
-(`Decoder.DisallowUnknownFields()`).
+(`Decoder.DisallowUnknownFields()`) for known sections; `[addon_module_*]`
+sections are decoded as `toml.Primitive` and strict-validated per-add-on in
+phase B (so a misspelled add-on id in a section name is silently ignored, not
+flagged — verify the add-on logged its loaded config).
 
 ---
 

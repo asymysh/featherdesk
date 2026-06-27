@@ -18,7 +18,7 @@ Low-latency remote desktop streaming. Single binary, embedded web client, sub-20
 
 ## Architecture in one paragraph
 
-Zero-by-default plugin model. The default binary ships with no capture backend, no encoder, and no input injector — all of these are build-tagged add-ons. Users compose the binary they need by combining one capture add-on, one or more encoder add-ons, and one or more input add-ons via Go build tags. The core modules (protocol, server, client, pipeline, config, auth, input dispatcher, clipboard, file transfer, gamepad) are always present and transport-agnostic.
+Zero-by-default plugin model. The default binary ships with no capture backend, no encoder, and no input injector — all of these are add-on shared libraries. Users compose the deployment they need by dropping the add-on shared libraries they want (one capture add-on, one or more encoder add-ons, and one or more input add-ons) into the add-ons directory; the host loads them at runtime via dlopen. The core modules (protocol, server, client, pipeline, config, auth, input dispatcher, clipboard, file transfer, gamepad) are always present and transport-agnostic.
 
 ## Core modules
 
@@ -40,7 +40,7 @@ Zero-by-default plugin model. The default binary ships with no capture backend, 
 | [`MODULE_AUTH`](./specs/core/MODULE_AUTH.md) | Auth modes + session tokens |
 | [`MODULE_STREAM_PARAMS`](./specs/core/MODULE_STREAM_PARAMS.md) | Dynamic stream params + adaptive bitrate |
 
-Plus deferred specs (`MODULE_AUDIO`) and the [`specs/addons/`](./specs/addons/) tree for every build-tagged backend.
+Plus deferred specs (`MODULE_AUDIO`) and the [`specs/addons/`](./specs/addons/) tree for every add-on shared library.
 
 ## Out of scope (permanently)
 
@@ -81,7 +81,7 @@ The spec phase is complete and audited. The path from here:
 
 ## License
 
-Per build variant. Each encoder add-on declares its own license; the main binary's license depends on which add-ons are compiled in (e.g. `x264` ffmpeg-subprocess builds are GPL-2 isolated; `openh264` builds stay permissive). See individual `specs/addons/` entries.
+Per add-on shared library. Each encoder add-on declares its own license and ships as a separate shared library; the host binary never links add-on code, so its license is independent of which add-ons are dropped in (e.g. the GPL-2 `x264` ffmpeg-subprocess add-on stays isolated in its own library; the `openh264` add-on stays permissive). See individual `specs/addons/` entries.
 
 ## Status
 

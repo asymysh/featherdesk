@@ -6,10 +6,12 @@ libx264 H.264 software encoder running as a **separate subprocess** to maintain
 GPL isolation from the proprietary main binary. The fastest software H.264
 encoder available — 2x faster than OpenH264 at equivalent quality.
 
-The subprocess model: the main `featherdesk` binary (proprietary) spawns a
-small GPL-licensed encoder process. Communication via stdin/stdout pipe (raw
-I420 frames in, H.264 NALs out). Only the encoder subprocess is GPL; the main
-binary never links libx264.
+The subprocess model: the `x264` **add-on shared library** spawns a small
+GPL-licensed encoder process. Communication via stdin/stdout pipe (raw I420
+frames in, H.264 NALs out). Only the encoder subprocess is GPL; neither the
+add-on library nor the host links libx264. The x264 bridge is pure Go (os/exec +
+io.Pipe); only a thin cgo shim that exports the C-ABI `FeatherDeskAddonOpen`
+entry point is compiled for the c-shared build.
 
 ---
 
@@ -119,14 +121,15 @@ Parameters controlled by the Go bridge via config:
 
 ## Build & Distribution
 
-### Build tag
+### Shared library (c-shared)
 
 ```bash
-go build -tags x264 -o featherdesk ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-x264.dylib ./internal/encode/x264
 ```
 
-The `x264` build tag compiles in the Go bridge code that spawns the subprocess.
-No C compilation needed — the bridge is pure Go (os/exec + io.Pipe).
+The `x264` add-on shared library packages the Go bridge code that spawns the
+subprocess. No libx264 C compilation needed in the add-on — the bridge is pure
+Go (os/exec + io.Pipe), and GPL libx264 lives entirely in the ffmpeg subprocess.
 
 ### Runtime dependency
 
@@ -150,10 +153,11 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 ```
 internal/encode/x264/
 ├── x264.go              // Go bridge: subprocess management, pipe I/O
-├── x264_stub.go         // No-op stub (build tag: !x264)
 ├── nal_split.go         // H.264 NAL unit splitting from pipe stream
 └── x264_test.go         // Integration test (requires ffmpeg)
 ```
+
+> No `!x264` stub file is needed — the add-on is its own shared library.
 
 ---
 
@@ -210,7 +214,7 @@ This add-on reads its tuning knobs from the `[addon_module_x264]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

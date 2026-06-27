@@ -50,7 +50,7 @@ Probe via `AMFCreateContext` + `InitDX11` + enumerate available codec components
 ## Build & Distribution
 
 ```bash
-go build -tags amf -o featherdesk-windows-amf.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-amf.dll ./internal/encode/amf
 ```
 
 CGo config:
@@ -155,14 +155,17 @@ encode latency cost — often worth it for bandwidth-constrained scenarios.
 ```
 internal/encode/amf/
 ├── amf.go
-├── amf_cgo_windows.go    // build tag: amf,windows
-├── amf_cgo_linux.go      // build tag: amf_rocm,linux (Linux ROCm variant)
-├── amf_stub.go           // build tag: !amf,!amf_rocm
+├── amf_cgo_windows.go    // built into the amf add-on's shared library (//go:build windows)
+├── amf_cgo_linux.go      // built into the amf_rocm add-on's shared library, Linux ROCm variant (//go:build linux)
 ├── d3d11_interop.go      // CreateSurfaceFromDX11Native wrapping
 ├── probe.go
 ├── amf/                  // AMF SDK headers (Apache 2.0)
 └── amf_test.go
 ```
+
+No `!amf` / `!amf_rocm` stub files are needed — each variant is its own shared library
+(`amf` on Windows, `amf_rocm` on Linux); an absent add-on is simply a `.dll`/`.so`
+that isn't in the add-ons directory.
 
 ---
 
@@ -191,7 +194,7 @@ This add-on reads its tuning knobs from the `[addon_module_amf]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

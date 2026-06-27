@@ -26,7 +26,7 @@ capture/
 
 ### Add-on summary
 
-| Add-on | Build tag | Hardware | Spec | Headless support |
+| Add-on | Add-on ID | Hardware | Spec | Headless support |
 |--------|-----------|----------|------|------------------|
 | **DXGI Desktop Duplication** | `dxgi_dd` | Any GPU (WDDM 1.2+, Win 8+) | [`capture/DXGI_DD_WINDOWS_SPEC.md`](./capture/DXGI_DD_WINDOWS_SPEC.md) | Integrated IddCx virtual display driver auto-installs on first launch when no physical display detected |
 
@@ -58,9 +58,9 @@ for the full auto-install flow.
 ### Runtime probe order
 
 ```
-1. dxgi_dd compiled in AND active display found?              → use DXGI DD
-2. dxgi_dd compiled in AND no display + admin?                → install IddCx VDD → use DXGI DD
-3. dxgi_dd compiled in AND no display + no admin?             → prompt for elevation, then continue
+1. dxgi_dd loaded AND active display found?                   → use DXGI DD
+2. dxgi_dd loaded AND no display + admin?                     → install IddCx VDD → use DXGI DD
+3. dxgi_dd loaded AND no display + no admin?                  → prompt for elevation, then continue
 4. None of the above?                                          → fatal: no capture add-on installed
 ```
 
@@ -84,7 +84,7 @@ effectively zero.
 ### Every encoder is an add-on (pluggable architecture)
 
 The Windows default binary contains **no encoders**. Every encoder — software and
-hardware — is a build-tagged add-on. Users compile in exactly the encoders they
+hardware — is an add-on shared library. Users drop in exactly the encoders they
 want. The full set:
 
 ```

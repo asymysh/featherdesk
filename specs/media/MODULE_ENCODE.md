@@ -6,9 +6,9 @@ The Encode module defines the **abstract software encoder interface contract**
 that every SW encoder add-on implements. It owns no encoder implementation
 itself — concrete encoders live in their respective add-on specs:
 
-- `internal/encode/openh264/` — Cisco OpenH264 CGo (build tag `openh264`, BSD)
-- `internal/encode/x264/` — x264 via ffmpeg subprocess (build tag `x264`, GPL-isolated)
-- `internal/encode/vt/` — VideoToolbox SW (build tag `vt_sw`, macOS-only)
+- `internal/encode/openh264/` — Cisco OpenH264 CGo (add-on ID `openh264`, BSD)
+- `internal/encode/x264/` — x264 via ffmpeg subprocess (add-on ID `x264`, GPL-isolated)
+- `internal/encode/vt/` — VideoToolbox SW (add-on ID `vt_sw`, macOS-only)
 
 This separation keeps the module spec stable while allowing add-on
 implementations to evolve independently.
@@ -69,7 +69,7 @@ type I420Frame struct {
 // MODULE_STREAM_PARAMS.md).
 //
 // Per-add-on STATIC tuning (preset, threads, profile) comes from the
-// [addon_module_<tag>] TOML section. This struct holds only the initial
+// [addon_module_<id>] TOML section. This struct holds only the initial
 // dynamic values needed for first-frame encoding.
 type EncoderConfig struct {
     InitialParams stream.Params  // initial Width/Height/FPS/BitrateBps/QP/HDR/etc.
@@ -123,13 +123,13 @@ The Encode module does **not** decide which encoder to use. That dispatch lives
 in [`MODULE_PIPELINE.md`](../core/MODULE_PIPELINE.md), which:
 
 1. Reads `[encode]` config (mode = "auto" | "forced", force_addon if forced)
-2. Probes each compiled-in HW encoder add-on (NVENC, AMF, libva, MF HW, QSV, VT HW)
-3. Falls through to compiled-in SW encoder add-ons (x264 > VT SW > OpenH264)
+2. Probes each loaded HW encoder add-on (NVENC, AMF, libva, MF HW, QSV, VT HW)
+3. Falls through to loaded SW encoder add-ons (x264 > VT SW > OpenH264)
 4. Calls the chosen add-on's constructor with `EncoderConfig`
 5. Passes the resulting `Encoder` to the frame loop
 
 There is **no `EncoderBackend` enum** in this module. Selection is purely
-runtime — the compiled-in set of add-ons determines what's available, and
+runtime — the loaded set of add-ons determines what's available, and
 the TOML config decides how to choose among them.
 
 ---
@@ -155,7 +155,7 @@ RGBA []byte → libyuv ABGRToI420() → Y/U/V planes   (Linux GL)
 
 The Converter is **shared across all SW encoder add-ons** — it lives in
 `internal/encode/convert/` and is built unconditionally when any SW encoder
-build tag is enabled.
+add-on is loaded.
 
 ### Chroma subsampling (4:2:0 / 4:2:2 / 4:4:4)
 
@@ -181,10 +181,10 @@ capabilities; the pipeline never asks an encoder for a chroma it can't produce.
 
 Each SW encoder add-on owns its own spec. The Encode module spec is the
 interface contract above; the implementation details, performance numbers,
-licensing, build tags, and CGo / subprocess details all live in the add-on
+licensing, add-on IDs, and CGo / subprocess details all live in the add-on
 specs.
 
-| Add-on | Build tag | License | Linux | macOS | Windows |
+| Add-on | Add-on ID | License | Linux | macOS | Windows |
 |--------|-----------|---------|-------|-------|---------|
 | OpenH264 CGo | `openh264` | BSD-2 (Cisco) | [`specs/addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) |
 | x264 subprocess | `x264` | GPL-2 (isolated) | [`specs/addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](../addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](../addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) |
@@ -197,12 +197,12 @@ specs.
 To avoid leaking implementation details into the interface contract, the
 Encode module deliberately excludes:
 
-- **No backend enum.** Selection is by compiled build tags + runtime config.
+- **No backend enum.** Selection is by loaded add-ons + runtime config.
 - **No subprocess management.** The x264 add-on owns its ffmpeg subprocess
   lifecycle internally; the pipeline sees only the `Encoder` interface.
 - **No codec parameters beyond `EncoderConfig`.** Per-add-on tuning (x264
   preset, OpenH264 slice count, VT realtime flag) lives in
-  `[addon_module_<tag>]` TOML sections.
+  `[addon_module_<id>]` TOML sections.
 - **No server-side NAL parsing.** Encoders return one Annex B access unit **plus
   a `keyframe bool`** (the encoder knows when it produced an IDR/IRAP). The
   server trusts that flag for IDR caching + the bootstrap stream and never
@@ -218,7 +218,7 @@ Encode module deliberately excludes:
 
 | Add-on | Status |
 |--------|--------|
-| OpenH264 CGo | ✅ Working in current code; refactor moves to `internal/encode/openh264/` under `openh264` build tag |
+| OpenH264 CGo | ✅ Working in current code; refactor moves to `internal/encode/openh264/` under add-on ID `openh264` |
 | x264 subprocess | ✅ Benchmarked via ffmpeg pipe (3.3ms @ 1080p on Ryzen 9 5900X); implementation pending |
 | VideoToolbox SW | 📋 Specced; macOS native benchmarks pending |
 

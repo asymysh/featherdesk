@@ -41,8 +41,8 @@ type Listener interface {
     Close() error
 }
 
-// Provider is the factory the pipeline calls at startup. Build-tagged add-ons
-// register themselves; the pipeline picks the compiled-in one (or plain UDP).
+// Provider is the factory the pipeline calls at startup. Add-on shared libraries
+// register themselves; the pipeline picks the loaded one (or plain UDP).
 type Provider interface {
     // Listen returns a Listener. For plain UDP this is trivial; for an overlay
     // this may involve joining a tailnet / registering with a signaling server.
@@ -55,9 +55,9 @@ type Config struct {
 }
 ```
 
-This keeps connectivity **pluggable and build-tagged** — same zero-by-default
+This keeps connectivity **pluggable and add-on-based** — same zero-by-default
 pattern as capture/encode/input/audio:
-- **Default binary** (`network` tag absent): plain UDP listener. User provides
+- **Default binary** (no `network` add-on): plain UDP listener. User provides
   reachability (LAN, port-forward, Cloudflare Tunnel). This is v1's model.
 - **`tailscale` add-on**: tsnet-backed listener.
 - **`pion` add-on**: ICE hole-punch + TURN relay.
@@ -125,7 +125,7 @@ pattern as capture/encode/input/audio:
 
 1. **Direct-connection rate** through real-world NATs (especially CGNAT, common in mobile ISPs and parts of Asia/Europe).
 2. **Self-hostability** without commercial dependency.
-3. **Binary size / dep weight** (users compile in what they need).
+3. **Binary size / dep weight** (users drop in what they need).
 4. **UX simplicity** — how close to "one paste" can we get?
 5. **Maintenance cost** — how much coordination/relay infra does the operator run?
 6. **Enterprise acceptability** — does the mechanism trigger security concerns (e.g. "joining a VPN")?
@@ -137,7 +137,7 @@ pattern as capture/encode/input/audio:
 v1's browser client uses **plain WebTransport** — the user provides reachability
 (LAN, port-forward, Cloudflare Tunnel, Tailscale Funnel). That stays. The
 `network` module is purely a v2/native-client concern. The server's plain UDP
-listener is the default even in v2 when no network add-on is compiled in.
+listener is the default even in v2 when no network add-on is loaded.
 
 ---
 

@@ -84,14 +84,14 @@ grants permission as it did pre-26.
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library (c-shared)
 
 ```bash
-go build -tags sck -o featherdesk-darwin ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-sck.dylib ./internal/capture/sck
 ```
 
-Without the `sck` tag the default macOS binary has no capture backend
-and will fail at runtime — same pattern as Linux.
+Without the `sck` library in the add-ons directory the default macOS binary has
+no capture backend and will fail at runtime — same pattern as Linux.
 
 ### Runtime dependencies
 
@@ -224,19 +224,21 @@ internal/capture/sck/
 ├── sck.go                      // SCKCapturer struct, NewSCKCapturer
 ├── sck_objc.m                  // Objective-C SCK wrapper
 ├── sck_objc.h                  // C-callable function declarations
-├── sck_cgo.go                  // CGo binding (build tag: sck)
-├── sck_stub.go                 // No-op stub (build tag: !sck)
+├── sck_cgo.go                  // CGo binding (built into the add-on's shared library)
 ├── cursor.go                   // NSCursor polling
 ├── probe.go                    // ProbeSCK() — checks bundle + permission
-└── sck_integration_test.go     // build tag: sck,integration
+└── sck_integration_test.go     // integration test (//go:build integration)
 ```
+
+> No `!sck` stub file is needed — the add-on is its own shared library, so an
+> absent add-on is simply a library that isn't in the directory.
 
 ---
 
 ## Probe & Selection
 
 ```go
-//go:build sck
+//go:build darwin
 
 func ProbeSCK() (*SCKCapabilities, error) {
     // 1. Verify running inside a code-signed app bundle (check CFBundleIdentifier)
@@ -250,7 +252,7 @@ func ProbeSCK() (*SCKCapabilities, error) {
 Since SCK is realistically the only macOS capture add-on, the pipeline probe
 order reduces to:
 ```
-sck compiled in AND Screen Recording granted? → use SCK
+sck loaded AND Screen Recording granted? → use SCK
 Otherwise → fatal: no usable capture
 ```
 
@@ -270,8 +272,8 @@ Skip only if:
 
 ✅ **Working** — implemented and benchmarked on Hackintosh + macOS 26.5.1. Real
 Apple Silicon hardware not yet measured but expected to be 2–4× faster. The
-refactor moves the existing Objective-C SCK wrapper to `internal/capture/sck/`
-under the `sck` build tag without changing the underlying capture logic.
+refactor moves the existing Objective-C SCK wrapper to `internal/capture/sck/`,
+built into the `sck` add-on shared library, without changing the underlying capture logic.
 
 ---
 
@@ -281,7 +283,7 @@ This add-on reads its tuning knobs from the `[addon_module_sck]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

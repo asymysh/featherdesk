@@ -64,10 +64,10 @@ FeatherDesk shipping this on macOS.
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library (c-shared)
 
 ```bash
-go build -tags vt_sw -o featherdesk-macos-vt-sw ./cmd/server
+go build -buildmode=c-shared -tags vt_sw -o featherdesk-addon-vt_sw.dylib ./internal/encode/vt
 ```
 
 ### Runtime dependencies
@@ -149,15 +149,16 @@ HEVC SW is meaningfully slower (~2× H.264 SW). Avoid HEVC SW for real-time stre
 ```
 internal/encode/vt/
 ├── videotoolbox.go        // Encoder struct, NewVideoToolboxEncoder (covers SW + HW)
-├── videotoolbox_cgo.go    // CGo binding (build tag: vt_sw OR vt_hw)
-├── videotoolbox_stub.go   // No-op stub (build tag: !vt_sw,!vt_hw)
+├── videotoolbox_cgo.go    // CGo binding (built into the add-on's shared library)
 ├── probe.go               // ProbeVideoToolbox()
 └── videotoolbox_test.go
 ```
 
-Note: the same Go file serves both VT SW and VT HW add-ons. The build tags
-(`vt_sw`, `vt_hw`) enable the relevant probe and select paths at compile time.
-The CGo wrapper is identical.
+> No `!vt_sw` / `!vt_hw` stub files are needed — the add-on is its own shared library.
+
+Note: the same Go file serves both VT SW and VT HW add-ons; each is built into
+its own shared library (add-on ID `vt_sw` / `vt_hw`), which selects the relevant
+probe and select paths. The CGo wrapper is identical.
 
 ---
 
@@ -187,7 +188,7 @@ This add-on reads its tuning knobs from the `[addon_module_vt_sw]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

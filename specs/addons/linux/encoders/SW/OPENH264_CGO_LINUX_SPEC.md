@@ -42,10 +42,10 @@ both architectures.
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library build
 
 ```bash
-go build -tags openh264 -o featherdesk-linux-openh264 ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-openh264.so ./internal/encode/openh264
 ```
 
 ### Runtime dependencies
@@ -141,7 +141,7 @@ ultrafast (~4ms vs 4.3ms) but eliminates GPL contamination and ffmpeg subprocess
 ## Probe & Selection
 
 ```go
-//go:build openh264
+//go:build linux
 
 func ProbeOpenH264() (*OpenH264Capabilities, error) {
     // 1. dlopen libopenh264.so (verify present)
@@ -150,11 +150,11 @@ func ProbeOpenH264() (*OpenH264Capabilities, error) {
 }
 ```
 
-Pipeline probes (Linux, with this add-on compiled in):
+Pipeline probes (Linux, with this add-on loaded):
 ```
 NVENC / AMF / libva HW add-ons available? → use HW
 None available?                              → use OpenH264 CGo (this add-on)
-This add-on not compiled in either?          → fatal: no encoder
+This add-on not loaded either?               → fatal: no encoder
 ```
 
 ---
@@ -164,8 +164,7 @@ This add-on not compiled in either?          → fatal: no encoder
 ```
 internal/encode/openh264/
 ├── openh264.go           // Encoder struct, NewOpenH264Encoder
-├── openh264_cgo.go       // CGo binding (build tag: openh264)
-├── openh264_stub.go      // No-op stub (build tag: !openh264)
+├── openh264_cgo.go       // CGo binding (built into the add-on shared library)
 ├── probe.go              // ProbeOpenH264()
 └── openh264_test.go      // Unit + benchmark tests
 ```
@@ -189,8 +188,8 @@ Skip when:
 ## Status
 
 ✅ **Working** — implemented today as the default SW encoder in featherdesk
-(`internal/encode/openh264.go`). The refactor moves it to `internal/encode/openh264/`
-under a Go build tag, but the encode code stays the same.
+(`internal/encode/openh264.go`). The refactor moves it to `internal/encode/openh264/`,
+built as the `openh264` add-on shared library, but the encode code stays the same.
 
 ---
 
@@ -200,7 +199,7 @@ This add-on reads its tuning knobs from the `[addon_module_openh264]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

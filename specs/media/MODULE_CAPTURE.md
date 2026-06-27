@@ -6,10 +6,10 @@ The Capture module defines the **abstract capturer interface contract** that
 every capture add-on implements. It owns no capturer implementation itself —
 concrete capturers live in their respective add-on specs:
 
-- `internal/capture/kms/` — Linux KMS+EGL DMA-BUF (build tag `kms_egl`)
-- `internal/capture/nvfbc/` — Linux NvFBC NVIDIA proprietary (build tag `nvfbc`)
-- `internal/capture/sck/` — macOS ScreenCaptureKit (build tag `sck`)
-- `internal/capture/dxgi/` — Windows DXGI Desktop Duplication (build tag `dxgi_dd`)
+- `internal/capture/kms/` — Linux KMS+EGL DMA-BUF (add-on ID `kms_egl`)
+- `internal/capture/nvfbc/` — Linux NvFBC NVIDIA proprietary (add-on ID `nvfbc`)
+- `internal/capture/sck/` — macOS ScreenCaptureKit (add-on ID `sck`)
+- `internal/capture/dxgi/` — Windows DXGI Desktop Duplication (add-on ID `dxgi_dd`)
 
 This separation keeps the module spec stable while letting per-OS capture
 implementations evolve independently.
@@ -116,7 +116,7 @@ type SurfaceCapturer interface {
 // and ConfigurableCapturer (see MODULE_STREAM_PARAMS.md).
 //
 // Per-add-on STATIC tuning (DRM card path, IOSurface format, DXGI adapter
-// index) comes from the [addon_module_<tag>] TOML section.
+// index) comes from the [addon_module_<id>] TOML section.
 type CaptureConfig struct {
     InitialParams stream.Params  // initial Width/Height/FPS/HDR/BitDepth
     Logger        *slog.Logger
@@ -158,7 +158,7 @@ The Capture module does **not** decide which capturer to use. That dispatch
 lives in [`MODULE_PIPELINE.md`](../core/MODULE_PIPELINE.md), which:
 
 1. Reads `[capture]` config (mode = "auto" | "forced", force_addon if forced)
-2. Probes each compiled-in capture add-on (NvFBC > KMS+EGL on Linux; SCK on
+2. Probes each loaded capture add-on (NvFBC > KMS+EGL on Linux; SCK on
    macOS; DXGI DD on Windows)
 3. On Windows headless: triggers IddCx VDD auto-install before retrying probe
 4. Calls the chosen add-on's constructor with `CaptureConfig`
@@ -166,7 +166,7 @@ lives in [`MODULE_PIPELINE.md`](../core/MODULE_PIPELINE.md), which:
    frame loop
 
 There is **no `CaptureBackend` enum** in this module. Selection is purely
-runtime — compiled-in add-ons + TOML config decide.
+runtime — loaded add-ons + TOML config decide.
 
 ---
 
@@ -189,7 +189,7 @@ The module intentionally does NOT support:
 
 ## Per-Add-On Implementation Pointers
 
-| Add-on | Build tag | OS | Spec |
+| Add-on | Add-on ID | OS | Spec |
 |--------|-----------|----|------|
 | KMS+EGL DMA-BUF | `kms_egl` | Linux | [`specs/addons/linux/capture/KMS_EGL_LINUX_SPEC.md`](../addons/linux/capture/KMS_EGL_LINUX_SPEC.md) |
 | NvFBC | `nvfbc` | Linux | [`specs/addons/linux/capture/NVFBC_LINUX_SPEC.md`](../addons/linux/capture/NVFBC_LINUX_SPEC.md) |

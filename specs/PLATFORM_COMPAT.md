@@ -65,9 +65,9 @@ whatever arrives.
 ## Capture — One Per Platform
 
 The default binary has **no capture backend** on any OS; capture is always
-an opt-in build-tagged add-on.
+an opt-in add-on shared library.
 
-| Platform | Build tag | Mechanism | Headless support |
+| Platform | Add-on ID | Mechanism | Headless support |
 |----------|-----------|-----------|------------------|
 | **Linux** | `kms_egl` (+ optional `nvfbc`) | KMS/DRM + EGL DMA-BUF zero-copy | Xvfb / virtual display |
 | **Windows** | `dxgi_dd` | DXGI Desktop Duplication → ID3D11Texture2D | Integrated IddCx virtual display (auto-installed) |
@@ -80,21 +80,21 @@ were all considered and rejected — see per-OS capture READMEs.
 
 ## Audio — One Per Platform (host→client only; 🔒 design locked, ⏸️ impl deferred)
 
-Same pluggable, zero-by-default pattern as capture/input — a per-OS build-tagged
-**capture** add-on normalizes the OS device format to the canonical 48 kHz /
-stereo / S16LE, and a separate **codec** build tag (`opus`, else raw PCM) sets the
+Same pluggable, zero-by-default pattern as capture/input — a per-OS **capture**
+add-on shared library normalizes the OS device format to the canonical 48 kHz /
+stereo / S16LE, and a separate **codec** add-on (`opus`, else raw PCM) sets the
 wire format (advertised in the `config` message). **No subprocess** (`pw-cat`
 gone), no driver, no mic. Realtime, **audio-master** A/V sync. See
 [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md).
 
-| Platform | Build tag | Capture mechanism | Spec |
+| Platform | Add-on ID | Capture mechanism | Spec |
 |----------|-----------|-------------------|------|
 | **Linux** | `pipewire` | PipeWire monitor (native libpipewire; Pulse/ALSA fallback) | [`linux/audio/PIPEWIRE_LINUX_SPEC.md`](./addons/linux/audio/PIPEWIRE_LINUX_SPEC.md) |
 | **Windows** | `wasapi` | WASAPI loopback (default render endpoint) | [`windows/audio/WASAPI_WINDOWS_SPEC.md`](./addons/windows/audio/WASAPI_WINDOWS_SPEC.md) |
 | **macOS** | `sck_audio` | ScreenCaptureKit audio on the shared `sck` stream (macOS 13+) | [`macos/audio/SCK_AUDIO_MACOS_SPEC.md`](./addons/macos/audio/SCK_AUDIO_MACOS_SPEC.md) |
 
 Codec: `opus` (BSD libopus, in-process; FEC/PLC; ~96–128 kbps) — **recommended** —
-or raw S16LE PCM (1.536 Mbps, no concealment) when `opus` isn't compiled.
+or raw S16LE PCM (1.536 Mbps, no concealment) when the `opus` add-on isn't loaded.
 
 ---
 

@@ -51,7 +51,7 @@ encoder + supported codecs.
 ## Build & Distribution
 
 ```bash
-go build -tags qsv -o featherdesk-windows-qsv.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-qsv.dll ./internal/encode/qsv
 ```
 
 CGo config:
@@ -148,13 +148,15 @@ advantages over NVIDIA / AMD for thin clients.
 ```
 internal/encode/qsv/
 ├── qsv.go
-├── qsv_cgo.go      // build tag: qsv  (Windows-only — Linux Intel uses libva)
-├── qsv_stub.go     // build tag: !qsv
+├── qsv_cgo.go      // built into the add-on's shared library (Windows-only — Linux Intel uses libva)
 ├── d3d11_interop.go
 ├── probe.go
 ├── vpl/            // oneVPL SDK headers (MIT)
 └── qsv_test.go
 ```
+
+No `!qsv` stub file is needed — the add-on is its own shared library; an absent
+add-on is simply a `.dll` that isn't in the add-ons directory.
 
 > Note: there is no Linux QSV add-on because Intel Quick Sync on Linux is exposed
 > through VA-API, fully covered by the LIBVA Linux add-on. On Windows, QSV needs
@@ -187,7 +189,7 @@ This add-on reads its tuning knobs from the `[addon_module_qsv]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

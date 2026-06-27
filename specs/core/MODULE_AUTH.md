@@ -4,7 +4,7 @@
 
 The Authentication module gates WebTransport sessions on the first control-stream
 message. It is a **base feature** — present on every FeatherDesk binary
-regardless of which add-ons are compiled in.
+regardless of which add-ons are loaded.
 
 Auth runs in the server layer (`MODULE_SERVER.md`) on the **first message of
 the WebTransport control stream** (see [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md)

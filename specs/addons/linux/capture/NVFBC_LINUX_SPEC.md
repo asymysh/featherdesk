@@ -68,13 +68,13 @@ NvFBC has been in every NVIDIA proprietary driver from ~2014 onward. Supported o
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library build
 
 ```bash
-go build -tags nvfbc -o featherdesk-linux-nvfbc-capture ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-nvfbc.so ./internal/capture/nvfbc
 ```
 
-The `nvfbc` build tag pulls in `internal/capture/nvfbc/` package.
+The `nvfbc` add-on shared library is built from the `internal/capture/nvfbc/` package.
 
 ### Runtime dependencies
 
@@ -192,7 +192,7 @@ NVENC add-on encoder.
 ## Probe & Selection
 
 ```go
-//go:build nvfbc
+//go:build linux
 
 func ProbeNvFBC() (*NvFBCCapabilities, error) {
     // 1. dlopen libnvidia-fbc.so (check NVIDIA proprietary driver presence)
@@ -216,8 +216,7 @@ None?                                → fatal: no capture add-on configured
 ```
 internal/capture/nvfbc/
 ├── nvfbc.go                 // Capturer struct, NewNvFBCCapturer
-├── nvfbc_cgo.go             // CGo binding (build tag: nvfbc)
-├── nvfbc_stub.go            // No-op stub (build tag: !nvfbc)
+├── nvfbc_cgo.go             // CGo binding (built into the add-on shared library)
 ├── probe.go                 // ProbeNvFBC()
 ├── cuda_to_nvenc.go         // Direct CUDA → NVENC handoff
 ├── sdk/                     // NVIDIA SDK headers (NvFBC.h etc.)
@@ -255,7 +254,7 @@ This add-on reads its tuning knobs from the `[addon_module_nvfbc]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

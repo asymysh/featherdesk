@@ -3,21 +3,21 @@
 ## Overview
 
 The Input module is the core, transport-neutral layer that decodes client input
-events from the wire and dispatches them to a compiled-in **input add-on** which
+events from the wire and dispatches them to a loaded **input add-on** which
 performs the actual OS-level injection.
 
 Like capture and encode, **input injection is zero-by-default**: the core binary
 ships with NO input add-on and is therefore **view-only** until an injection
-add-on is compiled in. The core module owns:
+add-on is loaded. The core module owns:
 
 - The **binary input wire format** (decode + validation).
 - The platform-neutral **event types** (`KeyEvent`, `PointerEvent`, etc.).
 - The **HID-usage keycode** contract (physical-key neutrality across clients).
 - The **dispatcher** that routes decoded events to the active injector add-on(s).
 
-Each platform's injection mechanism is a separate build-tagged add-on:
+Each platform's injection mechanism is a separate add-on shared library:
 
-| Platform | Add-on | Build tag | Mechanism | Spec |
+| Platform | Add-on | Add-on ID | Mechanism | Spec |
 |----------|--------|-----------|-----------|------|
 | Windows | Interception | `interception` | Interception filter driver + `SendSAS` for Ctrl+Alt+Del | [`../addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md) |
 | Linux | uinput | `uinput` | Kernel `/dev/uinput` (X11 + Wayland; keyboard, mouse, scroll) | [`../addons/linux/input/UINPUT_LINUX_SPEC.md`](../addons/linux/input/UINPUT_LINUX_SPEC.md) |
@@ -25,7 +25,7 @@ Each platform's injection mechanism is a separate build-tagged add-on:
 
 Touch is a **separate** add-on (Windows only for now):
 
-| Platform | Add-on | Build tag | Mechanism | Spec |
+| Platform | Add-on | Add-on ID | Mechanism | Spec |
 |----------|--------|-----------|-----------|------|
 | Windows | Win Touch | `win_touch` | `InitializeTouchInjection` / `InjectTouchInput` | [`../addons/windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](../addons/windows/input/WIN_TOUCH_WINDOWS_SPEC.md) |
 
@@ -279,7 +279,7 @@ type KeyMouseInjector interface {
 
 // TouchInjector is the optional contract a touch add-on (win_touch)
 // implements. The dispatcher type-asserts for it; touch events are dropped
-// if no TouchInjector is compiled in.
+// if no TouchInjector is loaded.
 type TouchInjector interface {
     InjectTouch(contacts []TouchContact) error
     Close() error
@@ -307,7 +307,7 @@ type InjectorConfig struct {
 }
 
 // Dispatcher decodes binary input records and routes Events to injectors.
-// Owned by the server; created with whichever add-ons were compiled in.
+// Owned by the server; created with whichever add-ons were loaded.
 type Dispatcher interface {
     // Dispatch decodes one binary input record (the record bytes from
     // input.ReadFrame — no length prefix) and injects it. Returns the record
@@ -478,12 +478,12 @@ and [`MODULE_AUTH.md`](../core/MODULE_AUTH.md)).
 ## Configuration
 
 Input behavior is configured in the `[input]` TOML section; each add-on reads
-its own `[addon_module_<tag>]` section. See
+its own `[addon_module_<id>]` section. See
 [`../core/MODULE_CONFIG.md`](../core/MODULE_CONFIG.md).
 
 ```toml
 [input]
-enabled        = true     # master switch; false = view-only even if an add-on is compiled in
+enabled        = true     # master switch; false = view-only even if an add-on is loaded
 relative_mouse = true     # honor pointer-lock relative-mode frames
 ```
 

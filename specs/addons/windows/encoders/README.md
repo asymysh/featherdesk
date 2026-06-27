@@ -3,7 +3,8 @@
 ## Pluggable architecture: every encoder is an opt-in add-on
 
 The default Windows binary contains zero encoders. Each encoder is a separate
-Go build-tagged add-on. Mix and match exactly what you need.
+add-on shared library. Mix and match exactly what you need by dropping the
+libraries you want into the add-ons directory.
 
 ```
 encoders/
@@ -21,18 +22,19 @@ encoders/
 
 ## Recommended combinations
 
-| Deployment | Recommended add-on set | Binary |
-|-----------|-----------------------|--------|
-| Generic Windows (any GPU, commercial) | `openh264` + `mf_hw` | `featherdesk-windows-default` |
-| Home / personal (any GPU, fastest SW) | `x264` + `mf_hw` | `featherdesk-windows-home` |
-| NVIDIA-only (low latency priority) | `openh264` + `nvenc` | `featherdesk-windows-nvenc` |
-| AMD-only (quality priority) | `openh264` + `amf` | `featherdesk-windows-amf` |
-| Intel-only (low power) | `openh264` + `qsv` | `featherdesk-windows-qsv` |
-| Maximum flexibility | `openh264,x264,mf_hw,nvenc,amf,qsv` | `featherdesk-windows-full` |
+| Deployment | Recommended add-on set | Add-on libraries to drop in |
+|-----------|-----------------------|------------------------------|
+| Generic Windows (any GPU, commercial) | `openh264` + `mf_hw` | `featherdesk-addon-{openh264,mf_hw}.dll` |
+| Home / personal (any GPU, fastest SW) | `x264` + `mf_hw` | `featherdesk-addon-{x264,mf_hw}.dll` |
+| NVIDIA-only (low latency priority) | `openh264` + `nvenc` | `featherdesk-addon-{openh264,nvenc}.dll` |
+| AMD-only (quality priority) | `openh264` + `amf` | `featherdesk-addon-{openh264,amf}.dll` |
+| Intel-only (low power) | `openh264` + `qsv` | `featherdesk-addon-{openh264,qsv}.dll` |
+| Maximum flexibility | `openh264,x264,mf_hw,nvenc,amf,qsv` | drop in all six; probe selects best at runtime |
 
-The build tags compose; stack any combination:
+Build each add-on separately as a C-shared library and drop the resulting `.dll`
+into the add-ons directory; stack any combination by dropping in more libraries:
 ```bash
-go build -tags "openh264,mf_hw,nvenc" -o featherdesk-windows-full ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-mf_hw.dll ./internal/encode/mf
 ```
 
 ---
@@ -88,14 +90,14 @@ add-on.
 
 ## Codec fallback order at runtime
 
-When multiple encoders are compiled in, the pipeline probes in this order:
+When multiple encoders are loaded, the pipeline probes in this order:
 
 ```
 1. NVENC available (hardware + add-on)?      → use NVENC
 2. AMF available?                            → use AMF
 3. QSV available?                            → use QSV
 4. MF HW (any vendor MFT registered)?        → use MF HW (cross-vendor default)
-5. x264 available (ffmpeg in PATH)?          → use x264 subprocess (GPL builds only)
+5. x264 available (ffmpeg in PATH)?          → use x264 subprocess (x264 add-on only)
 6. OpenH264 CGo?                             → universal SW fallback
 7. None?                                     → fatal: no encoder add-on installed
 ```

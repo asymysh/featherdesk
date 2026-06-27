@@ -55,10 +55,10 @@ M2 Pro = 12 cores), 4 threads is the practical ceiling.
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library (c-shared)
 
 ```bash
-GOOS=darwin go build -tags openh264 -o featherdesk-macos ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-openh264.dylib ./internal/encode/openh264
 ```
 
 ### Runtime dependency
@@ -109,7 +109,7 @@ This add-on reads its tuning knobs from the `[addon_module_openh264]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

@@ -5,7 +5,7 @@
 **Name:** FeatherDesk (binary: `featherdesk`)
 **Type:** Low-latency remote desktop streaming server (Linux primary, Windows + macOS planned)
 **Language:** Go 1.26+ with CGo
-**Deployment:** Single binary with embedded web client + optional add-on encoder binaries
+**Deployment:** Single host binary with embedded web client + optional add-on shared libraries (capture / encode / input / audio), loaded at runtime
 **Target:** Parsec/Sunshine-level latency on LAN
 
 ## Product Goals
@@ -23,49 +23,150 @@
 
 FeatherDesk is a **fully pluggable, add-on based project**. The default binary
 on every platform ships with **zero encoders and zero capture backends**. Every
-backend — software, hardware, or capture — is an opt-in Go build-tagged add-on.
+backend — software, hardware, or capture — is an opt-in **add-on shared library**
+that the host **loads at runtime** (`dlopen` on Linux/macOS, `LoadLibraryW` on
+Windows). The host binary is never recompiled to add, remove, or swap a backend.
 
-Users compose the binary they need by combining the capture add-on(s) and
-encoder add-on(s) for their target deployment. The same source tree produces
-binaries for wildly different environments (commercial BSD-only deployments,
-home installs with GPL x264, NVIDIA-only servers, AMD workstations, headless
-Windows VMs) without `#ifdef` spaghetti or runtime configuration overhead.
+Users compose the deployment they need by **dropping the add-on shared libraries
+they want into the add-ons directory** (`[addons] dir`). The same host binary
+serves wildly different environments (commercial BSD-only deployments, home
+installs with GPL x264, NVIDIA-only servers, AMD workstations, headless Windows
+VMs) by loading a different set of libraries — no `#ifdef` spaghetti, no
+per-deployment rebuild of the host.
+
+### Add-on loading model (v1: dlopen)
+
+- Each add-on is built **standalone** as a C-ABI shared library
+  (`.so` / `.dylib` / `.dll`) via `go build -buildmode=c-shared`. The add-on's
+  own native dependencies (CGo, vendor SDKs) are linked into **that library**,
+  never into the host.
+- Every add-on library exports one C entry point — `FeatherDeskAddonOpen` —
+  returning **(1)** an `ABIVersion`, **(2)** a capability descriptor
+  (kind = capture / encode / hwencode / audio / input; codec(s); platform), and
+  **(3)** a vtable of function pointers implementing the add-on's interface. The
+  host adapts that vtable back into the Go interface (`Capturer`, `Encoder`,
+  `HardwareEncoder`, …) the pipeline consumes.
+- At startup the host **scans the add-ons directory**, `dlopen`s each library,
+  checks `ABIVersion` (by default a mismatch is skipped with a warning, not a
+crash; `[addons] abi_strict = true` makes a mismatch abort startup instead), and
+  registers its capability descriptor. There is **no build-tag `init()` registry
+  and no stub files** — an absent add-on is simply a library that isn't in the
+  directory.
+- **Filename convention:** `featherdesk-addon-<id>.{so,dylib,dll}`, where `<id>`
+  (`kms_egl`, `openh264`, `nvenc`, …) is the **add-on ID** — it names the library
+  and its `[addon_module_<id>]` config section.
+- **Hot-swap = drop a library + restart.** v1 resolves the add-on set once at
+  startup; live reload without restart is out of scope for v1.
+
+### Add-on ABI contract
+
+The loader and every add-on share a **flat C ABI** defined in `pkg/addon`
+(a Go package + generated C header). The contract is deliberately narrow because
+of one hard constraint:
+
+> **Two-runtime constraint (the key v1 risk).** A `-buildmode=c-shared` Go
+> library carries its **own** Go runtime (GC, scheduler, signal handlers).
+> `dlopen`-ing it into a host that is itself a Go program means **two Go runtimes
+> in one process**, and **Go pointers, slices, channels, closures, and
+> `error` sentinel values MUST NOT cross the boundary** (cgo pointer rules +
+> distinct per-library sentinel addresses). If this proves unworkable in
+> practice, that is exactly the trigger for the **v2 fallback** below. v1 ships
+> behind this risk on purpose.
+
+Therefore everything crossing the boundary is plain C:
+
+- **Entry point:** `FeatherDeskAddonOpen` returns `ABIVersion` (a single
+  `uint32`; the host accepts the add-on iff `addon.ABIVersion == host.ABIVersion`
+  — **exact match, no forward/backward compat in v1**), a **capability
+  descriptor** (kind = capture / encode / hwencode / audio / input; codec id(s);
+  os+arch), and a **vtable** of C function pointers.
+- **Buffers** cross as `(ptr, len, cap)` triples with explicit ownership: the
+  caller allocates, or the callee returns a borrowed pointer plus a `release`
+  function pointer. No `[]byte` from a Go `sync.Pool` and no Go-closure
+  `Release` crosses the line; the **host** wraps the C buffer/`release` into the
+  Go `Capturer`/`Encoder` interfaces it hands the pipeline.
+- **Errors** cross as a stable `int` code enum (e.g. `ABI_ERR_FALLBACK_TO_SOFTWARE`,
+  `ABI_ERR_CHROMA_UNSUPPORTED`, `ABI_ERR_REQUIRES_RESTART`); the **host loader
+  translates each code back into the canonical `stream.Err*` sentinel** so
+  `errors.Is` in the pipeline works.
+- **Channels** never cross: an `AudioCapturer.Chunks()` channel is produced
+  **host-side** by a goroutine that pumps a C `next_chunk` vtable call.
+
+**Load-failure taxonomy** (default = skip the library with a WARN; `[addons]
+abi_strict = true` aborts startup for any of these):
+
+| Failure | Default behavior |
+|---------|------------------|
+| `dlopen`/`LoadLibraryW` fails (corrupt, wrong **os/arch**, missing transitive dep) | skip + warn |
+| no `FeatherDeskAddonOpen` export (stray `.so` in dir) | skip + warn |
+| `FeatherDeskAddonOpen` returns error / null | skip + warn |
+| `ABIVersion` mismatch | skip + warn |
+| capability descriptor names an unknown kind, or a codec with no wire type (e.g. AV1) | skip + warn |
+| add-ons dir does not exist | treated as empty + warn |
+
+An add-on library MUST match the host's **OS *and* CPU arch** (an x86_64 `.dylib`
+will not load into an arm64 host); CGo add-ons are therefore built natively per
+target, not cross-composed.
+
+**Security — add-on directory trust.** `dlopen` executes native code from a
+directory at startup, and the host often runs elevated (KMS+EGL needs
+root/`CAP_SYS_ADMIN`; Interception/SendSAS needs SYSTEM). The add-ons directory
+and every library in it **MUST be owned by, and writable only by, the host's
+privilege level**; the loader verifies this on startup (as MODULE_AUTH already
+does for the TLS key) and refuses (or warns) on a world-writable dir. The default
+dir is therefore an admin-owned location (`/usr/lib/featherdesk/addons`,
+`%PROGRAMDATA%\FeatherDesk\addons`), **not** a user-writable `$XDG_DATA_HOME`
+path, to avoid a local privilege-escalation vector.
 
 ### Why zero-by-default
 
 - **Smallest possible default binary** — no unwanted dependencies, no
   unused codecs in the wire format
-- **Explicit licensing per binary variant** — the binary linked against
-  GPL x264 is clearly distinct from the BSD-only OpenH264 binary
-- **Deployment flexibility** — single source tree, many target variants
-- **Simpler probing** — only compiled-in add-ons get probed at runtime
+- **License-agnostic host** — the host **never links any add-on's code** (each is
+  a separate library or, for `x264`, a separate subprocess the add-on spawns), so
+  the host's permissive license is independent of which add-ons are dropped in.
+  GPL paths stay isolated regardless of mechanism.
+- **Deployment flexibility** — one host binary, many add-on sets, swappable in the field
+- **Simpler probing** — only loaded add-ons get probed at runtime
 
-### Build matrix
+### Build / deploy matrix
 
-Users compose via build tags. Examples:
+Each add-on is built once, then dropped into the add-ons directory. Examples
+(the host binary is the same in every row):
 
-| Deployment | Build command |
-|------------|--------------|
-| Commercial Windows, generic | `go build -tags "dxgi_dd,openh264,mf_hw" ./cmd/server` |
-| Home Windows, NVIDIA | `go build -tags "dxgi_dd,x264,nvenc" ./cmd/server` |
-| Commercial Linux, AMD | `go build -tags "kms_egl,openh264,libva,amf_rocm" ./cmd/server` |
-| Apple Silicon Mac | `go build -tags "sck,vt_hw" ./cmd/server` |
+| Deployment | Add-on libraries to drop in |
+|------------|------------------------------|
+| Commercial Windows, generic | `dxgi_dd`, `openh264`, `mf_hw` |
+| Home Windows, NVIDIA | `dxgi_dd`, `x264`, `nvenc` |
+| Commercial Linux, AMD | `kms_egl`, `openh264`, `libva`, `amf_rocm` |
+| Apple Silicon Mac | `sck`, `vt_hw` |
 
-See each platform's `encoders/README.md` and `capture/README.md` for
-recommended combinations.
+Build one add-on with, e.g.,
+`go build -buildmode=c-shared -o featherdesk-addon-kms_egl.so ./internal/capture/kms`.
+See each platform's `encoders/README.md` and `capture/README.md` for recommended
+combinations.
 
 ### Runtime probe and selection
 
-When multiple add-ons are compiled in, the pipeline picks at runtime based
-on:
+When multiple add-ons are loaded, the pipeline picks at runtime based on:
 
-1. `[capture] force_addon` / `[encode] force_addon` in TOML (forces a specific add-on)
+1. `[capture] force_addon` / `[encode] force_addon` in TOML (forces a specific add-on by ID)
 2. Probe order (HEVC HW > H.264 HW > x264 SW > VT SW > OpenH264 SW)
 3. Hardware presence (NVENC only fires if NVIDIA GPU present, etc.)
 4. `ErrFallbackToSoftware` from HW encoder triggers SW fallback for the session
 
-Per-add-on tuning lives in `[addon_module_<build_tag>]` TOML sections, not
+Per-add-on tuning lives in `[addon_module_<id>]` TOML sections, not
 in code. See [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md).
+
+### v2 fallback
+
+If runtime `dlopen` loading proves problematic in v1 — most likely because of
+the **two-runtime constraint** above — v2 may switch to statically-composed
+**edition binaries** (build-tag composition) or **subprocess sidecars** (which
+sidestep the shared-process Go-runtime issue entirely). The add-on **interface
+contracts are identical** under all three mechanisms — only how the host obtains
+the implementation changes — so this decision does not affect any add-on's spec
+beyond its build/packaging step.
 
 ---
 
@@ -84,7 +185,7 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 5 | **Transport** | [`./core/MODULE_TRANSPORT.md`](./core/MODULE_TRANSPORT.md) | HTTP/3 + WebTransport (QUIC); datagrams + reliable streams; auth handshake |
 | 6 | **Server** | [`./core/MODULE_SERVER.md`](./core/MODULE_SERVER.md) | Session management, broadcast fan-out, keyframe/bootstrap cache, role gating (consumes Transport; transport/TLS owned by #5) |
 | 7 | **Web Client** | [`./client/MODULE_WEB_CLIENT.md`](./client/MODULE_WEB_CLIENT.md) | Browser-based viewer (WebCodecs) — v1 |
-| 8 | **Pipeline** | [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md) | Orchestrator: probe + select compiled-in add-ons, lifecycle, pacing, frame drops, wiring |
+| 8 | **Pipeline** | [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md) | Orchestrator: probe + select loaded add-ons, lifecycle, pacing, frame drops, wiring |
 | 9 | **Config** | [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
 | 10 | **Input** | [`./interaction/MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract (injection impls are add-ons per OS) |
 | 11 | **Clipboard** | [`./interaction/MODULE_CLIPBOARD.md`](./interaction/MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
@@ -100,9 +201,9 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 > Every encoder (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF,
 > QSV, MediaFoundation HW), every capture backend (KMS+EGL, NvFBC, SCK, DXGI DD),
 > and every input injector (interception, uinput, cgevent, win_touch, vigem,
-> gcvirtual) is a build-tagged add-on under
+> gcvirtual) is an add-on shared library under
 > [`specs/addons/{platform}/{capture,encoders,input,audio}/`](./addons/).
-> The default binary ships with zero of each — users compile in what they need.
+> The default binary ships with zero of each — users drop in what they need.
 > A binary with no input add-on is **view-only**. See the index below.
 
 > **Clipboard + File Transfer are core (not add-ons).** Their OS surface is small
@@ -165,19 +266,19 @@ for where any platform or add-on document lives — never duplicate specs, alway
 | Platform | Spec | Capture add-on(s) | Encoder add-on(s) |
 |----------|------|------------------|-------------------|
 | **Cross-platform compat** | [`specs/PLATFORM_COMPAT.md`](./PLATFORM_COMPAT.md) | — | — |
-| **Linux** | [`specs/addons/linux/LINUX_SPEC.md`](./addons/linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `x264`, `libva`, `nvenc`, `amf` |
+| **Linux** | [`specs/addons/linux/LINUX_SPEC.md`](./addons/linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `x264`, `libva`, `nvenc`, `amf_rocm` |
 | **macOS** | [`specs/addons/macos/MACOS_SPEC.md`](./addons/macos/MACOS_SPEC.md) | `sck` | `openh264`, `x264`, `vt_sw`, `vt_hw` |
 | **Windows** | [`specs/addons/windows/WINDOWS_SPEC.md`](./addons/windows/WINDOWS_SPEC.md) | `dxgi_dd` | `openh264`, `x264`, `mf_hw`, `nvenc`, `amf`, `qsv` |
 
 > **Default binary on every platform contains zero capture backends and zero
-> encoders.** Every backend is an opt-in build-tagged add-on. Users compose the
+> encoders.** Every backend is an opt-in add-on shared library. Users compose the
 > binary they need by combining one or more capture add-ons with one or more
 > encoder add-ons. See each platform's `capture/README.md` and `encoders/README.md`
 > for recommended combinations.
 
 ### Linux capture add-on specs
 
-| Add-on | Build tag | Spec | Hardware | Status |
+| Add-on | Add-on ID | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
 | KMS+EGL DMA-BUF | `kms_egl` | [`specs/addons/linux/capture/KMS_EGL_LINUX_SPEC.md`](./addons/linux/capture/KMS_EGL_LINUX_SPEC.md) | Universal — every GPU, any display server | ✅ Working |
 | NvFBC | `nvfbc` | [`specs/addons/linux/capture/NVFBC_LINUX_SPEC.md`](./addons/linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
@@ -216,10 +317,10 @@ for the full rationale.
 
 ScreenCaptureKit is the only capture API on macOS. All legacy alternatives
 (CGDisplayStream, CGWindowListCreateImage, etc.) were removed. SCK is still a
-build-tagged add-on (`sck`) for architectural consistency -- it just happens to
+add-on shared library (`sck`) for architectural consistency -- it just happens to
 be the only capture option.
 
-| Add-on | Build tag | Spec | Hardware | Status |
+| Add-on | Add-on ID | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
 | ScreenCaptureKit | `sck` | [`specs/addons/macos/capture/SCK_MACOS_SPEC.md`](./addons/macos/capture/SCK_MACOS_SPEC.md) | All Macs (macOS 12.3+) | 📋 Specced |
 
@@ -244,7 +345,7 @@ for the full rationale.
 
 ### Windows capture add-on specs
 
-| Add-on | Build tag | Spec | Hardware | Status |
+| Add-on | Add-on ID | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
 | DXGI Desktop Duplication (with integrated IddCx headless install) | `dxgi_dd` | [`specs/addons/windows/capture/DXGI_DD_WINDOWS_SPEC.md`](./addons/windows/capture/DXGI_DD_WINDOWS_SPEC.md) | Any GPU (WDDM 1.2+, Win 8+) | ✅ Benchmarked |
 
@@ -284,10 +385,10 @@ for the full rationale, recommended combinations, and headless install flow.
 
 Implement `input.KeyMouseInjector` / `input.TouchInjector` / `input.GamepadInjector`.
 The core decodes the binary input protocol; the add-on performs OS injection.
-No input add-on compiled in → **view-only** binary. See
+No input add-on loaded → **view-only** binary. See
 [`MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md).
 
-| Add-on | Build tag | OS | Spec | Capability | Status |
+| Add-on | Add-on ID | OS | Spec | Capability | Status |
 |--------|-----------|----|----- |------------|--------|
 | Interception | `interception` | Windows | [`windows/input/INTERCEPTION_WINDOWS_SPEC.md`](./addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md) | KeyMouse (filter driver + SendSAS, injects below UIPI) | 📋 Specced |
 | Win Touch | `win_touch` | Windows | [`windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](./addons/windows/input/WIN_TOUCH_WINDOWS_SPEC.md) | Touch (`InjectTouchInput`; pen→touch with pressure) | 📋 Specced |
@@ -302,7 +403,7 @@ When adding a new vendor-specific encoder:
 1. Write the spec at `specs/addons/{platform}/encoders/{HW,SW}/{NAME}_SPEC.md`
 2. Add a row to the relevant table in **this** section of CENTRAL_SPEC.md
 3. Add a row to the compat matrix in `specs/PLATFORM_COMPAT.md`
-4. Implement under `internal/encode/{name}/` with a Go build tag
+4. Build as a c-shared library from `internal/encode/{name}/`
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`
 
 ---
@@ -701,11 +802,11 @@ type Server interface {
 The orchestrator is now a proper module (`MODULE_PIPELINE.md`) — not inline in main.go. It:
 
 1. Loads config via `config.Load(--config path)` per [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md) — the only CLI flag is `--config`
-2. Probes compiled-in capture + encoder add-ons (no static enum; the runtime asks each compiled-in add-on whether its prerequisites are met)
+2. Probes loaded capture + encoder add-ons (no static enum; the runtime asks each loaded add-on whether its prerequisites are met)
 3. Selects capture add-on per `[capture]` config (auto-probe order or forced)
 4. Selects encode path per `[encode]` config:
    - **Hardware add-on** picked when it accepts the zero-copy surface handle produced by the selected capture add-on (DMA-BUF / IOSurface / D3D11 texture)
-   - **Software add-on** picked when no compatible HW add-on is compiled in OR `force_addon` names a SW add-on
+   - **Software add-on** picked when no compatible HW add-on is loaded OR `force_addon` names a SW add-on
 5. Creates and connects all modules
 6. Manages lifecycle (signal handling, graceful shutdown, SIGHUP config reload)
 7. Runs the frame pipeline loop with pacing and drop logic
@@ -785,7 +886,7 @@ The pipeline owns this orchestration; no module drives it alone.
 ### Configuration
 - Single TOML config file at a known OS-conventional path; only `--config <path>` CLI flag exists. Full schema in [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md).
 - Compile-time constants for protocol parameters (Version byte, header layout).
-- Runtime capability probing for compiled-in add-on detection.
+- Runtime capability probing for loaded add-on detection.
 - Hot reload via `SIGHUP` (Linux/macOS) — most sections reload without restart; TLS / port / `force_addon` need a restart (marked in MODULE_CONFIG).
 
 ---
@@ -795,9 +896,9 @@ The pipeline owns this orchestration; no module drives it alone.
 1. **Interface-First:** Every module exposes a Go interface. Implementations are private.
 2. **Zero Import Cycles:** Modules never import each other (only the orchestrator imports all).
 3. **Testable in Isolation:** Each module has unit tests that run without hardware.
-4. **Hot-Swappable:** Changing a capture or encoder add-on is a config change (`[capture] force_addon`, `[encode] force_addon`) or a recompile with different build tags — never a code change in the pipeline.
+4. **Swappable (restart-scoped in v1):** Changing a capture or encoder add-on is a config change (`[capture] force_addon`, `[encode] force_addon`) or swapping the add-on library in the add-ons directory, **then a restart** — never a code change in the pipeline. (v1 resolves the add-on set once at startup; live reload is out of scope.)
 5. **Error Propagation:** All errors flow up to the orchestrator with context (`fmt.Errorf("capture: %w", err)`).
-6. **No Global State:** No package-level mutable variables except the add-on registry populated by build-tagged `init()` functions (the only permitted use of `init()`). No other `init()` functions.
+6. **No Global State:** No package-level mutable variables except the add-on registry, which the dlopen loader populates at startup from the add-ons directory.
 7. **Explicit Lifecycle:** Every module has `New()` (create), optional `Start()` (begin work), and `Close()` (cleanup).
 8. **Buffer Contracts:** Document whether returned slices are owned or borrowed.
 
@@ -828,30 +929,37 @@ featherdesk/
 │   │   └── hid.go              # Shared HID-usage tables (neutral keycode contract)
 │   ├── protocol/
 │   │   └── protocol.go         # Wire types + marshal/unmarshal (v1, 22-byte header)
+│   ├── addon/
+│   │   ├── abi.go              # C-ABI contract: FeatherDeskAddonOpen sig, ABIVersion,
+│   │   │                       #   capability descriptor + vtable structs, error-code enum
+│   │   └── featherdesk_addon.h # Generated C header every add-on builds against
 │   └── config/
 │       └── config.go           # TOML schema types + Load + Watch
 ├── internal/                    # Private implementations
+│   ├── addon/
+│   │   ├── loader_unix.go      # dlopen scan + ABI check + vtable→Go-interface adapters
+│   │   └── loader_windows.go   # LoadLibraryW equivalent
 │   ├── capture/
-│   │   ├── kms/                # KMS+DRM+EGL Linux capture add-on (build tag: kms_egl)
-│   │   ├── nvfbc/              # NvFBC Linux capture add-on (build tag: nvfbc)
-│   │   ├── sck/                # ScreenCaptureKit macOS capture add-on (build tag: sck)
+│   │   ├── kms/                # KMS+DRM+EGL Linux capture add-on (add-on ID: kms_egl)
+│   │   ├── nvfbc/              # NvFBC Linux capture add-on (add-on ID: nvfbc)
+│   │   ├── sck/                # ScreenCaptureKit macOS capture add-on (add-on ID: sck)
 │   │   └── cursor/             # Cursor compositing (software) + cursor protocol (hardware)
 │   ├── encode/
-│   │   ├── openh264/           # OpenH264 SW encoder add-on (build tag: openh264)
-│   │   ├── libva/              # libva Linux HW add-on (build tag: libva)
-│   │   ├── nvenc/              # NVENC HW add-on (build tag: nvenc)
-│   │   ├── amf/                # AMD AMF HW add-on (build tag: amf)
-│   │   ├── qsv/                # Intel oneVPL HW add-on, Windows (build tag: qsv)
-│   │   ├── vt/                 # VideoToolbox macOS SW+HW add-on (build tags: vt_sw, vt_hw)
-│   │   ├── mf/                 # MediaFoundation Windows HW add-on (build tag: mf_hw)
+│   │   ├── openh264/           # OpenH264 SW encoder add-on (add-on ID: openh264)
+│   │   ├── libva/              # libva Linux HW add-on (add-on ID: libva)
+│   │   ├── nvenc/              # NVENC HW add-on (add-on ID: nvenc)
+│   │   ├── amf/                # AMD AMF HW add-on (add-on ID: amf)
+│   │   ├── qsv/                # Intel oneVPL HW add-on, Windows (add-on ID: qsv)
+│   │   ├── vt/                 # VideoToolbox macOS SW+HW add-on (add-on IDs: vt_sw, vt_hw)
+│   │   ├── mf/                 # MediaFoundation Windows HW add-on (add-on ID: mf_hw)
 │   │   └── convert/            # libyuv color conversion (used by every SW encoder add-on)
 │   ├── input/                 # Input injection add-ons (zero-by-default → view-only)
-│   │   ├── interception/      # Windows filter driver + SendSAS (build tag: interception)
-│   │   ├── wintouch/          # Windows Touch Injection (build tag: win_touch)
-│   │   ├── vigem/             # Windows ViGEmBus gamepad (build tag: vigem)
-│   │   ├── uinput/            # Linux /dev/uinput (kbd/mouse + gamepad) (build tag: uinput)
-│   │   ├── cgevent/           # macOS CGEventPost (build tag: cgevent)
-│   │   └── gcvirtual/         # macOS GCVirtualController gamepad (build tag: gcvirtual)
+│   │   ├── interception/      # Windows filter driver + SendSAS (add-on ID: interception)
+│   │   ├── wintouch/          # Windows Touch Injection (add-on ID: win_touch)
+│   │   ├── vigem/             # Windows ViGEmBus gamepad (add-on ID: vigem)
+│   │   ├── uinput/            # Linux /dev/uinput (kbd/mouse + gamepad) (add-on ID: uinput)
+│   │   ├── cgevent/           # macOS CGEventPost (add-on ID: cgevent)
+│   │   └── gcvirtual/         # macOS GCVirtualController gamepad (add-on ID: gcvirtual)
 │   ├── clipboard/             # CORE clipboard sync (per-OS files behind build constraints)
 │   │   ├── clipboard.go        # Monitor interface, Content, sanitization
 │   │   ├── clipboard_windows.go # AddClipboardFormatListener + CF_HTML
@@ -880,7 +988,7 @@ featherdesk/
 ├── specs/                       # This spec directory
 ├── go.mod
 ├── go.sum
-└── Makefile                     # Per-platform targets with build-tag composition
+└── Makefile                     # Per-platform targets: builds each add-on as a c-shared library
 ```
 
 > `internal/logger/` is **gone** — replaced by stdlib `log/slog`. Every module

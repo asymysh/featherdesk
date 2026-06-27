@@ -29,7 +29,7 @@ default is conservative.
 package clipboard
 
 // Monitor watches the host OS clipboard and reports changes. Per-OS
-// implementations live behind build constraints (no add-on / build tags —
+// implementations live behind build constraints (no add-on shared library —
 // these are core, compiled unconditionally per GOOS).
 type Monitor interface {
     // Start begins watching. Changes are delivered on Changes().

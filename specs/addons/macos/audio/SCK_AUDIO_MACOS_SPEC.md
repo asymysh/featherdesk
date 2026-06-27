@@ -23,7 +23,7 @@ to the single `SCStream` the `sck` capture add-on owns:
 - The `sck` add-on creates the `SCStream`; `sck_audio` registers an
   `SCStreamOutput` for `SCStreamOutputType.audio` on it (video uses
   `.screen`).
-- Therefore `sck_audio` **requires** `sck` to be compiled in and active. If
+- Therefore `sck_audio` **requires** `sck` to be loaded and active. If
   `[audio] enabled` but the capture add-on isn't `sck`, `Probe` fails with a
   clear message (system audio on macOS is only wired through SCK here).
 - One stream, one permission prompt (Screen Recording), one clock.
@@ -75,18 +75,22 @@ video — audio adds no new prompt). App must be signed + notarized.
 
 ## Build & Distribution
 
+Build each add-on as its own shared library and drop the set into the add-ons directory:
 ```bash
-go build -tags "sck,sck_audio,vt_hw,opus" -o featherdesk-macos ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-sck.dylib       ./internal/capture/sck
+go build -buildmode=c-shared -o featherdesk-addon-sck_audio.dylib ./internal/audio/sckaudio
+go build -buildmode=c-shared -tags vt_hw -o featherdesk-addon-vt_hw.dylib ./internal/encode/vt
+go build -buildmode=c-shared -o featherdesk-addon-opus.dylib      ./internal/audio/opus
 ```
 
-`sck_audio` is meaningless without `sck`; the build/probe enforces the pairing.
+`sck_audio` is meaningless without `sck`; the probe enforces the pairing.
 
 ---
 
 ## Constructor & Probe
 
 ```go
-// internal/audio/sckaudio/sckaudio_darwin.go  (build tag: sck_audio)
+// internal/audio/sckaudio/sckaudio_darwin.go  (built into the add-on's shared library)
 
 // Probe returns true on macOS 13+ AND when the sck capture add-on is the active
 // capturer (so an SCStream exists to attach the audio output to).
@@ -114,12 +118,13 @@ func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
 
 ```
 internal/audio/sckaudio/
-├── sckaudio_darwin.go      // build tag: sck_audio (AudioCapturer impl, CGo)
+├── sckaudio_darwin.go      // AudioCapturer impl, CGo (built into the add-on's shared library)
 ├── sckaudio_bridge.mm      // Obj-C++ shim: attach audio output, CMSampleBuffer → PCM
 ├── sckaudio_bridge.h       // plain C signatures for CGo
-├── stub.go                 // build tag: !sck_audio (no-op, never registers)
 └── sckaudio_test.go
 ```
+
+> No `!sck_audio` stub file is needed — the add-on is its own shared library.
 
 ---
 

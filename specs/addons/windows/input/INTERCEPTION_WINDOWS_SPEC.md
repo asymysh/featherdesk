@@ -164,7 +164,7 @@ which the server calls on controller disconnect/takeover. This add-on cooperates
 ## Build & Distribution
 
 ```bash
-go build -tags "interception" -o featherdesk.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-interception.dll ./internal/input/interception
 ```
 
 CGo config:
@@ -195,7 +195,7 @@ The Interception **driver** is a kernel driver and must be installed once
 ## Constructor & Probe
 
 ```go
-// internal/input/interception/interception_windows.go  (build tag: interception)
+// internal/input/interception/interception_windows.go  (built into the add-on's shared library)
 
 // Probe returns true if interception.dll loads AND the driver is present.
 // Side-effect-free: if a context is allocated to test connectivity, it is
@@ -229,13 +229,15 @@ actionable error telling the operator to run the installer.
 
 ```
 internal/input/interception/
-├── interception_windows.go   // build tag: interception (KeyMouseInjector impl)
+├── interception_windows.go   // built into the add-on's shared library (KeyMouseInjector impl)
 ├── sas_windows.go            // SendSAS wrapper
 ├── scancode_map.go           // HID usage → Set 1 scan code (+E0)
-├── stub.go                   // build tag: !interception (no-op, never registers)
 ├── vendor/interception/      // interception.h + import lib (dynamic)
 └── interception_test.go
 ```
+
+No `!interception` stub file is needed — the add-on is its own shared library; an
+absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 
@@ -251,7 +253,7 @@ mouse_device    = 0    # 0 = first available mouse device (11..20 to pin)
 enable_sas      = true # allow Ctrl+Alt+Del via SendSAS (requires SYSTEM service)
 ```
 
-If absent, defaults apply. Strictly validated only when this add-on is compiled in.
+If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ---
 

@@ -63,7 +63,7 @@ on the GPU. No CPU memory copy at any stage.
 ## Build & Distribution
 
 ```bash
-go build -tags nvenc -o featherdesk-windows-nvenc.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-nvenc.dll ./internal/encode/nvenc
 ```
 
 CGo config:
@@ -130,14 +130,16 @@ plus access to REF_FRAMES_INVALIDATION.
 ```
 internal/encode/nvenc/
 ├── nvenc.go             // shared with Linux (mostly)
-├── nvenc_cgo_linux.go   // build tag: nvenc,linux
-├── nvenc_cgo_windows.go // build tag: nvenc,windows  — D3D11 surface path
-├── nvenc_stub.go        // build tag: !nvenc
+├── nvenc_cgo_linux.go   // built into the add-on's shared library (//go:build linux)
+├── nvenc_cgo_windows.go // built into the add-on's shared library (//go:build windows) — D3D11 surface path
 ├── d3d11_interop.go     // DXGI texture registration
 ├── probe.go
 ├── sdk/                 // NVIDIA SDK headers
 └── nvenc_test.go
 ```
+
+No `!nvenc` stub file is needed — the add-on is its own shared library; an absent
+add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 
@@ -164,7 +166,7 @@ This add-on reads its tuning knobs from the `[addon_module_nvenc]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

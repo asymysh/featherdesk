@@ -134,7 +134,7 @@ Boolean trusted = AXIsProcessTrustedWithOptions(
 ## Build & Distribution
 
 ```bash
-go build -tags "cgevent" -o featherdesk ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-cgevent.dylib ./internal/input/cgevent
 ```
 
 CGo config:
@@ -155,7 +155,7 @@ Accessibility once. Apple Silicon and Intel use the identical API.
 ## Constructor & Probe
 
 ```go
-// internal/input/cgevent/cgevent_darwin.go  (build tag: cgevent)
+// internal/input/cgevent/cgevent_darwin.go  (built into the add-on's shared library)
 
 // Probe returns true on macOS (the API always exists); it does NOT guarantee
 // Accessibility permission — that is checked in New with an actionable error.
@@ -182,12 +182,13 @@ func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
 
 ```
 internal/input/cgevent/
-├── cgevent_darwin.go     // build tag: cgevent (KeyMouseInjector impl, CGo)
+├── cgevent_darwin.go     // KeyMouseInjector impl, CGo (built into the add-on's shared library)
 ├── keymap.go             // HID usage → kVK_* (generated)
 ├── accessibility.go      // AXIsProcessTrusted check + prompt
-├── stub.go               // build tag: !cgevent (no-op, never registers)
 └── cgevent_test.go
 ```
+
+> No `!cgevent` stub file is needed — the add-on is its own shared library.
 
 ---
 
@@ -200,7 +201,7 @@ Reads `[addon_module_cgevent]` (see [`specs/core/MODULE_CONFIG.md`](../../../cor
 prompt_accessibility = true   # auto-open the Accessibility pane if not trusted
 ```
 
-If absent, defaults apply. Strictly validated only when this add-on is compiled in.
+If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ---
 

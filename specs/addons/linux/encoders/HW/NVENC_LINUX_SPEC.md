@@ -65,14 +65,15 @@ the cap rarely matters.
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library build
 
 ```bash
-go build -tags nvenc -o featherdesk-linux-nvenc ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-nvenc.so ./internal/encode/nvenc
 ```
 
-The `nvenc` build tag pulls in `internal/encode/nvenc/` package. Without the tag the
-binary compiles without any NVIDIA SDK dependency.
+The `nvenc` add-on shared library is built from the `internal/encode/nvenc/` package.
+The NVIDIA SDK dependency is linked into that library only — the host binary never
+links it.
 
 ### Runtime dependencies
 
@@ -215,7 +216,7 @@ Documented in `MODULE_HARDWARE_ENCODE.md` as one of the supported zero-copy path
 ## Probe & Selection
 
 ```go
-//go:build nvenc
+//go:build linux
 
 func ProbeNVENC() (*NVENCCapabilities, error) {
     // 1. dlopen libnvidia-encode.so
@@ -228,7 +229,7 @@ func ProbeNVENC() (*NVENCCapabilities, error) {
 
 Pipeline probes in this order on Linux:
 ```
-NVENC available?      → use NVENC (this add-on, if compiled in)
+NVENC available?      → use NVENC (this add-on, if loaded)
 AMF-ROCm available?   → use AMF (other add-on)
 VA-API (libva)?       → use VA-API
 x264 subprocess?      → use x264 (GPL builds only)
@@ -242,14 +243,13 @@ OpenH264?             → universal SW fallback
 ```
 internal/encode/nvenc/
 ├── nvenc.go              // Encoder struct, NewNVENCEncoder
-├── nvenc_cgo.go          // CGo binding (build tag: nvenc)
-├── nvenc_stub.go         // No-op stub (build tag: !nvenc) for non-NVENC builds
+├── nvenc_cgo_linux.go    // CGo binding, //go:build linux (built into the add-on shared library)
 ├── probe.go              // ProbeNVENC()
 ├── cuda_interop.go       // KMS DMA-BUF → CUDA array import
 ├── sdk/                  // NVIDIA SDK headers (redistributable per NVIDIA license)
 │   ├── nvEncodeAPI.h
 │   └── cuda.h
-└── nvenc_test.go         // Integration tests (build tag: nvenc,integration)
+└── nvenc_test.go         // Integration tests (//go:build integration)
 ```
 
 ---
@@ -266,7 +266,7 @@ internal/encode/nvenc/
 | `BenchmarkEncode1080p60` | NVIDIA GPU |
 | `BenchmarkEncode1440p60` | NVIDIA GPU |
 
-All gated behind `//go:build nvenc,integration`.
+All gated behind `//go:build integration`.
 
 ---
 
@@ -298,7 +298,7 @@ This add-on reads its tuning knobs from the `[addon_module_nvenc]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

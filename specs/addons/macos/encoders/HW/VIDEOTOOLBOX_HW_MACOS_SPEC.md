@@ -49,10 +49,10 @@ add-on advertises in the `config` control-stream message the codec it actually p
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library (c-shared)
 
 ```bash
-go build -tags vt_hw -o featherdesk-macos-vt-hw ./cmd/server
+go build -buildmode=c-shared -tags vt_hw -o featherdesk-addon-vt_hw.dylib ./internal/encode/vt
 ```
 
 ### Runtime dependencies
@@ -174,21 +174,23 @@ Documented separately in [`../../MACOS_SPEC.md`](../../MACOS_SPEC.md) and
 ```
 internal/encode/vt/
 ├── videotoolbox.go        // shared with vt_sw add-on
-├── videotoolbox_cgo.go    // CGo binding (build tag: vt_hw)
-├── videotoolbox_stub.go   // (build tag: !vt_sw,!vt_hw)
+├── videotoolbox_cgo.go    // CGo binding (built into the add-on's shared library)
 ├── probe.go               // ProbeVideoToolbox() — enumerates encoders, advertises codecs
 └── videotoolbox_test.go
 ```
 
-Same `internal/encode/vt/` package as the VT SW add-on; build tags decide
-which paths compile in.
+> No `!vt_sw` / `!vt_hw` stub files are needed — the add-on is its own shared library.
+
+Same `internal/encode/vt/` package as the VT SW add-on; each variant is built
+into its own shared library (`featherdesk-addon-vt_hw.dylib` /
+`featherdesk-addon-vt_sw.dylib`).
 
 ---
 
 ## Probe & Selection
 
 ```go
-//go:build vt_hw
+//go:build darwin
 
 func ProbeVideoToolboxHW() (*VTHWCapabilities, error) {
     // 1. VTCopyVideoEncoderList → enumerate available encoders
@@ -198,7 +200,7 @@ func ProbeVideoToolboxHW() (*VTHWCapabilities, error) {
 }
 ```
 
-Pipeline probes (macOS, this add-on compiled in):
+Pipeline probes (macOS, this add-on loaded):
 ```
 VT HW supports HEVC? → pick HEVC (announce hvc1.1.6.L93.B0 in Config)
 VT HW supports H.264? → pick H.264 (announce avc1.42E01F)
@@ -233,7 +235,7 @@ This add-on reads its tuning knobs from the `[addon_module_vt_hw]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

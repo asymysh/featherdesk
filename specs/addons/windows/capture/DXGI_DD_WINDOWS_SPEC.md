@@ -193,10 +193,10 @@ output that Desktop Duplication can capture, bypassing the RDP restriction.
 
 ## Build & Distribution
 
-### Go build tag
+### Build (shared library)
 
 ```bash
-GOOS=windows go build -tags dxgi_dd -o featherdesk.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-dxgi_dd.dll ./internal/capture/dxgi
 ```
 
 ### Runtime dependencies
@@ -360,7 +360,7 @@ via a future `[capture] display = 0` key.
 ## Probe & Selection
 
 ```go
-//go:build dxgi_dd
+//go:build windows
 
 func ProbeDXGIDD() (*DXGIDDCapabilities, error) {
     // 1. CoInitializeEx (COM required)
@@ -393,16 +393,18 @@ internal/capture/dxgi/
 ├── dxgi.go                     // DXGICapturer struct, NewDXGICapturer
 ├── duplication.go              // IDXGIOutputDuplication wrapper
 ├── device.go                   // D3D11 device + adapter discovery
-├── dxgi_cgo.go                 // CGo binding (build tag: dxgi_dd)
-├── dxgi_stub.go                // No-op stub (build tag: !dxgi_dd)
+├── dxgi_cgo.go                 // CGo binding (built into the add-on's shared library)
 ├── cursor.go                   // DXGI_OUTDUPL_POINTER handling
 ├── probe.go                    // ProbeDXGIDD() + headless detection
 ├── vdd.go                      // IddCx virtual display: install, create, keep-alive, remove
 ├── vdd_driver/                 // Embedded IddCx driver (//go:embed)
 │   ├── vdd.inf                 // Driver INF (pre-signed)
 │   └── vdd.dll                 // Driver DLL (pre-signed)
-└── dxgi_integration_test.go    // build tag: dxgi_dd,integration
+└── dxgi_integration_test.go    // integration test (//go:build windows,integration)
 ```
+
+No `!dxgi_dd` stub file is needed — the add-on is its own shared library, so an
+absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 
@@ -444,7 +446,7 @@ This add-on reads its tuning knobs from the `[addon_module_dxgi_dd]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

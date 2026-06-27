@@ -39,13 +39,13 @@ Same encoder, same code on both x86 and ARM Windows.
 
 ## Build & Distribution
 
-### Go build tag
+### Build (shared library)
 
 ```bash
-go build -tags openh264 -o featherdesk-windows-openh264.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-openh264.dll ./internal/encode/openh264
 ```
 
-The build tag matches the Linux build tag. Same encoder, same Go file.
+The add-on ID matches the Linux add-on ID. Same encoder, same Go file.
 
 ### Runtime dependencies
 
@@ -140,8 +140,7 @@ BSD + Cisco royalty coverage = no GPL, no patent fees, fully proprietary binary.
 ```
 internal/encode/openh264/
 ├── openh264.go              // shared with Linux + macOS
-├── openh264_cgo.go          // CGo binding (build tag: openh264)
-├── openh264_stub.go         // build tag: !openh264
+├── openh264_cgo.go          // CGo binding (built into the add-on's shared library)
 ├── probe.go
 ├── openh264/                // vendored OpenH264 SDK (headers + import libs)
 │   ├── include/wels/*.h
@@ -149,6 +148,9 @@ internal/encode/openh264/
 │   └── win64/openh264-X.dll // Cisco's official prebuilt DLL
 └── openh264_test.go
 ```
+
+No `!openh264` stub file is needed — the add-on is its own shared library; an
+absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 The vendored `openh264/win64/openh264-X.dll` ships alongside the .exe at install
 time. Build process copies it from `internal/encode/openh264/openh264/win64/`
@@ -173,7 +175,7 @@ Skip when:
 
 📋 Specced — implementation exists today as the default SW encoder in
 `internal/encode/openh264.go`. Refactor moves it to `internal/encode/openh264/`
-under a Go build tag, with Windows-specific DLL vendoring added.
+and builds it as a c-shared library, with Windows-specific DLL vendoring added.
 
 ---
 
@@ -183,7 +185,7 @@ This add-on reads its tuning knobs from the `[addon_module_openh264]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

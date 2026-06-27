@@ -5,7 +5,8 @@
 The `win_touch` add-on adds multitouch injection on Windows. It implements
 `input.TouchInjector` (see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md))
 and is **separate** from the `interception` keyboard/mouse add-on — they compose:
-a Windows build that wants both compiles `interception,win_touch`.
+a Windows deployment that wants both drops in both the `interception` and
+`win_touch` add-ons.
 
 Touch is Windows-only in v1. Linux multitouch is a future extension of the
 `uinput` add-on; macOS has no public touch-injection API.
@@ -111,18 +112,18 @@ Single-monitor target with the primary display at virtual origin:
 ## Build & Distribution
 
 ```bash
-go build -tags "interception,win_touch" -o featherdesk.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-win_touch.dll ./internal/input/wintouch
 ```
 
 Pure `syscall` to `user32.dll` (`InitializeTouchInjection`, `InjectTouchInput`) —
-no CGo, no external dependency, no driver install. Available on Windows 8+.
+no external dependency, no driver install (only a thin cgo shim exporting the C-ABI `FeatherDeskAddonOpen` entry point is compiled for the c-shared build). Available on Windows 8+.
 
 ---
 
 ## Constructor & Probe
 
 ```go
-// internal/input/wintouch/wintouch_windows.go  (build tag: win_touch)
+// internal/input/wintouch/wintouch_windows.go  (built into the add-on's shared library)
 
 // Probe returns true if InitializeTouchInjection is available (Windows 8+).
 // Implemented via GetProcAddress on user32.dll — does NOT call
@@ -152,12 +153,14 @@ func New(cfg input.InjectorConfig) (input.TouchInjector, error)
 
 ```
 internal/input/wintouch/
-├── wintouch_windows.go   // build tag: win_touch (TouchInjector impl)
+├── wintouch_windows.go   // built into the add-on's shared library (TouchInjector impl)
 ├── pointer_info.go       // POINTER_TOUCH_INFO struct + flag mapping
 ├── thread.go             // pinned-thread funnel (LockOSThread)
-├── stub.go               // build tag: !win_touch (no-op, never registers)
 └── wintouch_test.go
 ```
+
+No `!win_touch` stub file is needed — the add-on is its own shared library; an
+absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 
@@ -171,7 +174,7 @@ max_contacts = 10        # 1..256; max simultaneous touch points
 feedback     = "none"    # "none" | "default" | "indirect" — system touch visual
 ```
 
-If absent, defaults apply. Strictly validated only when this add-on is compiled in.
+If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ---
 

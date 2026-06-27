@@ -103,7 +103,7 @@ var (
 
     // ErrHDRUnsupported is returned by UpdateStreamParams when an encoder
     // cannot produce HDR output (8-bit only). The pipeline switches to an
-    // HEVC-Main10-capable encoder IF one is compiled in; if NONE is available
+    // HEVC-Main10-capable encoder IF one is loaded; if NONE is available
     // (terminal case), the pipeline rejects the HDR request, sends the client
     // {"type":"hdr_unavailable"} on the control stream, and stays SDR.
     ErrHDRUnsupported = errors.New("stream: encoder does not support HDR/10-bit")
@@ -218,7 +218,7 @@ profile is in the WebCodecs spec).
 3. Switch encoder selection:
    - Reject H.264-only encoders (OpenH264, x264 standard build)
    - Require HEVC Main10 capable: NVENC, AMF, MF HW HEVC, VT HW HEVC
-   - TERMINAL CASE: if NO HEVC-Main10 encoder is compiled in, the HDR request
+   - TERMINAL CASE: if NO HEVC-Main10 encoder is loaded, the HDR request
      is rejected — the server sends {"type":"hdr_unavailable"} on the control
      stream and the session STAYS SDR (H.264, bt709). The pipeline does not
      half-switch capture to 10-bit. This is the only graceful failure mode.
@@ -449,7 +449,7 @@ immutable: every parameter change requires restart.
 ## What Stays in `[addon_module_*]` TOML Sections
 
 `stream.Params` fields **leave** `[encode]` and `[capture]` sections. The
-add-on-specific TOML sections keep only **static, build-time tuning** that
+add-on-specific TOML sections keep only **static, startup-read tuning** that
 doesn't fit the dynamic Params model:
 
 | Add-on | Static keys retained in `[addon_module_*]` |

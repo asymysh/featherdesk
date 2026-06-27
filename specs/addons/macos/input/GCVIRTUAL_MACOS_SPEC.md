@@ -149,7 +149,7 @@ bits are folded into `(x, y)` before the call.
 ## Build & Distribution
 
 ```bash
-go build -tags "gcvirtual" -o featherdesk-macos ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-gcvirtual.dylib ./internal/input/gcvirtual
 ```
 
 CGo config:
@@ -177,7 +177,7 @@ Apple Silicon and Intel use the identical framework API.
 ## Constructor & Probe
 
 ```go
-// internal/input/gcvirtual/gcvirtual_darwin.go  (build tag: gcvirtual)
+// internal/input/gcvirtual/gcvirtual_darwin.go  (built into the add-on's shared library)
 
 // Probe returns true only on macOS 14 (Sonoma) and later. It does not
 // allocate any virtual controllers; that happens in Connect.
@@ -211,13 +211,14 @@ line tells the operator the OS version requirement.
 
 ```
 internal/input/gcvirtual/
-├── gcvirtual_darwin.go     // build tag: gcvirtual (GamepadInjector impl, CGo)
+├── gcvirtual_darwin.go     // GamepadInjector impl, CGo (built into the add-on's shared library)
 ├── gcvirtual_bridge.h      // plain C signatures for CGo
 ├── gcvirtual_bridge.mm     // Objective-C++ shim -> GameController framework
 ├── buttons.go              // W3C bit -> GCInput* key table, axis/trigger math
-├── stub.go                 // build tag: !gcvirtual (no-op, never registers)
 └── gcvirtual_test.go
 ```
+
+> No `!gcvirtual` stub file is needed — the add-on is its own shared library.
 
 ---
 
@@ -231,7 +232,7 @@ layout = "standard"   # v1 supports "standard" only; reserved for future variant
                       # (e.g. extended layouts with paddles when Apple exposes them)
 ```
 
-If absent, defaults apply. Strictly validated only when this add-on is compiled in.
+If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ---
 

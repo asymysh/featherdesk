@@ -53,10 +53,10 @@ gracefully so the SW add-on takes over).
 
 ## Build & Distribution
 
-### Go build tag
+### Build (shared library)
 
 ```bash
-go build -tags mf_hw -o featherdesk-windows-mf-hw.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-mf_hw.dll ./internal/encode/mf
 ```
 
 ### Runtime dependencies
@@ -197,7 +197,7 @@ Skip / prefer vendor add-ons when:
 ```
 internal/encode/mf/
 ├── mediafoundation.go
-├── mf_hw_cgo.go             // build tag: mf_hw
+├── mf_hw_cgo.go             // CGo binding (built into the add-on's shared library)
 ├── d3d11_interop.go         // DXGI texture → IMFSample wrapping
 ├── probe.go
 └── mf_test.go
@@ -218,7 +218,7 @@ This add-on reads its tuning knobs from the `[addon_module_mf_hw]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

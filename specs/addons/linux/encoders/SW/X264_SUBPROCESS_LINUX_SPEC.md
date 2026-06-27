@@ -118,14 +118,14 @@ Parameters controlled by the Go bridge via config:
 
 ## Build & Distribution
 
-### Build tag
+### Shared library build
 
 ```bash
-go build -tags x264 -o featherdesk ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-x264.so ./internal/encode/x264
 ```
 
-The `x264` build tag compiles in the Go bridge code that spawns the subprocess.
-No C compilation needed — the bridge is pure Go (os/exec + io.Pipe).
+The `x264` add-on shared library contains the Go bridge code that spawns the subprocess.
+The x264 bridge is pure Go (os/exec + io.Pipe); only a thin cgo shim that exports the C-ABI `FeatherDeskAddonOpen` entry point is compiled for the c-shared build.
 
 ### Runtime dependency
 
@@ -149,7 +149,6 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 ```
 internal/encode/x264/
 ├── x264.go              // Go bridge: subprocess management, pipe I/O
-├── x264_stub.go         // No-op stub (build tag: !x264)
 ├── nal_split.go         // H.264 NAL unit splitting from pipe stream
 └── x264_test.go         // Integration test (requires ffmpeg)
 ```
@@ -209,7 +208,7 @@ This add-on reads its tuning knobs from the `[addon_module_x264]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

@@ -3,9 +3,9 @@
 ## Default binary input: NONE — view-only
 
 Mirroring the capture and encoder architecture: the default Linux binary ships
-with **zero input backends**. With no input add-on compiled in, the core binary
+with **zero input backends**. With no input add-on loaded, the core binary
 is **view-only** — it streams the desktop but injects nothing. Input injection
-is an opt-in build-tagged add-on. Compose the binary you need by choosing
+is an opt-in add-on shared library. Compose the deployment you need by dropping in
 capture + encoder + input add-on(s).
 
 This keeps the view-only build tiny and dependency-free, and makes the
@@ -15,7 +15,7 @@ device-permission surface of input injection explicit per deployment.
 
 ## Available input add-ons
 
-| Add-on | Build tag | Spec | When to use | Status |
+| Add-on | Add-on ID | Spec | When to use | Status |
 |--------|-----------|------|------------|--------|
 | **uinput** | `uinput` | [`./UINPUT_LINUX_SPEC.md`](./UINPUT_LINUX_SPEC.md) | Always — the single unified injection path for X11 **and** Wayland | 📋 Specced |
 
@@ -28,10 +28,15 @@ designated host for future touch injection.
 
 ### Recommended combinations
 
-| Deployment | Input add-on | Build command |
-|------------|--------------|---------------|
-| Any Linux host (X11 or Wayland) | `uinput` | `go build -tags "kms_egl,libva,openh264,uinput"` |
-| View-only monitoring (no injection) | *(none)* | `go build -tags "kms_egl,libva,openh264"` |
+| Deployment | Input add-on |
+|------------|--------------|
+| Any Linux host (X11 or Wayland) | `uinput` |
+| View-only monitoring (no injection) | *(none)* |
+
+Build the `uinput` add-on as a shared library and drop it into the add-ons
+directory to enable injection —
+`go build -buildmode=c-shared -o featherdesk-addon-uinput.so ./internal/input/uinput`.
+Leave it out for a view-only deployment.
 
 There is no per-display-server choice to make — `uinput` is the answer on both.
 
@@ -57,7 +62,7 @@ Without write access the add-on fails closed at startup with a clear error.
 With a single input add-on the selection is trivial:
 
 ```
-1. uinput compiled in AND /dev/uinput writable?  → register keyboard + mouse
+1. uinput loaded AND /dev/uinput writable?       → register keyboard + mouse
                                                   (+ gamepad when [gamepad] enabled)
 2. Otherwise                                       → view-only: no input capabilities
 ```
@@ -69,5 +74,5 @@ With a single input add-on the selection is trivial:
 1. Write the spec at `specs/addons/linux/input/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the input index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Implement under `internal/input/{name}/` with a Go build tag
+4. Build as a c-shared library from `internal/input/{name}/`
 5. Wire the capability registration in `MODULE_PIPELINE.md`

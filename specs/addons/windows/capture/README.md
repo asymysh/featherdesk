@@ -6,27 +6,33 @@ Windows has **one** capture mechanism: DXGI Desktop Duplication. Vendor-specific
 capture APIs (NvFBC, AMF Display Capture) were considered and rejected after
 benchmarking proved DXGI DD's raw overhead is sub-microsecond on every GPU.
 
-The default Windows binary ships with no capture backend. Compile in the
-`dxgi_dd` add-on to enable capture.
+The default Windows binary ships with no capture backend. Drop in the
+`dxgi_dd` add-on shared library to enable capture.
 
 ---
 
 ## Available capture add-on
 
-| Add-on | Build tag | Spec | Status |
+| Add-on | Add-on ID | Spec | Status |
 |--------|-----------|------|--------|
 | **DXGI Desktop Duplication** | `dxgi_dd` | [`./DXGI_DD_WINDOWS_SPEC.md`](./DXGI_DD_WINDOWS_SPEC.md) | ✅ Benchmarked |
 
 ### Recommended combinations
 
-| Deployment | Capture add-on | Encoder add-on(s) | Build command |
-|------------|---------------|-------------------|---------------|
-| Any GPU, maximum compat | `dxgi_dd` | `mf_hw` + `openh264` | `go build -tags "dxgi_dd,mf_hw,openh264"` |
-| NVIDIA GPU, peak performance | `dxgi_dd` | `nvenc,openh264` | `go build -tags "dxgi_dd,nvenc,openh264"` |
-| AMD GPU, peak performance | `dxgi_dd` | `amf,openh264` | `go build -tags "dxgi_dd,amf,openh264"` |
-| Intel Arc / iGPU | `dxgi_dd` | `qsv,openh264` | `go build -tags "dxgi_dd,qsv,openh264"` |
-| Home / personal (fastest SW) | `dxgi_dd` | `nvenc,amf,x264` | `go build -tags "dxgi_dd,nvenc,amf,x264"` |
-| Maximum flexibility | `dxgi_dd` | `mf_hw,nvenc,amf,qsv,openh264,x264` | Probe selects best at runtime |
+| Deployment | Capture add-on | Encoder add-on(s) | Add-on libraries to drop in |
+|------------|---------------|-------------------|------------------------------|
+| Any GPU, maximum compat | `dxgi_dd` | `mf_hw` + `openh264` | `featherdesk-addon-{dxgi_dd,mf_hw,openh264}.dll` |
+| NVIDIA GPU, peak performance | `dxgi_dd` | `nvenc,openh264` | `featherdesk-addon-{dxgi_dd,nvenc,openh264}.dll` |
+| AMD GPU, peak performance | `dxgi_dd` | `amf,openh264` | `featherdesk-addon-{dxgi_dd,amf,openh264}.dll` |
+| Intel Arc / iGPU | `dxgi_dd` | `qsv,openh264` | `featherdesk-addon-{dxgi_dd,qsv,openh264}.dll` |
+| Home / personal (fastest SW) | `dxgi_dd` | `nvenc,amf,x264` | `featherdesk-addon-{dxgi_dd,nvenc,amf,x264}.dll` |
+| Maximum flexibility | `dxgi_dd` | `mf_hw,nvenc,amf,qsv,openh264,x264` | drop in all; probe selects best at runtime |
+
+Build each add-on separately as a C-shared library and drop the resulting `.dll`
+into the add-ons directory, e.g.:
+```bash
+go build -buildmode=c-shared -o featherdesk-addon-dxgi_dd.dll ./internal/capture/dxgi
+```
 
 ---
 
@@ -62,9 +68,9 @@ for the full flow.
 ## Runtime probe order
 
 ```
-1. dxgi_dd compiled in AND active display found?     → use DXGI DD
-2. dxgi_dd compiled in AND no display + admin?       → install IddCx VDD → use DXGI DD
-3. dxgi_dd compiled in AND no display + no admin?    → request elevation, then continue
+1. dxgi_dd loaded AND active display found?          → use DXGI DD
+2. dxgi_dd loaded AND no display + admin?            → install IddCx VDD → use DXGI DD
+3. dxgi_dd loaded AND no display + no admin?         → request elevation, then continue
 4. None of the above?                                 → fatal: no capture add-on installed
 ```
 

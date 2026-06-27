@@ -63,13 +63,13 @@ use. Users on pure open-source Mesa get VA-API (the default binary path) only.
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library build
 
 ```bash
-go build -tags amf_rocm -o featherdesk-linux-amf ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-amf_rocm.so ./internal/encode/amf
 ```
 
-The `amf_rocm` build tag pulls in `internal/encode/amf/` package.
+The `amf_rocm` add-on shared library is built from the `internal/encode/amf/` package.
 
 ### Runtime dependencies
 
@@ -199,7 +199,7 @@ import extension is mature on Mesa and AMD's PRO driver.
 ## Probe & Selection
 
 ```go
-//go:build amf_rocm
+//go:build linux
 
 func ProbeAMF() (*AMFCapabilities, error) {
     // 1. dlopen libamf.so
@@ -226,8 +226,7 @@ OpenH264?            → universal SW fallback
 ```
 internal/encode/amf/
 ├── amf.go                // Encoder struct, NewAMFEncoder
-├── amf_cgo.go            // CGo binding (build tag: amf_rocm)
-├── amf_stub.go           // No-op stub (build tag: !amf_rocm)
+├── amf_cgo_linux.go      // CGo binding, //go:build linux (built into the add-on shared library)
 ├── probe.go              // ProbeAMF()
 ├── vulkan_interop.go     // DMA-BUF → VkImage → AMFSurface
 └── amf_test.go           // Integration tests
@@ -276,7 +275,7 @@ This add-on reads its tuning knobs from the `[addon_module_amf_rocm]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 
@@ -297,4 +296,4 @@ This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../c
 | `BitDepth=10` / `HDR=true` | HEVC Main10 only -- `AMF_VIDEO_ENCODER_HEVC_PROFILE = AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires codec negotiation at session start, not mid-stream (returns `stream.ErrRequiresRestart`) | no |
 | `NetworkRTTMs`, `PacketLossPct` | Used by `RATE_CONTROL_HQVBR_QVBR` quality boost when headroom available | yes |
 
-**ROCm note:** On Linux/ROCm, the same AMF VCE component is used. The `amf_rocm` build tag ensures the ROCm/HIP runtime is linked for GPU buffer management, but the encoder parameter API is identical to the Windows AMF add-on.
+**ROCm note:** On Linux/ROCm, the same AMF VCE component is used. The `amf_rocm` add-on shared library links the ROCm/HIP runtime for GPU buffer management, but the encoder parameter API is identical to the Windows AMF add-on.

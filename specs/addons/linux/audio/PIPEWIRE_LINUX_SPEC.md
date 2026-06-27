@@ -97,18 +97,19 @@ No driver. `snd-aloop` (ALSA fallback) is a stock kernel module.
 ## Build & Distribution
 
 ```bash
-go build -tags "pipewire,opus" -o featherdesk-linux ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-pipewire.so ./internal/audio/pipewire
 ```
 
-Links `libpipewire-0.3` (and `libpulse` when the Pulse fallback is compiled).
-Runs the PipeWire thread loop in-process; no external tools.
+Links `libpipewire-0.3` into the add-on library (plus `libpulse` when the Pulse
+fallback is built in; the Opus codec is the separate `opus` add-on, not bundled here). Runs the PipeWire thread
+loop in-process; no external tools.
 
 ---
 
 ## Constructor & Probe
 
 ```go
-// internal/audio/pipewire/pipewire_linux.go  (build tag: pipewire)
+// internal/audio/pipewire/pipewire_linux.go  (//go:build linux)
 
 // Probe returns true if libpipewire initializes and a default sink monitor (or a
 // Pulse/ALSA fallback) is reachable. Side-effect-free.
@@ -136,10 +137,9 @@ func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
 
 ```
 internal/audio/pipewire/
-├── pipewire_linux.go     // build tag: pipewire (AudioCapturer impl, CGo)
+├── pipewire_linux.go     // AudioCapturer impl, CGo (built into the add-on shared library)
 ├── pulse_fallback.go     // libpulse monitor capture (no subprocess)
 ├── resample.go           // graph format → 48k/stereo/S16LE
-├── stub.go               // build tag: !pipewire (no-op, never registers)
 └── pipewire_test.go
 ```
 

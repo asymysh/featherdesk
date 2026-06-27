@@ -15,7 +15,7 @@ package pipeline
 // and audio (deferred) into a streaming system.
 type Pipeline struct {
     cfg       *config.Config           // parsed TOML config (owned by caller, read-only)
-    registry  *AddonRegistry           // compiled-in capture/encoder add-ons (init()-registered)
+    registry  *AddonRegistry           // capture/encoder/input/audio add-ons loaded from the add-ons directory (dlopen)
     transport transport.Transport      // QUIC/WebTransport listener; built here, handed to server
     capturer  capture.Capturer
     surfCap   capture.SurfaceCapturer  // nil if capturer doesn't implement SurfaceCapturer
@@ -23,11 +23,11 @@ type Pipeline struct {
     encoder   encode.Encoder           // nil if hardware path
     hwEncoder hwencode.HardwareEncoder // nil if software path
     server    server.Server
-    input     input.Dispatcher         // nil → view-only (no input add-on compiled in)
+    input     input.Dispatcher         // nil → view-only (no input add-on loaded)
     clipboard clipboard.Monitor        // nil if [clipboard] disabled or Probe failed
     files     filetransfer.Service     // nil if [filetransfer] disabled
     audio     audio.AudioCapturer      // per-OS capture add-on; nil if no audio add-on / [audio] disabled
-    audioEnc  audio.AudioEncoder       // Opus (build tag) or PCM passthrough; nil if audio off
+    audioEnc  audio.AudioEncoder       // Opus (add-on) or PCM passthrough; nil if audio off
                                        // (audio design LOCKED; impl deferred — MODULE_AUDIO)
     params    stream.Params            // current dynamic stream parameters (output dims)
     paramCh   chan stream.Params       // adaptive/control param changes, applied ON the frame loop
@@ -41,7 +41,7 @@ type Pipeline struct {
 // own configuration parsing.
 func New(cfg *config.Config, logger *slog.Logger) (*Pipeline, error)
 
-// Start probes compiled-in add-ons, initializes the chosen capture + encoder
+// Start probes loaded add-ons, initializes the chosen capture + encoder
 // add-ons, and begins streaming. Blocks until ctx is cancelled. Returns after
 // graceful shutdown completes.
 func (p *Pipeline) Start(ctx context.Context) error
@@ -54,7 +54,7 @@ func (p *Pipeline) Stats() StatsSnapshot
 The pipeline takes `*config.Config` directly (the parsed TOML struct from
 [`MODULE_CONFIG.md`](./MODULE_CONFIG.md)). There is no separate `PipelineConfig`
 struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
-`[stream.adaptive]` sections plus per-add-on `[addon_module_<tag>]` sections.
+`[stream.adaptive]` sections plus per-add-on `[addon_module_<id>]` sections.
 
 ---
 
@@ -64,19 +64,32 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
 
 ```
 1. Caller (cmd/server/main.go) loads TOML via config.Load(--config path)
+   — phase-A validation only: syntax + intra-section rules. [addon_module_*]
+   sections are captured raw (undecoded); force_addon is checked non-empty when
+   mode="forced" but NOT yet checked against the loaded set.
 2. Caller creates *slog.Logger per [log] section (text in TTY, JSON otherwise)
 3. pipeline.New(cfg, logger) builds the Pipeline:
-   a. Probe each compiled-in capture add-on (registered at init() per build tag):
+   a. **Load add-ons**: scan [addons] dir, dlopen/LoadLibraryW each
+      featherdesk-addon-*.{so,dylib,dll}, check ABIVersion, read the capability
+      descriptor, and register it by kind (Captures/Encoders/Inputs/Audio).
+   b. **Phase-B (load-aware) config validation**: force_addon must name a LOADED
+      add-on ID (else startup error); each [addon_module_<id>] section is now
+      strict-decoded iff its add-on is loaded, else silently ignored.
+   d. Probe each loaded capture add-on (one shared library per add-on):
       - Linux:   nvfbc → kms_egl
       - macOS:   sck
       - Windows: dxgi_dd (with optional IddCx VDD auto-install if no display)
-   b. Probe each compiled-in encoder add-on:
-      - HW: nvenc → amf/amf_rocm → libva → mf_hw → qsv → vt_hw
+   e. Probe each loaded encoder add-on:
+      - HW: nvenc → amf/amf_rocm → libva → qsv → mf_hw → vt_hw
       - SW: x264 (if ffmpeg present) → vt_sw → openh264
-   c. Honor [capture] force_addon / [encode] force_addon overrides:
-      - If forced and add-on not compiled in: startup error
+   f. Honor [capture] force_addon / [encode] force_addon overrides:
+      - If forced and add-on not loaded: startup error
       - If forced and probe fails: startup error
       - If auto: pick first available per the order above
+      - If the chosen path is HW, require at least one loaded SW encoder add-on
+        as a fallback; if none is loaded, fail fast ("HW encoder X has no SW
+        fallback add-on loaded") rather than risk an unrecoverable mid-session
+        ErrFallbackToSoftware.
 4. Match capture surface format to encoder input:
     - HW encoder + SurfaceCapturer with compatible FBInfo → zero-copy path
    - SW encoder + any Capturer → CPU readback + I420 conversion path
@@ -94,14 +107,14 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
     port + TLS). The pipeline owns the transport and hands it to the server.
 7. Create server (embedded client FS, session token), passing it the transport
     via `server.Config.Transport`.
-8. Probe + create input dispatcher if an input add-on is compiled in AND
+8. Probe + create input dispatcher if an input add-on is loaded AND
    `[input] enabled`: build `KeyMouseInjector` (interception/uinput/cgevent) and
    optional `TouchInjector` (win_touch), sized to the SAME stream dims. If no
-   input add-on is compiled in, the binary is **view-only** (log it; not an error).
+   input add-on is loaded, the binary is **view-only** (log it; not an error).
 9. (Webcam was here — deferred to a future version, see CENTRAL_SPEC "Deferred".)
 10. Create clipboard Monitor + file-transfer Service if their `[*] enabled`.
-11. If `[audio] enabled` AND an audio capture add-on is compiled in: create the
-    capturer + the encoder (`opus` build tag → Opus, else PCM passthrough). The
+11. If `[audio] enabled` AND an audio capture add-on is loaded: create the
+    capturer + the encoder (`opus` add-on → Opus, else PCM passthrough). The
     `[audio]` section + struct field exist now; the per-OS add-ons themselves are
     **implementation-deferred** (MODULE_AUDIO), so this step is wired but inert
     until they land. No add-on / disabled → `p.audio = nil` (video-only).
@@ -375,31 +388,51 @@ server last (clients get final frames + an orderly close).
 
 ## Capability Probing
 
-The pipeline iterates over compiled-in add-ons (registered at startup via
-Go build tags) and asks each one to probe its prerequisites. There is no
+The pipeline iterates over the add-ons the host loaded from the add-ons
+directory (each a shared library `dlopen`'d at startup; see CENTRAL_SPEC
+"Add-on loading model") and asks each one to probe its prerequisites. There is no
 fixed `SystemCapabilities` struct — the set of probes is determined by which
-add-ons were compiled in.
+add-on libraries are present in the directory.
 
 ```go
-// Each capture and encoder add-on registers itself at init() time.
-// The registry holds only add-ons whose build tag was active at compile time.
+// The dlopen loader populates the registry at startup: it scans the add-ons
+// directory, loads each library, checks its ABIVersion, and adapts its exported
+// vtable into the per-kind interfaces below (keyed off the capability
+// descriptor's `kind`). The registry holds only add-ons whose library was
+// present AND ABI-compatible. All five descriptor kinds have a home:
+// capture, encode/hwencode (both EncoderAddon, distinguished by Kind()),
+// input, and audio (capture + the opus codec).
 type AddonRegistry struct {
     Captures []CaptureAddon
     Encoders []EncoderAddon
+    Inputs   []InputAddon   // injection add-ons (uinput, interception, cgevent, vigem, ...)
+    Audio    []AudioAddon   // audio capture add-ons + the opus codec add-on
 }
 
 type CaptureAddon interface {
-    Name() string  // build tag (e.g. "kms_egl", "dxgi_dd")
+    Name() string  // add-on ID (e.g. "kms_egl", "dxgi_dd")
     Probe(*slog.Logger) (*ProbeResult, error)
     New(cfg capture.CaptureConfig) (capture.Capturer, error)
 }
 
 type EncoderAddon interface {
-    Name() string  // build tag (e.g. "nvenc", "openh264", "x264")
+    Name() string  // add-on ID (e.g. "nvenc", "openh264", "x264")
     Kind() string  // "hw" or "sw"
     Probe(*slog.Logger) (*ProbeResult, error)
     NewSW(cfg encode.EncoderConfig) (encode.Encoder, error)         // SW add-ons only
     NewHW(cfg hwencode.HWEncoderConfig) (hwencode.HardwareEncoder, error) // HW add-ons only
+}
+
+type InputAddon interface {
+    Name() string  // add-on ID (e.g. "uinput", "interception", "cgevent")
+    Probe(*slog.Logger) (*ProbeResult, error)
+    New(cfg input.InjectorConfig) (input.Injector, error)
+}
+
+type AudioAddon interface {
+    Name() string  // add-on ID (e.g. "pipewire", "wasapi", "sck_audio", "opus")
+    Kind() string  // "capture" or "codec"
+    Probe(*slog.Logger) (*ProbeResult, error)
 }
 
 type ProbeResult struct {
@@ -411,12 +444,10 @@ type ProbeResult struct {
 
 func (p *Pipeline) ProbeAddons() map[string]*ProbeResult {
     results := make(map[string]*ProbeResult)
-    for _, c := range p.registry.Captures {
-        results[c.Name()], _ = c.Probe(p.logger)
-    }
-    for _, e := range p.registry.Encoders {
-        results[e.Name()], _ = e.Probe(p.logger)
-    }
+    for _, c := range p.registry.Captures { results[c.Name()], _ = c.Probe(p.logger) }
+    for _, e := range p.registry.Encoders { results[e.Name()], _ = e.Probe(p.logger) }
+    for _, i := range p.registry.Inputs   { results[i.Name()], _ = i.Probe(p.logger) }
+    for _, a := range p.registry.Audio    { results[a.Name()], _ = a.Probe(p.logger) }
     return results
 }
 ```
@@ -536,8 +567,8 @@ Validate `*config.Config` at `New()` time (in addition to MODULE_CONFIG validati
 - `stream.fps` must be 1-240
 - `stream.qp` must be 0-51 (H.264 range)
 - `stream.bitrate_bps` must be 0 (QP mode) or >= 100000 (100kbps minimum)
-- At least one capture add-on compiled in
-- At least one encoder add-on compiled in
+- At least one capture add-on loaded
+- At least one encoder add-on loaded
 
 ### R-PIP-05: Structured Shutdown Logging
 On shutdown, log a summary:

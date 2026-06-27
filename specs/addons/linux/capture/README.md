@@ -3,31 +3,36 @@
 ## Default binary capture: NONE
 
 Mirroring the encoder architecture: the default Linux binary ships with **zero
-capture backends**. Every capture method is an opt-in build-tagged add-on. Users
-compose the binary they need by choosing capture add-on(s) + encoder add-on(s).
+capture backends**. Every capture method is an opt-in add-on shared library. Users
+compose the deployment they need by dropping in capture add-on(s) + encoder add-on(s).
 
 This keeps the default binary tiny, makes licensing and dependency surface
-explicit per deployment, and lets a single source tree produce binaries for
-wildly different environments (rootful KMS+EGL on bare metal, NvFBC on an
-NVIDIA GPU server, future no-root XShm for a kiosk) without `#ifdef` spaghetti.
+explicit per deployment, and lets a single host binary serve wildly different
+environments (rootful KMS+EGL on bare metal, NvFBC on an NVIDIA GPU server,
+future no-root XShm for a kiosk) without `#ifdef` spaghetti.
 
 ---
 
 ## Available capture add-ons
 
-| Add-on | Build tag | Spec | When to use | Status |
+| Add-on | Add-on ID | Spec | When to use | Status |
 |--------|-----------|------|------------|--------|
 | **KMS+EGL DMA-BUF** | `kms_egl` | [`./KMS_EGL_LINUX_SPEC.md`](./KMS_EGL_LINUX_SPEC.md) | Universal default — every GPU, any display server, requires `CAP_SYS_ADMIN` | ✅ Working |
 | **NvFBC** | `nvfbc` | [`./NVFBC_LINUX_SPEC.md`](./NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver — ~2–3ms lower latency than KMS+EGL on NVIDIA, official path | 📋 Specced |
 
 ### Recommended add-on combinations
 
-| Deployment | Capture add-on | Encoder add-on(s) | Build command |
-|------------|---------------|-------------------|---------------|
-| Bare-metal Linux server, any GPU | `kms_egl` | `libva` (HW) + `openh264` (SW fallback) | `go build -tags "kms_egl,libva,openh264"` |
-| NVIDIA proprietary GPU host | `kms_egl,nvfbc` | `nvenc` + `openh264` | `go build -tags "kms_egl,nvfbc,nvenc,openh264"` |
-| AMD ROCm workstation | `kms_egl` | `libva,amf,openh264` | `go build -tags "kms_egl,libva,amf,openh264"` |
-| Intel Arc on Linux | `kms_egl` | `libva,openh264` | `go build -tags "kms_egl,libva,openh264"` (libva handles Arc via iHD driver) |
+| Deployment | Capture add-on | Encoder add-on(s) |
+|------------|---------------|-------------------|
+| Bare-metal Linux server, any GPU | `kms_egl` | `libva` (HW) + `openh264` (SW fallback) |
+| NVIDIA proprietary GPU host | `kms_egl` + `nvfbc` | `nvenc` + `openh264` |
+| AMD ROCm workstation | `kms_egl` | `libva` + `amf_rocm` + `openh264` |
+| Intel Arc on Linux | `kms_egl` | `libva` + `openh264` (libva handles Arc via iHD driver) |
+
+Build each add-on once as its own shared library and drop the resulting
+`featherdesk-addon-<id>.so` files into the add-ons directory — e.g.
+`go build -buildmode=c-shared -o featherdesk-addon-kms_egl.so ./internal/capture/kms`.
+The host loads whatever it finds there; the same host binary serves every row.
 
 KMS+EGL is the only add-on in the default recommended set because it's the only
 universally compatible capture backend that works without proprietary SDKs.
@@ -52,16 +57,16 @@ universally compatible capture backend that works without proprietary SDKs.
 
 ## Runtime capture probe order
 
-When multiple capture add-ons are compiled into the same binary, the pipeline
+When multiple capture add-ons are loaded, the pipeline
 selects in this priority order:
 
 ```
-1. nvfbc compiled in AND NVIDIA proprietary driver present?  → use NvFBC
-2. kms_egl compiled in AND root / CAP_SYS_ADMIN?             → use KMS+EGL
+1. nvfbc loaded AND NVIDIA proprietary driver present?       → use NvFBC
+2. kms_egl loaded AND root / CAP_SYS_ADMIN?                  → use KMS+EGL
 3. None of the above?                                         → fatal: no usable capture
 ```
 
-The first available capture wins. Compile with only what you need.
+The first available capture wins. Drop in only what you need.
 
 ---
 
@@ -70,5 +75,5 @@ The first available capture wins. Compile with only what you need.
 1. Write the spec at `specs/addons/linux/capture/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Implement under `internal/capture/{name}/` with a Go build tag
+4. Build as a c-shared library from `internal/capture/{name}/`
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`

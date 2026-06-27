@@ -80,17 +80,19 @@ Two files to study before writing a single line of code. Both MIT licensed.
 
 ---
 
-## Go Build Tag
+## Shared Library Build
 
 ```go
-//go:build libva
+//go:build linux
 ```
 
-The `libva` build tag pulls in `internal/encode/libva/` package. Without the
-tag the package is excluded and the add-on never registers.
+The `libva` add-on is built as a standalone C-ABI shared library from the
+`internal/encode/libva/` package; its `libva` CGo dependencies are linked into
+that library, never into the host. If the library isn't dropped into the
+add-ons directory, the host simply never loads it.
 
 ```
-go build -tags "libva" ./cmd/server/
+go build -buildmode=c-shared -o featherdesk-addon-libva.so ./internal/encode/libva
 ```
 
 ---
@@ -146,7 +148,7 @@ VA-API calls needed:
 5. `vaQueryConfigEntrypoints(display, VAProfileHEVCMain, ...)` → check HEVC
 6. `vaTerminate(display)` → cleanup
 
-This is ~80 lines of CGo. **Deliverable:** `go test -run TestProbeVAAPI -tags integration` passes on a machine with VA-API GPU.
+This is ~80 lines of CGo. **Deliverable:** the `TestProbeVAAPI` integration test passes on a machine with VA-API GPU.
 
 ---
 
@@ -329,7 +331,7 @@ internal/encode/libva/
 ├── vaapi.c           // CGo preamble: bitstream + SPS/PPS + VA-API wrappers
 │                     // (keep C in a .c file for better IDE support and build isolation)
 ├── vaapi.h           // VA264Ctx struct, function declarations
-└── vaapi_test.go     // Integration tests (build tag: //go:build integration)
+└── vaapi_test.go     // Integration tests (//go:build integration)
 ```
 
 > Note: splitting the C into a `.c` file (rather than the CGo `/* */` preamble) gives better compiler errors, IDE support, and build caching. CGo supports this via `#cgo CFLAGS` pointing to local includes.
@@ -397,7 +399,7 @@ This add-on reads its tuning knobs from the `[addon_module_libva]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

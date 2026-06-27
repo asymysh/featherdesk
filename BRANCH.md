@@ -43,7 +43,7 @@ specs/
 ├── interaction/          # Input, Clipboard, File Transfer, Gamepad
 ├── client/               # Web client (v1) + Native client (v2)
 ├── v2/                   # Network connectivity (NAT traversal / relay — v2-deferred)
-└── addons/               # Per-OS build-tagged backends:
+└── addons/               # Per-OS add-on shared libraries:
                           #   {linux,macos,windows}/{capture,encoders,input,audio}/
 ```
 

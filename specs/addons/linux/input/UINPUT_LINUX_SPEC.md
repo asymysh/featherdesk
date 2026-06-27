@@ -101,10 +101,10 @@ detent) to preserve trackpad/pixel-precise scroll magnitude. Falls back to
 ## Build & Distribution
 
 ```bash
-go build -tags "uinput" -o featherdesk ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-uinput.so ./internal/input/uinput
 ```
 
-No CGo, no external `-l` libraries. The binary needs **write access to
+The uinput payload is pure Go (no external `-l` libraries); only a thin cgo shim exporting the C-ABI `FeatherDeskAddonOpen` entry point is compiled for the c-shared build. The host needs **write access to
 `/dev/uinput`** at runtime:
 
 - Run as root, OR
@@ -119,7 +119,7 @@ run as full root.
 ## Constructor & Probe
 
 ```go
-// internal/input/uinput/uinput_linux.go  (build tag: uinput)
+// internal/input/uinput/uinput_linux.go  (//go:build linux)
 
 // Probe returns true if /dev/uinput is openable for writing.
 // Side-effect-free: the FD is closed before return.
@@ -161,10 +161,9 @@ All injection errors are surfaced to the dispatcher (no silent discard).
 
 ```
 internal/input/uinput/
-├── uinput_linux.go        // build tag: uinput (KeyMouseInjector impl)
+├── uinput_linux.go        // KeyMouseInjector impl (//go:build linux)
 ├── ioctl_linux.go         // UI_* ioctl numbers + input_event/uinput_setup structs
 ├── keymap.go              // HID usage → KEY_* (generated)
-├── stub.go                // build tag: !uinput (no-op, never registers)
 └── uinput_test.go         // mock-fd unit tests + /dev/uinput integration tests
 ```
 
@@ -180,7 +179,7 @@ device_name = "FeatherDesk Virtual Input"
 hi_res_scroll = true    # use REL_WHEEL_HI_RES if the kernel supports it
 ```
 
-If absent, defaults apply. Strictly validated only when this add-on is compiled in.
+If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ---
 

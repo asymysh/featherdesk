@@ -14,17 +14,17 @@ and most singleplayer; it is **not** suitable for ranked competitive shooters.
 A future native client will close this gap and is explicitly out of scope here.
 
 **Zero-by-default.** No virtual gamepad capability unless a gamepad add-on is
-compiled in. Gamepad records from the client are silently dropped when no
+loaded. Gamepad records from the client are silently dropped when no
 `GamepadInjector` is available — exactly the same pattern as `TouchInjector`.
 
-| Platform | Add-on | Build tag | Mechanism | Spec |
+| Platform | Add-on | Add-on ID | Mechanism | Spec |
 |----------|--------|-----------|-----------|------|
 | Windows | ViGEmBus | `vigem` | Xbox 360 (XInput) virtual controller via Nefarius ViGEmBus driver | [`../addons/windows/input/VIGEM_WINDOWS_SPEC.md`](../addons/windows/input/VIGEM_WINDOWS_SPEC.md) |
 | Linux | uinput | `uinput` | Gamepad evdev device on the existing uinput add-on | [`../addons/linux/input/UINPUT_LINUX_SPEC.md`](../addons/linux/input/UINPUT_LINUX_SPEC.md) |
 | macOS | GCVirtual | `gcvirtual` | `GCVirtualController` (Game Controller framework, macOS 14+) | [`../addons/macos/input/GCVIRTUAL_MACOS_SPEC.md`](../addons/macos/input/GCVIRTUAL_MACOS_SPEC.md) |
 
 On Linux the gamepad capability **extends** the existing `uinput` add-on rather
-than introducing a new build tag — uinput is the universal evdev injector and
+than introducing a new add-on — uinput is the universal evdev injector and
 adding a second virtual device for gamepad costs nothing.
 
 ---
@@ -184,7 +184,7 @@ package input
 
 // GamepadInjector is the optional contract a gamepad add-on implements. The
 // dispatcher type-asserts for it; gamepad records are dropped when no
-// GamepadInjector is compiled in.
+// GamepadInjector is loaded.
 type GamepadInjector interface {
     // Connect creates a virtual controller for index. id is logging-only.
     Connect(index uint8, id string) error
@@ -269,13 +269,13 @@ the input stream, rumble datagrams) is unchanged.
 
 ```toml
 [gamepad]
-enabled        = false        # opt-in. Even with an add-on compiled in, off by default.
+enabled        = false        # opt-in. Even with an add-on loaded, off by default.
 max_controllers = 4           # 1..4 — XInput cap on Windows; also the co-op player cap
 allow_rumble   = true         # forward host vibration requests to the client
 allow_coop     = false        # opt-in: let `player`-role clients each claim a pad slot
 ```
 
-Per-add-on tuning lives in `[addon_module_<tag>]` (see each add-on spec).
+Per-add-on tuning lives in `[addon_module_<id>]` (see each add-on spec).
 
 ---
 

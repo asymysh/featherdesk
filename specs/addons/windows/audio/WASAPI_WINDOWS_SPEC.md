@@ -84,19 +84,19 @@ No driver, no redistributable.
 ## Build & Distribution
 
 ```bash
-GOOS=windows go build -tags "wasapi,opus" -o featherdesk.exe ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-wasapi.dll ./internal/audio/wasapi
 ```
 
 - COM must be initialized (`CoInitializeEx`, MTA) on the capture goroutine, which
   is pinned with `runtime.LockOSThread`. Uninitialize on Close.
-- Pairs with the `opus` codec tag for compressed audio; without `opus`, raw PCM.
+- Pairs with the `opus` codec add-on for compressed audio; without it, raw PCM.
 
 ---
 
 ## Constructor & Probe
 
 ```go
-// internal/audio/wasapi/wasapi_windows.go  (build tag: wasapi)
+// internal/audio/wasapi/wasapi_windows.go  (built into the add-on's shared library)
 
 // Probe returns true if a default render endpoint exists and IAudioClient
 // activates with the loopback flag (side-effect-free; releases what it opens).
@@ -124,11 +124,13 @@ func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
 
 ```
 internal/audio/wasapi/
-├── wasapi_windows.go     // build tag: wasapi (AudioCapturer impl, COM/CGo)
+├── wasapi_windows.go     // built into the add-on's shared library (AudioCapturer impl, COM/CGo)
 ├── resample.go           // device mix-format → 48k/stereo/S16LE
-├── stub.go               // build tag: !wasapi (no-op, never registers)
 └── wasapi_test.go
 ```
+
+No `!wasapi` stub file is needed — the add-on is its own shared library; an absent
+add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 

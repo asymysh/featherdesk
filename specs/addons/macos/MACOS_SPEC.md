@@ -10,9 +10,9 @@ macOS is a secondary target for FeatherDesk. The use case is **remote control on
 
 ### Every capture backend is an add-on (pluggable architecture)
 
-The macOS default binary contains **no capture backends**. Capture is a
-build-tagged add-on, mirroring the Linux structure for architectural symmetry.
-In practice, every real macOS deployment will compile in the `sck` add-on —
+The macOS default binary contains **no capture backends**. Capture is an
+add-on shared library, mirroring the Linux structure for architectural symmetry.
+In practice, every real macOS deployment will load the `sck` add-on —
 ScreenCaptureKit is the only supported capture path on macOS 12.3+.
 
 ```
@@ -23,7 +23,7 @@ capture/
 
 ### Add-on summary
 
-| Add-on | Build tag | Spec | When to use |
+| Add-on | Add-on ID | Spec | When to use |
 |--------|-----------|------|------------|
 | **ScreenCaptureKit (SCK)** | `sck` | [`capture/SCK_MACOS_SPEC.md`](./capture/SCK_MACOS_SPEC.md) | Always — the only supported macOS capture API |
 
@@ -52,8 +52,8 @@ path to add as an alternative.
 Effectively collapses to a single check:
 
 ```
-1. sck compiled in AND Screen Recording TCC granted? → use SCK
-2. Otherwise                                          → fatal: no capture
+1. sck loaded AND Screen Recording TCC granted? → use SCK
+2. Otherwise                                     → fatal: no capture
 ```
 
 Full details — permission requirements, app-bundle requirement, HMAC-signed
@@ -89,8 +89,8 @@ IOSurface → VideoToolbox path, and implementation sketch — are in
 
 ### Every encoder is an add-on (pluggable architecture)
 
-The macOS default binary contains **no encoders**. Every encoder is a build-tagged
-add-on. The full set:
+The macOS default binary contains **no encoders**. Every encoder is an add-on
+shared library. The full set:
 
 ```
 encoders/

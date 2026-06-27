@@ -3,7 +3,7 @@
 ## Pluggable architecture: every encoder is an opt-in add-on
 
 The macOS default binary contains **no encoders**. Every encoder is a separate
-build-tagged add-on. Users compile in exactly the encoders they want.
+add-on shared library. Users drop in exactly the encoders they want.
 
 ```
 specs/addons/macos/encoders/
@@ -19,18 +19,24 @@ specs/addons/macos/encoders/
 
 ## Recommended combinations
 
-| Deployment | Recommended add-on set | Binary |
-|-----------|-----------------------|--------|
-| Generic Mac (commercial default) | `vt_sw` + `vt_hw` | `featherdesk-macos-default` |
-| Apple Silicon M1+ | `vt_hw` only | `featherdesk-macos-arm64` |
-| Intel Mac | `vt_sw` + `vt_hw` | `featherdesk-macos-x86_64` |
-| Cross-platform binary, commercial | `openh264` + `vt_hw` | `featherdesk-macos-cross-bsd` |
-| Cross-platform binary, home / OSS | `x264` + `vt_hw` | `featherdesk-macos-cross-gpl` |
+| Deployment | Recommended add-on set | Add-on libraries to drop in |
+|-----------|-----------------------|------------------------------|
+| Generic Mac (commercial default) | `vt_sw` + `vt_hw` | `featherdesk-addon-vt_sw.dylib`, `featherdesk-addon-vt_hw.dylib` |
+| Apple Silicon M1+ | `vt_hw` only | `featherdesk-addon-vt_hw.dylib` |
+| Intel Mac | `vt_sw` + `vt_hw` | `featherdesk-addon-vt_sw.dylib`, `featherdesk-addon-vt_hw.dylib` |
+| Cross-platform, commercial | `openh264` + `vt_hw` | `featherdesk-addon-openh264.dylib`, `featherdesk-addon-vt_hw.dylib` |
+| Cross-platform, home / OSS | `x264` + `vt_hw` | `featherdesk-addon-x264.dylib`, `featherdesk-addon-vt_hw.dylib` |
 
-The build tags compose:
+Build each add-on as its own shared library and drop the set into the add-ons
+directory — there is no combined host build. For example:
 ```bash
-go build -tags "vt_sw,vt_hw,openh264" -o featherdesk-macos ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-openh264.dylib ./internal/encode/openh264
+go build -buildmode=c-shared -tags vt_hw -o featherdesk-addon-vt_hw.dylib ./internal/encode/vt
+go build -buildmode=c-shared -tags vt_sw -o featherdesk-addon-vt_sw.dylib ./internal/encode/vt
 ```
+`vt_sw` and `vt_hw` are two variants of the same `./internal/encode/vt` package,
+selected by an **internal build tag at the add-on's own build step** (not host
+composition); each produces its own `.dylib` with its own capability descriptor.
 
 ---
 
@@ -42,7 +48,7 @@ There is no vendor fragmentation — every Mac, whether Intel + AMD discrete,
 Intel integrated, or Apple Silicon, exposes its hardware encoder through the
 same `VTCompressionSession` API.
 
-The add-on split (`vt_sw` vs `vt_hw`) is purely for build modularity — they
+The add-on split (`vt_sw` vs `vt_hw`) is purely for packaging modularity — they
 share the same CGo file, just different configuration at runtime.
 
 ---
@@ -66,7 +72,7 @@ See:
 
 ## Codec fallback order at runtime
 
-When multiple encoders are compiled in:
+When multiple encoders are loaded:
 
 ```
 1. VT HW (HEVC available)?  → use HEVC HW (announce hvc1.1.6.L93.B0)

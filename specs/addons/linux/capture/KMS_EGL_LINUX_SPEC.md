@@ -64,10 +64,10 @@ After that, the binary runs as a regular user.
 
 ## Build & Distribution
 
-### Go build tag
+### Shared library build
 
 ```bash
-go build -tags kms_egl -o featherdesk-linux-kms ./cmd/server
+go build -buildmode=c-shared -o featherdesk-addon-kms_egl.so ./internal/capture/kms
 ```
 
 ### Runtime dependencies
@@ -193,7 +193,7 @@ client-side cursor compositing approach.
 ## Probe & Selection
 
 ```go
-//go:build kms_egl
+//go:build linux
 
 func ProbeKMSEGL() (*KMSEGLCapabilities, error) {
     // 1. Check CAP_SYS_ADMIN / root via geteuid + check effective caps
@@ -204,7 +204,7 @@ func ProbeKMSEGL() (*KMSEGLCapabilities, error) {
 }
 ```
 
-Pipeline probes capture (Linux, this add-on compiled in):
+Pipeline probes capture (Linux, this add-on loaded):
 ```
 NvFBC add-on AND NVIDIA proprietary?  → use NvFBC (lower latency on NVIDIA)
 KMS+EGL with root?                    → use this add-on
@@ -220,18 +220,17 @@ internal/capture/kms/
 ├── kms.go                      // KMSCapturer struct, NewKMSCapturer
 ├── drm.go                      // DRM card discovery, plane enumeration
 ├── egl.go                      // EGL context, DMA-BUF import, glReadPixels
-├── kms_cgo.go                  // CGo binding (build tag: kms_egl)
-├── kms_stub.go                 // No-op stub (build tag: !kms_egl)
+├── kms_cgo.go                  // CGo binding (built into the add-on shared library)
 ├── cursor.go                   // Cursor plane capture
 ├── probe.go                    // ProbeKMSEGL()
-├── drm_integration_test.go     // build tag: kms_egl,integration
-├── egl_integration_test.go     // build tag: kms_egl,integration
-└── kms_integration_test.go     // build tag: kms_egl,integration
+├── drm_integration_test.go     // integration test (//go:build integration)
+├── egl_integration_test.go     // integration test (//go:build integration)
+└── kms_integration_test.go     // integration test (//go:build integration)
 ```
 
 Already exists in working form at `internal/capture/{drm,egl,kms,cursor}.go` —
-refactor moves it under the `kms_egl` build tag without changing the underlying
-code.
+refactor moves it into the `kms_egl` add-on shared library without changing the
+underlying code.
 
 ---
 
@@ -266,8 +265,8 @@ Skip when:
 
 ✅ **Working** — implemented today in `internal/capture/{drm,egl,kms,cursor}.go`,
 verified on Intel HD 630 at 2560×1440 with measured performance numbers. The
-refactor moves it to `internal/capture/kms/` under a `kms_egl` build tag without
-changing the underlying capture logic.
+refactor moves it to `internal/capture/kms/`, built as the `kms_egl` add-on
+shared library without changing the underlying capture logic.
 
 ---
 
@@ -277,7 +276,7 @@ This add-on reads its tuning knobs from the `[addon_module_kms_egl]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../core/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
-strictly validated only when this add-on is compiled into the binary; unknown
+strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
 

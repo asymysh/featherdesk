@@ -7,12 +7,12 @@ interface contract** that every HW encoder add-on implements. It owns no
 encoder implementation itself — concrete encoders live in their respective
 add-on specs:
 
-- `internal/encode/libva/` — Linux VA-API (build tag `libva`, MIT)
-- `internal/encode/nvenc/` — NVENC SDK direct (build tag `nvenc`, NVIDIA proprietary)
-- `internal/encode/amf/` — AMD AMF (build tag `amf` Windows, `amf_rocm` Linux, Apache 2.0)
-- `internal/encode/mf/` — Windows MediaFoundation (build tag `mf_hw`, Microsoft system)
-- `internal/encode/qsv/` — Intel oneVPL / QSV (build tag `qsv`, MIT)
-- `internal/encode/vt/` — macOS VideoToolbox HW (build tag `vt_hw`, Apple system)
+- `internal/encode/libva/` — Linux VA-API (add-on ID `libva`, MIT)
+- `internal/encode/nvenc/` — NVENC SDK direct (add-on ID `nvenc`, NVIDIA proprietary)
+- `internal/encode/amf/` — AMD AMF (add-on ID `amf` Windows, `amf_rocm` Linux, Apache 2.0)
+- `internal/encode/mf/` — Windows MediaFoundation (add-on ID `mf_hw`, Microsoft system)
+- `internal/encode/qsv/` — Intel oneVPL / QSV (add-on ID `qsv`, MIT)
+- `internal/encode/vt/` — macOS VideoToolbox HW (add-on ID `vt_hw`, Apple system)
 
 > **Software encoders** implement a different contract in
 > [`MODULE_ENCODE.md`](./MODULE_ENCODE.md). Hardware encoders consume GPU
@@ -180,7 +180,7 @@ The Hardware Encode module does **not** decide which HW encoder to use.
 That dispatch lives in [`MODULE_PIPELINE.md`](../core/MODULE_PIPELINE.md), which:
 
 1. Reads `[encode]` config (mode = "auto" | "forced", force_addon if forced)
-2. Probes compiled-in HW add-ons in priority order — vendor-specific SDKs
+2. Probes loaded HW add-ons in priority order — vendor-specific SDKs
    before generic abstractions (NVENC > libva on NVIDIA; AMF > libva on AMD;
    MF HW falls back to whatever vendor MFT is registered)
 3. Verifies the capture add-on's `SurfaceHandle` format is acceptable to the
@@ -198,9 +198,9 @@ based on browser handshake preferences.
 
 Each HW encoder add-on owns its own spec. The Hardware Encode module spec is
 the interface contract above; implementation details, performance numbers,
-licensing, build tags, and CGo specifics all live in the add-on specs.
+licensing, add-on IDs, and CGo specifics all live in the add-on specs.
 
-| Add-on | Build tag | Linux | macOS | Windows |
+| Add-on | Add-on ID | Linux | macOS | Windows |
 |--------|-----------|-------|-------|---------|
 | libva (VA-API) | `libva` | [`specs/addons/linux/encoders/HW/LIBVA_LINUX_SPEC.md`](../addons/linux/encoders/HW/LIBVA_LINUX_SPEC.md) | — | — |
 | NVENC | `nvenc` | [`specs/addons/linux/encoders/HW/NVENC_LINUX_SPEC.md`](../addons/linux/encoders/HW/NVENC_LINUX_SPEC.md) | — | [`specs/addons/windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](../addons/windows/encoders/HW/NVENC_WINDOWS_SPEC.md) |
