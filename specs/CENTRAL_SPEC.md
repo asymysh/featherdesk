@@ -65,39 +65,43 @@ on:
 4. `ErrFallbackToSoftware` from HW encoder triggers SW fallback for the session
 
 Per-add-on tuning lives in `[addon_module_<build_tag>]` TOML sections, not
-in code. See [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
+in code. See [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md).
 
 ---
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 15 plug-and-play modules. Each module has its own spec
+The system is decomposed into 18 module specs — 15 numbered core modules plus three
+cross-cutting/support specs (Auth, Stream Params, Audio). Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
 |---|--------|-----------|----------------|
-| 1 | **Capture** | [`./MODULE_CAPTURE.md`](./MODULE_CAPTURE.md) | Cross-platform `Capturer` interface contract (concrete impls are add-ons per OS) |
-| 2 | **Encode** | [`./MODULE_ENCODE.md`](./MODULE_ENCODE.md) | Software encoder interface contract (concrete impls are add-ons) |
-| 3 | **Hardware Encode** | [`./MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface contract (concrete impls are add-ons) |
-| 4 | **Protocol** | [`./MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) — transport-agnostic; shared by the browser (v1) and native (v2) clients, see [`./MODULE_NATIVE_CLIENT.md`](./MODULE_NATIVE_CLIENT.md) |
-| 5 | **Transport** | [`./MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) | HTTP/3 + WebTransport (QUIC); datagrams + reliable streams; auth handshake |
-| 6 | **Server** | [`./MODULE_SERVER.md`](./MODULE_SERVER.md) | HTTP/3 + WebTransport transport, session management, TLS 1.3 |
-| 7 | **Client** | [`./MODULE_CLIENT.md`](./MODULE_CLIENT.md) | Browser-based viewer (WebCodecs) |
-| 8 | **Pipeline** | [`./MODULE_PIPELINE.md`](./MODULE_PIPELINE.md) | Orchestrator: probe + select compiled-in add-ons, lifecycle, pacing, frame drops, wiring |
-| 9 | **Config** | [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
-| 10 | **Input** | [`./MODULE_INPUT.md`](./MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract (injection impls are add-ons per OS) |
-| 11 | **Clipboard** | [`./MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
-| 12 | **File Transfer** | [`./MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder carried as QUIC bidirectional streams on the main WebTransport session (core) |
-| 13 | **Gamepad** | [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md) | Browser Gamepad-API redirection contract + rumble (virtual-controller injection is per-OS add-ons; casual-gaming-grade only) |
-| 14 | **Network** | [`./MODULE_NETWORK.md`](./MODULE_NETWORK.md) | v2 connectivity (NAT traversal / relay / signaling for the native client). Requirements + listener-provider contract documented; **mechanism not chosen** (tsnet vs pion vs other — evaluated at v2 start). |
-| 15 | **Native Client** | [`./MODULE_NATIVE_CLIENT.md`](./MODULE_NATIVE_CLIENT.md) | v2 native desktop client plan — same QUIC protocol, full-HID gamepad, reliable 4:4:4, sub-ms input. **Split final; impl deferred.** |
+| 1 | **Capture** | [`./media/MODULE_CAPTURE.md`](./media/MODULE_CAPTURE.md) | Cross-platform `Capturer` interface contract (concrete impls are add-ons per OS) |
+| 2 | **Encode** | [`./media/MODULE_ENCODE.md`](./media/MODULE_ENCODE.md) | Software encoder interface contract (concrete impls are add-ons) |
+| 3 | **Hardware Encode** | [`./media/MODULE_HARDWARE_ENCODE.md`](./media/MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface contract (concrete impls are add-ons) |
+| 4 | **Protocol** | [`./core/MODULE_PROTOCOL.md`](./core/MODULE_PROTOCOL.md) | Wire protocol (framing, serialization, versioning) — transport-agnostic; shared by the browser (v1) and native (v2) clients, see [`./client/MODULE_NATIVE_CLIENT.md`](./client/MODULE_NATIVE_CLIENT.md) |
+| 5 | **Transport** | [`./core/MODULE_TRANSPORT.md`](./core/MODULE_TRANSPORT.md) | HTTP/3 + WebTransport (QUIC); datagrams + reliable streams; auth handshake |
+| 6 | **Server** | [`./core/MODULE_SERVER.md`](./core/MODULE_SERVER.md) | Session management, broadcast fan-out, keyframe/bootstrap cache, role gating (consumes Transport; transport/TLS owned by #5) |
+| 7 | **Web Client** | [`./client/MODULE_WEB_CLIENT.md`](./client/MODULE_WEB_CLIENT.md) | Browser-based viewer (WebCodecs) — v1 |
+| 8 | **Pipeline** | [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md) | Orchestrator: probe + select compiled-in add-ons, lifecycle, pacing, frame drops, wiring |
+| 9 | **Config** | [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
+| 10 | **Input** | [`./interaction/MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract (injection impls are add-ons per OS) |
+| 11 | **Clipboard** | [`./interaction/MODULE_CLIPBOARD.md`](./interaction/MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
+| 12 | **File Transfer** | [`./interaction/MODULE_FILETRANSFER.md`](./interaction/MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder carried as QUIC bidirectional streams on the main WebTransport session (core) |
+| 13 | **Gamepad** | [`./interaction/MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md) | Browser Gamepad-API redirection contract + rumble (virtual-controller injection is per-OS add-ons; casual-gaming-grade only) |
+| 14 | **Network** | [`./v2/MODULE_NETWORK.md`](./v2/MODULE_NETWORK.md) | v2 connectivity (NAT traversal / relay / signaling for the native client). Requirements + listener-provider contract documented; **mechanism not chosen** (tsnet vs pion vs other — evaluated at v2 start). |
+| 15 | **Native Client** | [`./client/MODULE_NATIVE_CLIENT.md`](./client/MODULE_NATIVE_CLIENT.md) | v2 native desktop client plan — same QUIC protocol, full-HID gamepad, reliable 4:4:4, sub-ms input. **Split final; impl deferred.** |
+| 16 | **Auth** *(support)* | [`./core/MODULE_AUTH.md`](./core/MODULE_AUTH.md) | Authentication modes, session tokens, in-band resume credentials, role gating |
+| 17 | **Stream Params** *(support)* | [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md) | Dynamic stream parameters, adaptive bitrate, chroma negotiation (shared `pkg/stream`) |
+| 18 | **Audio** *(deferred)* | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | Host→client system audio: Opus/PCM, stereo / 5.1 / 7.1, audio-master A/V sync. **Design locked; impl deferred.** |
 
 > **Encoder, capture, and input implementations are not core modules.**
 > Every encoder (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF,
 > QSV, MediaFoundation HW), every capture backend (KMS+EGL, NvFBC, SCK, DXGI DD),
 > and every input injector (interception, uinput, cgevent, win_touch, vigem,
 > gcvirtual) is a build-tagged add-on under
-> [`../ADD-ON-SPECS/{Platform}/{capture,encoders,input}/`](../ADD-ON-SPECS/).
+> [`specs/addons/{platform}/{capture,encoders,input,audio}/`](./addons/).
 > The default binary ships with zero of each — users compile in what they need.
 > A binary with no input add-on is **view-only**. See the index below.
 
@@ -153,17 +157,17 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 ## Platform & Add-On Spec Index
 
 OS-specific platform specs and vendor-specific add-on encoder specs live under
-[`../ADD-ON-SPECS/`](../ADD-ON-SPECS/). This index is the **single source of truth**
+[`specs/addons/`](./addons/). This index is the **single source of truth**
 for where any platform or add-on document lives — never duplicate specs, always link here.
 
 ### Platform specs
 
 | Platform | Spec | Capture add-on(s) | Encoder add-on(s) |
 |----------|------|------------------|-------------------|
-| **Cross-platform compat** | [`ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`](../ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md) | — | — |
-| **Linux** | [`ADD-ON-SPECS/Linux/LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `x264`, `libva`, `nvenc`, `amf` |
-| **macOS** | [`ADD-ON-SPECS/macOS/MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/MACOS_SPEC.md) | `sck` | `openh264`, `x264`, `vt_sw`, `vt_hw` |
-| **Windows** | [`ADD-ON-SPECS/Windows/WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/WINDOWS_SPEC.md) | `dxgi_dd` | `openh264`, `x264`, `mf_hw`, `nvenc`, `amf`, `qsv` |
+| **Cross-platform compat** | [`specs/PLATFORM_COMPAT.md`](./PLATFORM_COMPAT.md) | — | — |
+| **Linux** | [`specs/addons/linux/LINUX_SPEC.md`](./addons/linux/LINUX_SPEC.md) | `kms_egl`, `nvfbc` | `openh264`, `x264`, `libva`, `nvenc`, `amf` |
+| **macOS** | [`specs/addons/macos/MACOS_SPEC.md`](./addons/macos/MACOS_SPEC.md) | `sck` | `openh264`, `x264`, `vt_sw`, `vt_hw` |
+| **Windows** | [`specs/addons/windows/WINDOWS_SPEC.md`](./addons/windows/WINDOWS_SPEC.md) | `dxgi_dd` | `openh264`, `x264`, `mf_hw`, `nvenc`, `amf`, `qsv` |
 
 > **Default binary on every platform contains zero capture backends and zero
 > encoders.** Every backend is an opt-in build-tagged add-on. Users compose the
@@ -175,8 +179,8 @@ for where any platform or add-on document lives — never duplicate specs, alway
 
 | Add-on | Build tag | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
-| KMS+EGL DMA-BUF | `kms_egl` | [`ADD-ON-SPECS/Linux/capture/KMS_EGL_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/capture/KMS_EGL_LINUX_SPEC.md) | Universal — every GPU, any display server | ✅ Working |
-| NvFBC | `nvfbc` | [`ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
+| KMS+EGL DMA-BUF | `kms_egl` | [`specs/addons/linux/capture/KMS_EGL_LINUX_SPEC.md`](./addons/linux/capture/KMS_EGL_LINUX_SPEC.md) | Universal — every GPU, any display server | ✅ Working |
+| NvFBC | `nvfbc` | [`specs/addons/linux/capture/NVFBC_LINUX_SPEC.md`](./addons/linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
 
 > **KMS+EGL is the recommended default capture add-on.** Works on X11, Wayland
 > (all compositors), and headless — it operates below the display server, so
@@ -188,18 +192,18 @@ for where any platform or add-on document lives — never duplicate specs, alway
 > **Intel / AMD do not need capture add-ons** — neither vendor has a proprietary
 > capture API on Linux. KMS+EGL is the entire path.
 
-See [`ADD-ON-SPECS/Linux/capture/README.md`](../ADD-ON-SPECS/Linux/capture/README.md)
+See [`specs/addons/linux/capture/README.md`](./addons/linux/capture/README.md)
 for the full rationale.
 
 ### Linux encoder add-on specs
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 CGo | SW | BSD-2 (Cisco) | [`Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
-| x264 subprocess | SW | GPL-2 (isolated) | [`Linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
-| libva direct | HW | MIT | [`Linux/encoders/HW/LIBVA_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
-| NVENC direct | HW | NVIDIA SDK | [`Linux/encoders/HW/NVENC_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
-| AMF on ROCm | HW | Apache 2.0 | [`Linux/encoders/HW/AMF_ROCM_SPEC.md`](../ADD-ON-SPECS/Linux/encoders/HW/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
+| OpenH264 CGo | SW | BSD-2 (Cisco) | [`linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](./addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
+| x264 subprocess | SW | GPL-2 (isolated) | [`linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](./addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
+| libva direct | HW | MIT | [`linux/encoders/HW/LIBVA_LINUX_SPEC.md`](./addons/linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
+| NVENC direct | HW | NVIDIA SDK | [`linux/encoders/HW/NVENC_LINUX_SPEC.md`](./addons/linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
+| AMF on ROCm | HW | Apache 2.0 | [`linux/encoders/HW/AMF_ROCM_SPEC.md`](./addons/linux/encoders/HW/AMF_ROCM_SPEC.md) | AMD GCN+ via ROCm | 📋 Specced |
 
 > **SW encoder choice:** OpenH264 for commercial deployments (BSD).
 > x264 for home / OSS — 2× faster on multi-core CPUs but GPL contamination
@@ -217,19 +221,19 @@ be the only capture option.
 
 | Add-on | Build tag | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
-| ScreenCaptureKit | `sck` | [`ADD-ON-SPECS/macOS/capture/SCK_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/capture/SCK_MACOS_SPEC.md) | All Macs (macOS 12.3+) | 📋 Specced |
+| ScreenCaptureKit | `sck` | [`specs/addons/macos/capture/SCK_MACOS_SPEC.md`](./addons/macos/capture/SCK_MACOS_SPEC.md) | All Macs (macOS 12.3+) | 📋 Specced |
 
-See [`ADD-ON-SPECS/macOS/capture/README.md`](../ADD-ON-SPECS/macOS/capture/README.md)
+See [`specs/addons/macos/capture/README.md`](./addons/macos/capture/README.md)
 for the full rationale.
 
 ### macOS encoder add-on specs
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 CGo | SW | BSD-2 (Cisco) | [`macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
-| x264 subprocess | SW | GPL-2 (isolated) | [`macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | Any CPU; needs ffmpeg | 📋 Specced |
-| VideoToolbox SW | SW | Apple system | [`macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
-| VideoToolbox HW | HW | Apple system | [`macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC). No AV1 HW encode on any current Apple Silicon. | 📋 Specced |
+| OpenH264 CGo | SW | BSD-2 (Cisco) | [`macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](./addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
+| x264 subprocess | SW | GPL-2 (isolated) | [`macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](./addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | Any CPU; needs ffmpeg | 📋 Specced |
+| VideoToolbox SW | SW | Apple system | [`macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](./addons/macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
+| VideoToolbox HW | HW | Apple system | [`macos/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](./addons/macos/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC). No AV1 HW encode on any current Apple Silicon. | 📋 Specced |
 
 > **No vendor-specific HW add-ons on macOS** — Apple controls the entire graphics stack.
 > VideoToolbox is the single API for Intel Quick Sync, AMD VCE, and Apple Media Engine.
@@ -242,7 +246,7 @@ for the full rationale.
 
 | Add-on | Build tag | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
-| DXGI Desktop Duplication (with integrated IddCx headless install) | `dxgi_dd` | [`ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/capture/DXGI_DD_WINDOWS_SPEC.md) | Any GPU (WDDM 1.2+, Win 8+) | ✅ Benchmarked |
+| DXGI Desktop Duplication (with integrated IddCx headless install) | `dxgi_dd` | [`specs/addons/windows/capture/DXGI_DD_WINDOWS_SPEC.md`](./addons/windows/capture/DXGI_DD_WINDOWS_SPEC.md) | Any GPU (WDDM 1.2+, Win 8+) | ✅ Benchmarked |
 
 > **DXGI DD is the only Windows capture mechanism.** Benchmarking proved its
 > raw acquisition overhead is sub-microsecond on every GPU, leaving no room
@@ -257,19 +261,19 @@ for the full rationale.
 > **No elevation required for standard use.** First-launch driver install
 > needs one UAC prompt; subsequent runs need none.
 
-See [`ADD-ON-SPECS/Windows/capture/README.md`](../ADD-ON-SPECS/Windows/capture/README.md)
+See [`specs/addons/windows/capture/README.md`](./addons/windows/capture/README.md)
 for the full rationale, recommended combinations, and headless install flow.
 
 ### Windows encoder add-on specs
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 CGo | SW | BSD-2 (Cisco) | [`Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | ✅ Benchmarked |
-| x264 subprocess | SW | GPL-2 (isolated) | [`Windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
-| MediaFoundation HW | HW | Microsoft system | [`Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | ✅ Benchmarked |
-| NVENC | HW | NVIDIA SDK | [`Windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | ✅ Benchmarked |
-| AMF | HW | Apache 2.0 | [`Windows/encoders/HW/AMF_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/AMF_WINDOWS_SPEC.md) | AMD GCN+ | ✅ Benchmarked |
-| QSV (oneVPL) | HW | MIT | [`Windows/encoders/HW/QSV_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/encoders/HW/QSV_WINDOWS_SPEC.md) | Intel Sandy Bridge+ (covers Arc) | 📋 Specced |
+| OpenH264 CGo | SW | BSD-2 (Cisco) | [`windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | ✅ Benchmarked |
+| x264 subprocess | SW | GPL-2 (isolated) | [`windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
+| MediaFoundation HW | HW | Microsoft system | [`windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | ✅ Benchmarked |
+| NVENC | HW | NVIDIA SDK | [`windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | ✅ Benchmarked |
+| AMF | HW | Apache 2.0 | [`windows/encoders/HW/AMF_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/AMF_WINDOWS_SPEC.md) | AMD GCN+ | ✅ Benchmarked |
+| QSV (oneVPL) | HW | MIT | [`windows/encoders/HW/QSV_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/QSV_WINDOWS_SPEC.md) | Intel Sandy Bridge+ (covers Arc) | 📋 Specced |
 
 
 > **MediaFoundation HW is the recommended cross-vendor default for Windows** —
@@ -281,23 +285,23 @@ for the full rationale, recommended combinations, and headless install flow.
 Implement `input.KeyMouseInjector` / `input.TouchInjector` / `input.GamepadInjector`.
 The core decodes the binary input protocol; the add-on performs OS injection.
 No input add-on compiled in → **view-only** binary. See
-[`MODULE_INPUT.md`](./MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md).
+[`MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md).
 
 | Add-on | Build tag | OS | Spec | Capability | Status |
 |--------|-----------|----|----- |------------|--------|
-| Interception | `interception` | Windows | [`Windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/INTERCEPTION_WINDOWS_SPEC.md) | KeyMouse (filter driver + SendSAS, injects below UIPI) | 📋 Specced |
-| Win Touch | `win_touch` | Windows | [`Windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/WIN_TOUCH_WINDOWS_SPEC.md) | Touch (`InjectTouchInput`; pen→touch with pressure) | 📋 Specced |
-| ViGEmBus | `vigem` | Windows | [`Windows/input/VIGEM_WINDOWS_SPEC.md`](../ADD-ON-SPECS/Windows/input/VIGEM_WINDOWS_SPEC.md) | Gamepad (Xbox 360 virtual controller; signed driver install) | 📋 Specced |
-| uinput | `uinput` | Linux | [`Linux/input/UINPUT_LINUX_SPEC.md`](../ADD-ON-SPECS/Linux/input/UINPUT_LINUX_SPEC.md) | KeyMouse + Gamepad (kernel `/dev/uinput`, X11+Wayland) | 📋 Specced |
-| CGEvent | `cgevent` | macOS | [`macOS/input/CGEVENT_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/input/CGEVENT_MACOS_SPEC.md) | KeyMouse (`CGEventPost`; needs Accessibility) | 📋 Specced |
-| GCVirtual | `gcvirtual` | macOS | [`macOS/input/GCVIRTUAL_MACOS_SPEC.md`](../ADD-ON-SPECS/macOS/input/GCVIRTUAL_MACOS_SPEC.md) | Gamepad (GCVirtualController, macOS 14+; GameController-framework apps only) | 📋 Specced |
+| Interception | `interception` | Windows | [`windows/input/INTERCEPTION_WINDOWS_SPEC.md`](./addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md) | KeyMouse (filter driver + SendSAS, injects below UIPI) | 📋 Specced |
+| Win Touch | `win_touch` | Windows | [`windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](./addons/windows/input/WIN_TOUCH_WINDOWS_SPEC.md) | Touch (`InjectTouchInput`; pen→touch with pressure) | 📋 Specced |
+| ViGEmBus | `vigem` | Windows | [`windows/input/VIGEM_WINDOWS_SPEC.md`](./addons/windows/input/VIGEM_WINDOWS_SPEC.md) | Gamepad (Xbox 360 virtual controller; signed driver install) | 📋 Specced |
+| uinput | `uinput` | Linux | [`linux/input/UINPUT_LINUX_SPEC.md`](./addons/linux/input/UINPUT_LINUX_SPEC.md) | KeyMouse + Gamepad (kernel `/dev/uinput`, X11+Wayland) | 📋 Specced |
+| CGEvent | `cgevent` | macOS | [`macos/input/CGEVENT_MACOS_SPEC.md`](./addons/macos/input/CGEVENT_MACOS_SPEC.md) | KeyMouse (`CGEventPost`; needs Accessibility) | 📋 Specced |
+| GCVirtual | `gcvirtual` | macOS | [`macos/input/GCVIRTUAL_MACOS_SPEC.md`](./addons/macos/input/GCVIRTUAL_MACOS_SPEC.md) | Gamepad (GCVirtualController, macOS 14+; GameController-framework apps only) | 📋 Specced |
 
 ### Where to register a new add-on
 
 When adding a new vendor-specific encoder:
-1. Write the spec at `ADD-ON-SPECS/{Platform}/encoders/{NAME}_SPEC.md`
+1. Write the spec at `specs/addons/{platform}/encoders/{HW,SW}/{NAME}_SPEC.md`
 2. Add a row to the relevant table in **this** section of CENTRAL_SPEC.md
-3. Add a row to the compat matrix in `ADD-ON-SPECS/CENTRAL_PLATFORM_COMPAT.md`
+3. Add a row to the compat matrix in `specs/PLATFORM_COMPAT.md`
 4. Implement under `internal/encode/{name}/` with a Go build tag
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`
 
@@ -306,11 +310,11 @@ When adding a new vendor-specific encoder:
 ## System Architecture Diagram
 
 > **Note.** The ASCII diagram below is a high-level sketch of the original
-> 5-box architecture (Capture / Encode / Audio / Server / Input). The current
-> module count is 13 — the diagram does NOT reflect Clipboard, File Transfer,
-> Webcam, Gamepad, Stream Params, Auth, or the addon registry. For the
-> authoritative list of modules see the **Module Map** above; for the addon
-> tree see **Platform & Add-On Spec Index**; for the dependency graph see
+> 5-box architecture (Capture / Encode / Audio / Server / Input). There are now
+> 18 module specs — the diagram does NOT reflect Clipboard, File Transfer,
+> Gamepad, Stream Params, Auth, Network, Native Client, or the addon registry.
+> For the authoritative list of modules see the **Module Map** above; for the
+> addon tree see **Platform & Add-On Spec Index**; for the dependency graph see
 > the **Module Dependency Graph** further down. A rewritten diagram is
 > deferred — the prose modules are the source of truth.
 
@@ -440,7 +444,7 @@ type Encoder interface {
 
 ### Contract 3: Server -> Client (Wire Protocol)
 
-See [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) for the authoritative definition. Summary:
+See [`MODULE_PROTOCOL.md`](./core/MODULE_PROTOCOL.md) for the authoritative definition. Summary:
 
 ```
 [Header: 22 bytes][Payload: variable]
@@ -472,7 +476,7 @@ stream). Config and Clipboard are NOT FrameHeader types anymore.
 | CursorUpdate | 11 | datagram | Cursor position + optional image (client-side cursor) |
 | _(retired)_ | 12 | — | Was Clipboard — now `[u32 Len][JSON]` on the **clipboard stream** |
 | InputAck | 14 | input stream | 13-byte echo of client input seq + server timestamp (RTT) |
-| GamepadRumble | 15 | datagram | 9-byte rumble payload (index + magnitudes + duration; see [`./MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) |
+| GamepadRumble | 15 | datagram | 9-byte rumble payload (index + magnitudes + duration; see [`./interaction/MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md)) |
 
 One datagram fragment-chain carries exactly one access unit; fragmentation is purely byte-level within that AU (NALs are never reordered or dropped individually).
 
@@ -482,8 +486,8 @@ One datagram fragment-chain carries exactly one access unit; fragmentation is pu
 
 Client→server messages are discriminated by **which stream** they arrive on
 (every stream's first byte is a StreamType tag — see
-[`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md), [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md),
-[`MODULE_INPUT.md`](./MODULE_INPUT.md)):
+[`MODULE_TRANSPORT.md`](./core/MODULE_TRANSPORT.md), [`MODULE_PROTOCOL.md`](./core/MODULE_PROTOCOL.md),
+[`MODULE_INPUT.md`](./interaction/MODULE_INPUT.md)):
 
 - **Input stream (tag 0x01):** `[u16 RecLen]`-prefixed binary input records
   (6-byte record header + payload, types `0x01-0x4F`). Binary for performance +
@@ -573,7 +577,7 @@ type FBInfo struct {
 }
 
 // HardwareEncoder is the contract every HW encoder add-on satisfies.
-// See specs/MODULE_HARDWARE_ENCODE.md for the full contract.
+// See specs/media/MODULE_HARDWARE_ENCODE.md for the full contract.
 type HardwareEncoder interface {
     // EncodeSurface takes a GPU-resident surface handle and returns ONE
     // contiguous Annex B access unit (EncodedFrame.Keyframe set by the encoder).
@@ -674,12 +678,12 @@ type Server interface {
 > - `hwencode -> capture` (`SurfaceHandle = capture.FBInfo`)
 > - `encode, hwencode, capture -> stream` (Params, error sentinels)
 > - `transport -> protocol` (transport references `protocol.Close*`; protocol is the sole owner of the close codes)
-> - `server -> {transport, protocol, auth, stream, input}` (transport surface + types + auth gate + input dispatch)
+> - `server -> {transport, protocol, auth, stream, input, clipboard, filetransfer}` (transport surface + types + auth gate + input dispatch + clipboard/file-transfer stream dispatch)
 > - `pipeline -> transport` (the pipeline builds the QUIC transport via `transport.New` and hands it to the server)
 > - `input` injection add-ons -> `input` core (KeyMouseInjector/TouchInjector + HID table)
-> - `clipboard`, `filetransfer` are core leaves (per-OS files); `server` calls them
+> - `clipboard` is a core leaf (per-OS files); `filetransfer -> transport` (its `ServeStream` takes a `transport.Stream`); `server` calls both
 > - No cycles. `stream` is the shared leaf. `pipeline` is the sole orchestrator.
-> - Audio + Webcam not shown — both deferred from the core dependency graph.
+> - Audio not shown — deferred from the core dependency graph (Webcam was removed entirely).
 > - No `ffmpeg`, no `libavcodec`, no `libvpx` -- all rejected.
 > - No custom `logger` module -- every module takes `*slog.Logger` directly.
 
@@ -696,7 +700,7 @@ type Server interface {
 
 The orchestrator is now a proper module (`MODULE_PIPELINE.md`) — not inline in main.go. It:
 
-1. Loads config via `config.Load(--config path)` per [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md) — the only CLI flag is `--config`
+1. Loads config via `config.Load(--config path)` per [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md) — the only CLI flag is `--config`
 2. Probes compiled-in capture + encoder add-ons (no static enum; the runtime asks each compiled-in add-on whether its prerequisites are met)
 3. Selects capture add-on per `[capture]` config (auto-probe order or forced)
 4. Selects encode path per `[encode]` config:
@@ -779,7 +783,7 @@ capturer detects resolution change (monitor hotplug / mode switch)
 The pipeline owns this orchestration; no module drives it alone.
 
 ### Configuration
-- Single TOML config file at a known OS-conventional path; only `--config <path>` CLI flag exists. Full schema in [`./MODULE_CONFIG.md`](./MODULE_CONFIG.md).
+- Single TOML config file at a known OS-conventional path; only `--config <path>` CLI flag exists. Full schema in [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md).
 - Compile-time constants for protocol parameters (Version byte, header layout).
 - Runtime capability probing for compiled-in add-on detection.
 - Hot reload via `SIGHUP` (Linux/macOS) — most sections reload without restart; TLS / port / `force_addon` need a restart (marked in MODULE_CONFIG).

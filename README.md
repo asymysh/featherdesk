@@ -24,23 +24,23 @@ Zero-by-default plugin model. The default binary ships with no capture backend, 
 
 | | |
 |---|---|
-| [`MODULE_CAPTURE`](./specs/MODULE_CAPTURE.md) | Cross-platform `Capturer` interface; concrete implementations are add-ons |
-| [`MODULE_ENCODE`](./specs/MODULE_ENCODE.md) | Software encoder interface |
-| [`MODULE_HARDWARE_ENCODE`](./specs/MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface |
-| [`MODULE_TRANSPORT`](./specs/MODULE_TRANSPORT.md) | HTTP/3 + WebTransport transport layer |
-| [`MODULE_PROTOCOL`](./specs/MODULE_PROTOCOL.md) | Wire format: frame headers, channel model, framing |
-| [`MODULE_SERVER`](./specs/MODULE_SERVER.md) | HTTPS + WebTransport server, session management |
-| [`MODULE_CLIENT`](./specs/MODULE_CLIENT.md) | Browser client (WebCodecs + WebTransport) |
-| [`MODULE_PIPELINE`](./specs/MODULE_PIPELINE.md) | Orchestrator — probe, select, wire, lifecycle |
-| [`MODULE_CONFIG`](./specs/MODULE_CONFIG.md) | TOML config schema, hot reload |
-| [`MODULE_INPUT`](./specs/MODULE_INPUT.md) | Binary input wire + cross-platform injector contract |
-| [`MODULE_CLIPBOARD`](./specs/MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync |
-| [`MODULE_FILETRANSFER`](./specs/MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder |
-| [`MODULE_GAMEPAD`](./specs/MODULE_GAMEPAD.md) | Browser Gamepad-API redirection + rumble |
-| [`MODULE_AUTH`](./specs/MODULE_AUTH.md) | Auth modes + session tokens |
-| [`MODULE_STREAM_PARAMS`](./specs/MODULE_STREAM_PARAMS.md) | Dynamic stream params + adaptive bitrate |
+| [`MODULE_CAPTURE`](./specs/media/MODULE_CAPTURE.md) | Cross-platform `Capturer` interface; concrete implementations are add-ons |
+| [`MODULE_ENCODE`](./specs/media/MODULE_ENCODE.md) | Software encoder interface |
+| [`MODULE_HARDWARE_ENCODE`](./specs/media/MODULE_HARDWARE_ENCODE.md) | Hardware encoder interface |
+| [`MODULE_TRANSPORT`](./specs/core/MODULE_TRANSPORT.md) | HTTP/3 + WebTransport transport layer |
+| [`MODULE_PROTOCOL`](./specs/core/MODULE_PROTOCOL.md) | Wire format: frame headers, channel model, framing |
+| [`MODULE_SERVER`](./specs/core/MODULE_SERVER.md) | HTTPS + WebTransport server, session management |
+| [`MODULE_CLIENT`](./specs/client/MODULE_WEB_CLIENT.md) | Browser client (WebCodecs + WebTransport) |
+| [`MODULE_PIPELINE`](./specs/core/MODULE_PIPELINE.md) | Orchestrator — probe, select, wire, lifecycle |
+| [`MODULE_CONFIG`](./specs/core/MODULE_CONFIG.md) | TOML config schema, hot reload |
+| [`MODULE_INPUT`](./specs/interaction/MODULE_INPUT.md) | Binary input wire + cross-platform injector contract |
+| [`MODULE_CLIPBOARD`](./specs/interaction/MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync |
+| [`MODULE_FILETRANSFER`](./specs/interaction/MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder |
+| [`MODULE_GAMEPAD`](./specs/interaction/MODULE_GAMEPAD.md) | Browser Gamepad-API redirection + rumble |
+| [`MODULE_AUTH`](./specs/core/MODULE_AUTH.md) | Auth modes + session tokens |
+| [`MODULE_STREAM_PARAMS`](./specs/core/MODULE_STREAM_PARAMS.md) | Dynamic stream params + adaptive bitrate |
 
-Plus deferred specs (`MODULE_AUDIO`) and the [`ADD-ON-SPECS/`](./ADD-ON-SPECS/) tree for every build-tagged backend.
+Plus deferred specs (`MODULE_AUDIO`) and the [`specs/addons/`](./specs/addons/) tree for every build-tagged backend.
 
 ## Out of scope (permanently)
 
@@ -55,7 +55,7 @@ Plus deferred specs (`MODULE_AUDIO`) and the [`ADD-ON-SPECS/`](./ADD-ON-SPECS/) 
 |---|---|
 | **v1** | Browser client over HTTP/3 + WebTransport (QUIC). No Tailscale. WSS / fallbacks are NOT supported — modern browsers only (Chrome 107+, Edge 98+, Firefox 130+, Safari 18.2+; the
 floor is set by WebCodecs availability — Chrome 107 / Firefox 130 — not just WebTransport). Connectivity is the user's network problem (LAN, port forward, or their own Tailscale / Cloudflare Tunnel). |
-| **v2** | Native FeatherDesk client (Windows / macOS / Linux) — same QUIC wire protocol via `quic-go` directly. Adds **full-HID gamepad** (gyro/touchpad/triggers/LED), **reliable 4:4:4**, and **sub-ms input**. The browser stays the casual client; native is the power-user client (see [`specs/MODULE_NATIVE_CLIENT.md`](specs/MODULE_NATIVE_CLIENT.md)). **Connectivity (P2P/NAT traversal) is under evaluation** — Tailscale `tsnet` is the leading candidate (one-paste auth-key flow), pending the open discussion. |
+| **v2** | Native FeatherDesk client (Windows / macOS / Linux) — same QUIC wire protocol via `quic-go` directly. Adds **full-HID gamepad** (gyro/touchpad/triggers/LED), **reliable 4:4:4**, and **sub-ms input**. The browser stays the casual client; native is the power-user client (see [`./specs/client/MODULE_NATIVE_CLIENT.md`](./specs/client/MODULE_NATIVE_CLIENT.md)). **Connectivity (P2P/NAT traversal) is under evaluation** — Tailscale `tsnet` is the leading candidate (one-paste auth-key flow), pending the open discussion. |
 | **v3+** | Mobile clients (iOS / Android) with the same auth-key paste flow. |
 
 ## Roadmap (next steps)
@@ -71,7 +71,7 @@ The spec phase is complete and audited. The path from here:
 
 2. **`MODULE_NETWORK.md` — connectivity for v2 (requirements documented, mechanism
    OPEN).** The listener-provider contract and candidate mechanisms (tsnet+Headscale,
-   pion+TURN, DIY, Nebula) are captured in [`specs/MODULE_NETWORK.md`](specs/MODULE_NETWORK.md).
+   pion+TURN, DIY, Nebula) are captured in [`./specs/v2/MODULE_NETWORK.md`](./specs/v2/MODULE_NETWORK.md).
    The mechanism is evaluated and locked when v2 native-client work begins.
 
 3. ✅ **`MODULE_NATIVE_CLIENT.md` — done (split is final).** The v1=browser /
@@ -81,7 +81,7 @@ The spec phase is complete and audited. The path from here:
 
 ## License
 
-Per build variant. Each encoder add-on declares its own license; the main binary's license depends on which add-ons are compiled in (e.g. `x264` ffmpeg-subprocess builds are GPL-2 isolated; `openh264` builds stay permissive). See individual `ADD-ON-SPECS/` entries.
+Per build variant. Each encoder add-on declares its own license; the main binary's license depends on which add-ons are compiled in (e.g. `x264` ffmpeg-subprocess builds are GPL-2 isolated; `openh264` builds stay permissive). See individual `specs/addons/` entries.
 
 ## Status
 

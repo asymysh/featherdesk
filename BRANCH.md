@@ -36,18 +36,15 @@ The current codebase has these confirmed issues (tracked as TD-01 through TD-34 
 
 ```
 specs/
-├── CENTRAL_SPEC.md          # Master architecture doc: all module contracts, dependency
-│                            # graph, encoding paths, cross-cutting concerns, TD catalog
-├── MODULE_PIPELINE.md       # Orchestrator: lifecycle, frame loop, pacing, drop logic
-├── MODULE_CAPTURE.md        # Screen capture: KMS/DRM/EGL, X11grab, PipeWire
-├── MODULE_ENCODE.md         # Software encoding: OpenH264, VP8, FFmpeg libx264
-├── MODULE_HARDWARE_ENCODE.md # Zero-copy hardware: VA-API DMA-BUF direct (no CPU copy)
-├── MODULE_PROTOCOL.md       # Wire protocol: 22-byte header, versioning, A/V sync
-├── MODULE_SERVER.md         # WebSocket server: per-frame broadcast, IDR cache, lifecycle
-├── MODULE_CLIENT.md         # Browser viewer: WebCodecs, AudioWorklet, cursor, input
-├── MODULE_INPUT.md          # Input injection: uinput, keymap, InputAck latency
-├── MODULE_AUDIO.md          # Audio capture: PipeWire, AudioChunk with capture timestamp
-└── MODULE_LOGGER.md         # Logging: interface, UTC timestamps, thread safety
+├── CENTRAL_SPEC.md       # Master architecture doc: module contracts, dependency graph, TD catalog
+├── PLATFORM_COMPAT.md    # Cross-platform capability matrix
+├── core/                 # Protocol, Transport, Server, Pipeline, Config, Auth, Stream-Params
+├── media/                # Capture, Encode (SW), Hardware Encode, Audio
+├── interaction/          # Input, Clipboard, File Transfer, Gamepad
+├── client/               # Web client (v1) + Native client (v2)
+├── v2/                   # Network connectivity (NAT traversal / relay — v2-deferred)
+└── addons/               # Per-OS build-tagged backends:
+                          #   {linux,macos,windows}/{capture,encoders,input,audio}/
 ```
 
 ---
@@ -108,7 +105,7 @@ The refactored code should eventually replace `feature-libav-vp8s8` as the main 
 
 | | |
 |-|-|
-| Specs written | ✅ All 11 modules |
+| Specs written | ✅ 15 module specs + per-OS add-ons |
 | Specs reviewed | ✅ Two full review passes (all 34 issues addressed) |
 | Code written | ❌ None yet |
 | Tests written | ❌ None yet |
