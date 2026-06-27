@@ -26,7 +26,9 @@ type Pipeline struct {
     input     input.Dispatcher         // nil → view-only (no input add-on compiled in)
     clipboard clipboard.Monitor        // nil if [clipboard] disabled or Probe failed
     files     filetransfer.Service     // nil if [filetransfer] disabled
-    audio     audio.Capturer           // nil — DEFERRED until MODULE_AUDIO un-defers
+    audio     audio.AudioCapturer      // per-OS capture add-on; nil if no audio add-on / [audio] disabled
+    audioEnc  audio.AudioEncoder       // Opus (build tag) or PCM passthrough; nil if audio off
+                                       // (audio design LOCKED; impl deferred — MODULE_AUDIO)
     params    stream.Params            // current dynamic stream parameters (output dims)
     paramCh   chan stream.Params       // adaptive/control param changes, applied ON the frame loop
     logger    *slog.Logger
@@ -78,8 +80,14 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
 4. Match capture surface format to encoder input:
     - HW encoder + SurfaceCapturer with compatible FBInfo → zero-copy path
    - SW encoder + any Capturer → CPU readback + I420 conversion path
+   - ALWAYS set `p.capturer` (a `SurfaceCapturer` also satisfies `Capturer`),
+     and set `p.surfCap` additionally when the chosen capturer implements it.
+     `p.capturer` must be non-nil even on the zero-copy path so that
+     `degradeToSoftware` can fall back to `p.capturer.NextFrame()` on the SAME
+     add-on without re-probing.
 5. If hardware path errors with ErrFallbackToSoftware mid-session: degrade
-   to software path permanently for the rest of the session
+   to software path permanently for the rest of the session (builds the
+   Converter + SW encoder via `buildSoftwarePath`; `p.capturer` is already set)
 6. Derive stream dims from the capturer's actual resolution (NOT hardcoded).
 6b. Instantiate the QUIC transport: `transport.New(transport.Config{…})` from
     the `[server]`, `[server.tls]`, and `[transport]` sections (binds the UDP
@@ -92,8 +100,11 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    input add-on is compiled in, the binary is **view-only** (log it; not an error).
 9. (Webcam was here — deferred to a future version, see CENTRAL_SPEC "Deferred".)
 10. Create clipboard Monitor + file-transfer Service if their `[*] enabled`.
-11. Create audio capturer. [DEFERRED — the `[audio]` section is not in the
-    Config struct yet; this step is inert until MODULE_AUDIO un-defers.]
+11. If `[audio] enabled` AND an audio capture add-on is compiled in: create the
+    capturer + the encoder (`opus` build tag → Opus, else PCM passthrough). The
+    `[audio]` section + struct field exist now; the per-OS add-ons themselves are
+    **implementation-deferred** (MODULE_AUDIO), so this step is wired but inert
+    until they land. No add-on / disabled → `p.audio = nil` (video-only).
 12. Wire callbacks:
    - server.ConfigProvider          → returns current ConfigPayload (codec, dims, fps, hdr, cursorMode, session_token)
    - server.OnNewClient             → p.forceKeyframe() ONLY (server already gates on cached keyframe)
@@ -276,16 +287,19 @@ func (p *Pipeline) degradeToSoftware() {
 
 **`sleepToInterval(&lastFrameT, interval)`** sleeps until `lastFrameT + interval`, then sets `lastFrameT = now()`. O(1)/cheap. There is no `containsKeyframe` — keyframe status comes from the encoder (`EncodedFrame.Keyframe` on the HW path; the `keyframe` return on the SW path), never a pipeline-side NAL scan.
 
+**Two internal helpers** referenced above: `buildSoftwarePath(p stream.Params)` constructs `p.converter` (BGRA/RGBA→I420 + scale-to-output) and a SW `encode.Encoder` for the given params; `reconfigureOrRebuild(np stream.Params)` calls `UpdateStreamParams(np)` on the active capturer + encoder and, on `stream.ErrRequiresRestart`, tears them down and rebuilds for `np`. Both run only on the frame-loop goroutine.
+
 > **Frame-drop semantics: pull-latest source assumed.** The skip-a-capture strategy assumes the capturer is a **pull-latest** source: a call to `NextFrame` / `NextSurface` always returns the CURRENT framebuffer, so skipping cleanly drops stale frames. This is true for KMS+EGL (Linux), ScreenCaptureKit (macOS), and DXGI Desktop Duplication (Windows). Pipe-based subprocess capturers (X11grab, ffmpeg-based) were rejected from the architecture.
 
 ### Audio Loop (Separate Goroutine)
 
 ```go
 func (p *Pipeline) runAudioLoop(ctx context.Context) {
-    if p.audio == nil {
-        return
+    if p.audio == nil || p.audioEnc == nil {
+        return // no audio add-on / [audio] disabled → video-only
     }
     chunks := p.audio.Chunks()
+    codecType := audioCodecType(p.audioEnc.Codec()) // "opus"→0x08, "pcm/s16le"→0x04
     for {
         select {
         case <-ctx.Done():
@@ -294,9 +308,11 @@ func (p *Pipeline) runAudioLoop(ctx context.Context) {
             if !ok {
                 return
             }
-            // chunk.Timestamp was sampled at CAPTURE time in the audio read loop,
+            payload, err := p.audioEnc.Encode(chunk) // Opus packet OR PCM passthrough
+            if err != nil { p.recordAudioError(err); continue }
+            // chunk.Timestamp was sampled at CAPTURE time in the add-on read loop,
             // on the SAME CLOCK_MONOTONIC epoch as video. Do NOT re-stamp here.
-            p.server.BroadcastAudio(chunk)
+            p.server.BroadcastAudio(codecType, payload, chunk.Timestamp)
         }
     }
 }
@@ -342,7 +358,7 @@ scaling; this keeps the client's absolute mouse mapping pixel-accurate.
 3. Audio loop exits (ctx.Done select case)        [audio deferred — placeholder]
 4. Close encoder (flushes pending frames)
 5. Close capturer (releases DRM/EGL/subprocess)
-6. Close audio (kills pw-cat)                     [audio deferred]
+6. Close audio encoder + capturer add-on (no subprocess) [audio impl deferred]
 7. Close input Dispatcher (closes active KeyMouse / Touch / Gamepad injectors,
    releasing all held keys + buttons on the way out)
 8. Close clipboard Monitor (stops the message pump / X event loop)

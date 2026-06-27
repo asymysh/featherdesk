@@ -182,12 +182,16 @@ GPU↔CPU copies: **1** (~30KB compressed NALs vs ~36MB raw pixels in software p
 
 ## Audio + Input
 
-⏸️ **Deferred.** The audio and input subsystems are working in the current codebase
-(PipeWire `pw-cat` for audio loopback, `uinput` for keyboard/mouse injection) but
-their platform-spec sections have been deliberately removed from this document to
-keep the focus on the capture and encode pipeline.
+**Input is no longer deferred** — it has a full design and a Linux add-on:
+`uinput` (kernel `/dev/uinput`, X11 + Wayland). See
+[`input/UINPUT_LINUX_SPEC.md`](./input/UINPUT_LINUX_SPEC.md).
 
-When we resume work on audio and input, the existing core specs remain authoritative:
+**Audio design is LOCKED, implementation deferred** behind the video trigger.
+The Linux backend is the `pipewire` add-on — **native libpipewire** monitor
+capture (the old `pw-cat` subprocess is gone), Pulse/ALSA fallback. Host→client
+only; Opus or PCM codec. See [`audio/PIPEWIRE_LINUX_SPEC.md`](./audio/PIPEWIRE_LINUX_SPEC.md).
+
+The core specs remain authoritative:
 - [`specs/MODULE_AUDIO.md`](../../specs/MODULE_AUDIO.md)
 - [`specs/MODULE_INPUT.md`](../../specs/MODULE_INPUT.md)
 

@@ -39,9 +39,13 @@ type Server interface {
     // FrameTypeVideoH264 / FrameTypeVideoHEVC (VP8 was rejected; slot 5 reserved).
     Broadcast(codecType uint8, f EncodedFrame)
 
-    // BroadcastAudio sends one PCM chunk to all clients. Server assigns the
-    // audio Sequence; the chunk carries its capture-time Timestamp.
-    BroadcastAudio(chunk AudioChunk)
+    // BroadcastAudio sends one already-encoded audio payload (Opus packet or raw
+    // PCM) to all clients. codecType is FrameTypeAudioOpus (0x08) or
+    // FrameTypeAudioPCM (0x04); captureTs is the chunk's capture-time Timestamp.
+    // The server assigns the independent audio Sequence, marshals the 22-byte
+    // FrameHeader (Width=Height=0; codec/rate/channels are in the config message),
+    // and enqueues it frame-granular (single datagram for Opus, fragmented for PCM).
+    BroadcastAudio(codecType uint8, payload []byte, captureTs uint64)
 
     // SendConfig pushes a Config (handshake / capability change) to all clients,
     // or to a single client on connect.
@@ -67,7 +71,8 @@ type Server interface {
     // measure round-trip latency. Input is binary, not JSON — see MODULE_INPUT.md.
     SetInputCallback(fn func(frame []byte) (seq uint32, err error))
 
-    // SetClipboardCallback fires for a clipboard JSON text message (C→H).
+    // SetClipboardCallback fires for a clipboard message (C→H) read off the
+    // clipboard stream as [u32 Len][JSON].
     SetClipboardCallback(fn func(content clipboard.Content) error)
 
     // SetFileTransferService hands the file-transfer service to the server so

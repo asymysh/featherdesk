@@ -86,6 +86,10 @@ add-on. Examples:
 | `dxgi_dd` | `[addon_module_dxgi_dd]` |
 | `kms_egl` | `[addon_module_kms_egl]` |
 | `sck` | `[addon_module_sck]` |
+| `opus` | _(no section — codec build tag; selects the audio codec)_ |
+| `wasapi` | `[addon_module_wasapi]` |
+| `sck_audio` | `[addon_module_sck_audio]` |
+| `pipewire` | `[addon_module_pipewire]` |
 
 ---
 
@@ -175,7 +179,7 @@ fps         = 60                 # target capture+encode rate
 bitrate_bps = 0
 qp          = 26                 # 0..51 for H.264 (lower = higher quality)
 
-# Keyframe behavior: 0 = on-demand only (client requests via JSON text)
+# Keyframe behavior: 0 = on-demand only (client requests via control-stream JSON)
 keyframe_interval = 0
 
 # Color depth / HDR
@@ -463,13 +467,24 @@ layout          = "standard"  # v1: "standard" Standard Gamepad layout only
 # ═════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────────────────────────────────────────────────────────
-# Deferred sections — not yet enforced. Reserved for when the audio module
-# comes out of deferral. (Input is NO LONGER deferred — see [input] above.)
+# AUDIO (host→client system audio; DESIGN LOCKED, implementation deferred behind
+# the video trigger — see MODULE_AUDIO.md). Schema below IS enforced once the
+# audio add-ons land; the [audio] section + struct field exist now so a config
+# carrying them parses. Codec is chosen by build tags (`opus` ⇒ Opus, else PCM).
 # ─────────────────────────────────────────────────────────────────────────
 
-# [audio]
-# enabled = false
-# (full schema TBD when MODULE_AUDIO is un-deferred)
+[audio]
+enabled  = false    # opt-in. Requires a compiled-in audio capture add-on.
+frame_ms = 20       # 10 or 20 (lower = less latency, ~2× packet rate)
+
+[addon_module_wasapi]      # Windows — WASAPI loopback
+device = ""                # "" = default render endpoint; or a specific endpoint id
+
+[addon_module_sck_audio]   # macOS — rides the sck screen-capture session
+exclude_current_process = true  # don't capture FeatherDesk's own output
+
+[addon_module_pipewire]    # Linux — PipeWire monitor source
+target = ""                # "" = auto-detect the default sink's .monitor
 ```
 
 ---
@@ -515,6 +530,8 @@ layout          = "standard"  # v1: "standard" Standard Gamepad layout only
 | `gamepad.max_controllers` | 1–4 | startup error |
 | `gamepad.enabled` requires a gamepad-capable add-on (`vigem`/`uinput`/`gcvirtual`) | else warn, gamepad records dropped | startup warning |
 | `input.enabled` requires an input add-on compiled in | else view-only (warn, not error) | startup warning |
+| `audio.frame_ms` | 10 or 20 | startup error |
+| `audio.enabled` requires an audio capture add-on (`wasapi`/`sck_audio`/`pipewire`) | else warn, audio disabled | startup warning |
 | Unknown key anywhere | strict mode | startup error |
 
 ---
@@ -578,7 +595,7 @@ type Config struct {
     Clipboard    ClipboardSection    `toml:"clipboard"`     // enabled, direction, max_bytes, formats
     FileTransfer FileTransferSection `toml:"filetransfer"`  // enabled, dirs, caps
     Gamepad      GamepadSection      `toml:"gamepad"`       // enabled, max_controllers, allow_rumble
-    // Audio added when that module is un-deferred.
+    Audio        AudioSection        `toml:"audio"`         // enabled, frame_ms (design locked; impl deferred)
     // Per-addon sections ([addon_module_*]) are parsed dynamically by each
     // add-on's init config reader -- they do not appear as static struct fields.
 }

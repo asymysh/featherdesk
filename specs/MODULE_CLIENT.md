@@ -102,7 +102,8 @@ DATAGRAM (8-byte DatagramHeader + fragment payload)
     → switch Type:
         1  (VideoH264):    decodeVideo(seq, timestamp, reassembledPayload)
         7  (VideoHEVC):    decodeVideo(seq, timestamp, reassembledPayload)
-        4  (AudioPCM):     playAudio(timestamp, reassembledPayload)
+        8  (AudioOpus):    playAudio(timestamp, payload)            // single datagram
+        4  (AudioPCM):     playAudio(timestamp, reassembledPayload) // fragmented
         11 (CursorUpdate): cursor.update(reassembledPayload)  // latest-wins
         15 (GamepadRumble): gamepad.applyRumble(reassembledPayload)
         2  (Ping):         send JSON {"type":"pong","nonce":...} on the control stream
@@ -151,8 +152,20 @@ decodeVideo(seq, timestamp, payload):
     → isKey = detectKeyframe(payload)        // H.264: scan NAL header for type 5 (IDR)
     → chunk = new EncodedVideoChunk({ type: isKey ? "key":"delta", timestamp, data: payload })
     → decoder.decode(chunk)
-    → output: drawImage(frame) → frame.close()
+    → VideoDecoder output(frame): enqueue {frame, timestamp} in a tiny present-queue
+
+presentLoop (rAF):
+    → t = audioPlayoutTs (or, with no audio, the local video clock)
+    → pick the queued frame whose timestamp is nearest t:
+        video behind by > ~1 frame interval → drop frame(s) to catch up
+        video ahead → hold (draw the current frame again)
+    → drawImage(frame) → frame.close()
 ```
+
+**Presentation is audio-clocked.** Decoded frames are NOT drawn immediately — they
+wait in a short present-queue and are drawn to match the audio playout clock (see
+"Audio Playback"). This is what keeps lip-sync locked. With audio disabled the
+queue presents on the frame's own timestamp at the target FPS.
 
 **Keyframe Detection:**
 - H.264 (Annex B): scan NAL headers for type 5 (IDR). The keyframe access unit contains SPS+PPS+IDR.
@@ -160,25 +173,36 @@ decodeVideo(seq, timestamp, payload):
 
 **Fast-join rule:** the client sets `lastSeq` from the **bootstrap-stream IDR** (read reliably before any datagram) and does NOT run gap detection on the transition to the first live datagram frame (avoids a false "gap" → keyframe storm). Gap detection starts from the 2nd live datagram frame.
 
-### Audio Playback Pipeline
+### Audio Playback Pipeline (audio is the master clock)
+
+The codec comes from `config.audioCodec`; the client never hardcodes it.
 
 ```
-Datagram payload (Type == 4, AudioPCM, after reassembly)
-    → extract S16LE payload (3840 bytes) + header.timestamp (monotonic ns)
-    → A/V sync against latest video timestamp:
-        skew = lastVideoTs - audioTs
-        if skew > +40ms: hold (audio ahead) ; if skew < -40ms: drop chunk (audio behind)
-    → convert to Float32Array (divide by 32768)
-    → post to AudioWorklet via MessagePort
+Datagram media payload (Type == 8 AudioOpus, or Type == 4 AudioPCM)
+    → read header.timestamp (CLOCK_MONOTONIC ns, capture time) + audio seq
+    → decode by audioCodec:
+        "opus":     AudioDecoder.decode(EncodedAudioChunk{data})  → AudioData
+                    (wasm libopus fallback where AudioDecoder lacks Opus)
+        "pcm/s16le": S16LE → Float32 (÷32768) directly, no decoder
+    → post Float32 + capture-timestamp to the AudioWorklet
+    → AUDIO IS NEVER HELD OR DROPPED FOR SYNC. A lost packet is concealed by
+      Opus FEC/PLC (or a 20 ms silence for PCM). Audio plays gaplessly.
 
 AudioWorkletProcessor:
-    → receives Float32 samples via port.onmessage
-    → pushes to internal ring buffer
-    → process() pulls from ring buffer into output channels
+    → small ring buffer (~40 ms target)
+    → process() plays gaplessly; tracks audioPlayoutTs (capture-ts of the sample
+      currently leaving the speakers) and exposes it to the main thread
+    → audioPlayoutTs IS the presentation clock the VIDEO renderer slaves to
 ```
 
-- A/V sync uses the shared monotonic timestamps in the headers (video and audio are on the same clock — see protocol). The 40 ms threshold is the perceptual boundary.
-- **Initialization:** Triggered by first user gesture (keydown/pointerdown) due to browser autoplay policy.
+- **Audio-master sync.** The renderer presents the decoded **video** frame whose
+  capture `Timestamp` is nearest `audioPlayoutTs` (video ahead → hold; video
+  behind by > ~1 frame → drop to catch up). See "Video Decode" + protocol
+  "A/V Synchronization". This replaces the old hold/drop-*audio* logic, which
+  glitched audio — the worse choice perceptually.
+- With no audio (disabled / no add-on), video presents on its own capture clock.
+- **Initialization:** the `AudioContext` is created on the first user gesture
+  (keydown/pointerdown) per the browser autoplay policy.
 
 ### Cursor Overlay (cursorMode == "separate")
 
@@ -392,6 +416,7 @@ WebCodecs) gets a graceful unsupported-browser notice.
 |---------|----------|--------------------------|
 | WebTransport | Yes | Chrome 97+, Edge 98+, Firefox 114+, Safari 18.2+ |
 | WebCodecs VideoDecoder | Yes | Chrome 107+, Firefox 130+, Safari 18.2+ |
+| WebCodecs AudioDecoder (Opus) | Audio only | Chrome 94+, Firefox 130+; **Safari falls back to a wasm libopus decoder**. (PCM audio needs neither.) |
 | Pointer Lock | Optional | Chrome (all), Firefox (all), Safari 13.1 |
 | Fullscreen API | Optional | Chrome (all), Firefox (all), Safari (all) |
 | ES Modules | For refactored version | Chrome (all), Firefox (all), Safari (all) |

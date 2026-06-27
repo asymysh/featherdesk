@@ -78,13 +78,23 @@ were all considered and rejected — see per-OS capture READMEs.
 
 ---
 
-## Audio — One Per Platform
+## Audio — One Per Platform (host→client only; 🔒 design locked, ⏸️ impl deferred)
 
-| Platform | API | Format |
-|----------|-----|--------|
-| **Linux** | PipeWire (pw-cat, monitor source) | S16LE, 48kHz, stereo |
-| **Windows** | WASAPI loopback | PCM, 48kHz, stereo (auto-resampled) |
-| **macOS** | SCK built-in audio (`capturesAudio = true`) | Float32, 48kHz, stereo |
+Same pluggable, zero-by-default pattern as capture/input — a per-OS build-tagged
+**capture** add-on normalizes the OS device format to the canonical 48 kHz /
+stereo / S16LE, and a separate **codec** build tag (`opus`, else raw PCM) sets the
+wire format (advertised in the `config` message). **No subprocess** (`pw-cat`
+gone), no driver, no mic. Realtime, **audio-master** A/V sync. See
+[`../specs/MODULE_AUDIO.md`](../specs/MODULE_AUDIO.md).
+
+| Platform | Build tag | Capture mechanism | Spec |
+|----------|-----------|-------------------|------|
+| **Linux** | `pipewire` | PipeWire monitor (native libpipewire; Pulse/ALSA fallback) | [`Linux/audio/PIPEWIRE_LINUX_SPEC.md`](./Linux/audio/PIPEWIRE_LINUX_SPEC.md) |
+| **Windows** | `wasapi` | WASAPI loopback (default render endpoint) | [`Windows/audio/WASAPI_WINDOWS_SPEC.md`](./Windows/audio/WASAPI_WINDOWS_SPEC.md) |
+| **macOS** | `sck_audio` | ScreenCaptureKit audio on the shared `sck` stream (macOS 13+) | [`macOS/audio/SCK_AUDIO_MACOS_SPEC.md`](./macOS/audio/SCK_AUDIO_MACOS_SPEC.md) |
+
+Codec: `opus` (BSD libopus, in-process; FEC/PLC; ~96–128 kbps) — **recommended** —
+or raw S16LE PCM (1.536 Mbps, no concealment) when `opus` isn't compiled.
 
 ---
 

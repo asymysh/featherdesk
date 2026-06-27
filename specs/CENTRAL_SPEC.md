@@ -109,8 +109,11 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 >   level, output) is set via the `[log]` config section.
 
 > **Deferred to future versions:**
-> - **Audio** — deferred until video capture+encode is stable across all three
->   OSes. Spec retained at `MODULE_AUDIO.md`, marked deferred at the top.
+> - **Audio** — **design LOCKED** (host→client system audio, pluggable per-OS
+>   capture add-ons, pluggable Opus/PCM codec, realtime **audio-master** A/V sync;
+>   see `MODULE_AUDIO.md`). **Implementation** is deferred behind the same trigger
+>   (video capture+encode working end-to-end on all three OSes). Client→host mic
+>   is out of scope.
 > - **Webcam redirection (client→host virtual camera)** — stripped from v1 to
 >   keep scope tight. Open questions before re-introduction: server-side decoder
 >   choice (recommend OpenH264 decoder, reusing the existing encoder add-on's
@@ -454,10 +457,11 @@ stream). Config and Clipboard are NOT FrameHeader types anymore.
 | VideoH264 | 1 | datagram + bootstrap | One H.264 access unit, Annex B (keyframe = SPS+PPS+IDR type 5) |
 | Ping | 2 | datagram | 8-byte nonce |
 | _(reserved)_ | 3 | — | Reserved (client Pong is a JSON line on the **control stream**) |
-| AudioPCM | 4 | datagram | Raw S16LE PCM (Width=SampleRate, Height=Channels) — deferred (audio module paused) |
+| AudioPCM | 4 | datagram media | Raw S16LE PCM, fragmented (the no-codec fallback). Carries the FrameHeader for capture Timestamp; codec/rate/channels in `config`. (impl deferred) |
 | _(reserved)_ | 5 | — | Formerly VideoVP8 — VP8 rejected. Do not reuse without protocol version bump. |
 | _(retired)_ | 6 | — | Was Config — now a `{"type":"config"}` JSON line on the control stream |
 | VideoHEVC | 7 | datagram + bootstrap | One HEVC access unit, Annex B (keyframe = VPS+SPS+PPS+IDR types 19-20) |
+| AudioOpus | 8 | datagram media | One 20 ms Opus packet, single datagram (default audio codec). Carries the FrameHeader for capture Timestamp. (impl deferred) |
 | CursorUpdate | 11 | datagram | Cursor position + optional image (client-side cursor) |
 | _(retired)_ | 12 | — | Was Clipboard — now `[u32 Len][JSON]` on the **clipboard stream** |
 | InputAck | 14 | input stream | 13-byte echo of client input seq + server timestamp (RTT) |
@@ -498,25 +502,27 @@ input dims must all agree (no hidden scaling); the pipeline calls
 
 ---
 
-### Contract 5: Audio -> Server  ⏸️ DEFERRED (audio module paused — banner in MODULE_AUDIO)
+### Contract 5: Audio -> Server  🔒 DESIGN LOCKED · ⏸️ IMPL DEFERRED (see MODULE_AUDIO)
 
 ```go
-// Audio delivers fixed-size PCM chunks, each stamped at capture time.
+// Audio: a per-OS capture add-on delivers PCM chunks; an AudioEncoder (Opus or
+// PCM passthrough) turns them into wire payloads. host→client only. No subprocess.
 type AudioCapturer interface {
-    Chunks() <-chan AudioChunk
-    Close()
+    Chunks() <-chan PCMChunk
+    Format() Format          // canonical 48k/stereo (add-on resamples to this)
+    Close() error
 }
 
-type AudioChunk struct {
-    Data      []byte // 3840 bytes = 20ms of 48kHz stereo s16le
-    Timestamp uint64 // CLOCK_MONOTONIC ns, sampled when the chunk was READ from pw-cat
+type PCMChunk struct {
+    Data      []byte // FrameSamples*Channels*2, S16LE interleaved (3840 B @ 20 ms)
+    Timestamp uint64 // CLOCK_MONOTONIC ns, sampled AT CAPTURE in the add-on read loop
 }
 ```
 
 **Contract Rules:**
-- `Timestamp` MUST be sampled at capture time (in the audio read loop), NOT when the pipeline reads it from the channel. The channel may buffer up to ~640 ms; stamping late breaks A/V sync.
-- `Timestamp` uses the SAME `CLOCK_MONOTONIC` epoch as video frames.
-- `Data` is OWNED by the receiver (the channel hands off ownership; the capturer does not reuse it).
+- `Timestamp` MUST be sampled at capture time (in the capture add-on's read loop), NOT when the pipeline reads it from the channel — stamping late breaks A/V sync. Buffers are small (~60-80 ms capture, ~40 ms client) for realtime.
+- `Timestamp` uses the SAME `CLOCK_MONOTONIC` epoch as video frames. **Audio is the master clock**; video presentation slaves to the audio playout time (see MODULE_AUDIO / MODULE_PROTOCOL "A/V Synchronization").
+- The encoder output is borrowed from a `sync.Pool` (copy before reuse); audio is a **media** datagram type (carries the FrameHeader), single-datagram for Opus.
 
 ---
 
@@ -614,7 +620,9 @@ type Server interface {
     // The server assigns the video Sequence and uses f.Keyframe (encoder-set)
     // for IDR caching + the bootstrap stream.
     Broadcast(codecType uint8, f EncodedFrame)
-    BroadcastAudio(chunk AudioChunk)
+    // Already-encoded audio (Opus packet or raw PCM). codecType = AudioOpus(8) |
+    // AudioPCM(4); server assigns the independent audio Sequence + FrameHeader.
+    BroadcastAudio(codecType uint8, payload []byte, captureTs uint64)
     // ...
 }
 ```
@@ -729,6 +737,7 @@ The orchestrator is now a proper module (`MODULE_PIPELINE.md`) — not inline in
 ### Canonical Media Clock (A/V Sync)
 - A single `CLOCK_MONOTONIC` epoch is established at process start.
 - EVERY media timestamp on the wire — every video frame from every capture backend, and every audio chunk — is sampled from this clock in nanoseconds, AT CAPTURE TIME.
+- **Audio is the master clock.** When audio is present the client plays it gaplessly from a small (~40 ms) buffer and presents the **video** frame nearest the audio playout time (video holds/drops to track audio). Audio is never held/dropped for sync. See MODULE_PROTOCOL / MODULE_AUDIO. (No audio ⇒ video presents on its own capture clock.)
 - The logger uses wall-clock (UTC) for human-readable lines; this is a SEPARATE clock and must never be used for media timestamps.
 - Anti-pattern (current code, to be removed): `time.Now().UnixMilli()` for frame/audio timestamps — wrong clock domain and wrong unit.
 
@@ -911,13 +920,13 @@ featherdesk/
 |----|----------|----------|-------|------------|
 | TD-23 | High | `server.go:149-178` | Broadcast sends ONE message PER NAL → multi-NAL H.264 yields partial access units; breaks WebCodecs | One message per frame, concatenate NALs (Annex B) |
 | TD-24 | High | `server.go:164-168` | IDR cache stores only the IDR NAL; SPS/PPS (separate messages) lost → undecodable | Cache whole per-frame keyframe message (contains SPS+PPS+IDR) |
-| TD-25 | High | `main.go:295` (video timestamping in main loop) | Video + Audio stamped at consumption with wall-ms; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; AudioChunk carries timestamp (when audio is un-deferred) |
+| TD-25 | High | `main.go:295` (video timestamping in main loop) | Video + Audio stamped at consumption with wall-ms; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; the audio PCMChunk carries the capture timestamp (audio design locked; impl deferred) |
 | TD-26 | High | `main.go:249-252` | New-client handler forces keyframe + `capturer.Restart()` (respawns capture) → storm for all viewers | Serve cached IDR; conditional keyframe; never restart capture; rate-limit |
 | TD-27 | Med | `main.go:158` | Input device hardcoded 2560×1440 ≠ stream dims → cursor offset | Resolved by MODULE_INPUT — input dims = stream dims; Dispatcher.Resize on resolution change |
 | TD-28 | Med | Protocol/round-1 | Length-prefix NAL framing added client AVCC complexity for no browser benefit | Reverted to Annex B per-frame concatenation |
 | TD-29 | Med | Pipeline (round-1 spec) | Frame loop discarded W/H/timestamp; `continue` didn't skip capture; dead frameSeq | EncodedFrame struct; skip-before-capture; server owns sequence |
 | TD-30 | Med | hwencode (round-1 spec) | Duplicate `config` field; non-existent `vaCreateSurfaceFromFD` | Renamed `vaConfig`; use `vaCreateSurfaces`+ExternalBuffers |
-| TD-31 | Med | Client (round-1 spec) | Config described as JSON text vs protocol's binary frame 6; codec "h264" too short for WebCodecs | Config = binary frame 6, full codec string |
-| TD-32 | Med | Protocol/Input | InputAck had nothing to echo (no input seq) | Input messages carry `seq`; server echoes in InputAck |
-| TD-33 | Low | Protocol | KeyframeReq/Resize as binary types vs JSON-text client channel | Keyframe via JSON text; Resize via fresh Config |
+| TD-31 | Med | Client (round-1 spec) | Config described as JSON text vs binary frame 6; codec "h264" too short for WebCodecs | Config = `{"type":"config"}` JSON on the control stream (binary type 6 retired in the QUIC switch), full codec string |
+| TD-32 | Med | Protocol/Input | InputAck had nothing to echo (no input seq) | Input messages carry `seq`; server echoes in 13-byte InputAck |
+| TD-33 | Low | Protocol | KeyframeReq/Resize as binary types vs JSON client channel | Keyframe via control-stream JSON; Resize via a fresh `config` message |
 | TD-34 | Low | Pipeline (round-1 spec) | `FramesCaptures` typo; unused `minInterval`; undefined Stats methods | Corrected in MODULE_PIPELINE |
