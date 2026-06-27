@@ -52,10 +52,6 @@ type Server interface {
     // measure round-trip latency. Input is binary, not JSON — see MODULE_INPUT.md.
     SetInputCallback(fn func(frame []byte) (seq uint32, err error))
 
-    // SetWebcamCallback fires for each binary WebcamH264 (0x50) frame from the
-    // controller (webcam.Receiver.HandleFrame). nil if no webcam add-on.
-    SetWebcamCallback(fn func(payload []byte, ptsNanos uint64) error)
-
     // SetClipboardCallback fires for a clipboard JSON text message (C→H).
     SetClipboardCallback(fn func(content clipboard.Content) error)
 
@@ -63,11 +59,6 @@ type Server interface {
     // its /files endpoint can route accepted upgrades into it. nil disables
     // the /files endpoint (returns 404).
     SetFileTransferService(svc filetransfer.Service)
-
-    // SetWebcamControlCallback fires for the webcam JSON control messages
-    // webcam_start / webcam_stop / webcam_reconfigure. nil if no webcam add-on.
-    // (Webcam refinement deferred — placeholder.)
-    SetWebcamControlCallback(fn func(action string, width, height, fps int) error)
 
     // SetKeyframeRequestCallback fires when a client requests a keyframe
     // (JSON {"type":"keyframe"}). The server rate-limits before invoking.
@@ -106,7 +97,7 @@ type Config struct {
 |------|--------|---------|-------------|
 | `/` | GET | `http.FileServer` | Serves embedded web client (index.html + compositor.js) |
 | `/healthz` | GET | `handleHealth` | `200 {"status":"ok"}` for load balancer probes |
-| `/ws` | GET | `handleWS` | Main WebSocket: media (S→C), binary input + webcam (C→S), JSON control |
+| `/ws` | GET | `handleWS` | Main WebSocket: media (S→C), binary input (C→S), JSON control |
 | `/files` | GET | `handleFiles` | **Dedicated** file-transfer WebSocket (same auth; see [`MODULE_FILETRANSFER.md`](./MODULE_FILETRANSFER.md)) |
 | `/auth` | POST | `handleAuth` | Login endpoint for password/token modes (returns session token) |
 | `/pair` | POST | `handlePair` | PIN-based pairing (Sunshine-style first-launch flow) — see [`MODULE_AUTH.md`](./MODULE_AUTH.md) |
@@ -191,14 +182,14 @@ proxy (Caddy, nginx, traefik) for ACME if needed.
     If keyframe cached: do NOT force (avoid storm)
 12. Block in ReadLoop(), routing by WebSocket opcode:
     - BINARY frame (controller only; dropped for viewers):
-        byte[1] == 0x50          → webcam.Receiver.HandleFrame (MODULE_WEBCAM)
         byte[1] in 0x01..0x4F    → input.Dispatcher.Dispatch (MODULE_INPUT)
                                     → returns Seq → emit InputAck(Seq, recvTs)
-        (a binary frame from a viewer, or with an unknown type byte, is dropped)
+        (0x50 is reserved for future webcam — current binaries drop with a
+         metric. A binary frame from a viewer, or with any other unknown type
+         byte, is dropped.)
     - TEXT frame (JSON):
         resize/set_*       → stream.Manager (controller only; viewers ignored)
         clipboard          → clipboard.Monitor.Set (direction-gated; controller only)
-        webcam_start/stop  → webcam.Receiver.OnClientStart/OnClientStop (controller only)
         {"type":"keyframe"} → rate-limited keyframe-request callback
         {"type":"pong"}    → record RTT
         {"type":"stats"}   → record client telemetry

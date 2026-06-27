@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Client module is the browser-based viewer and controller. It connects to the server via WebSocket (WSS), decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back to the server as **binary** WebSocket frames (compact 6-byte-header records — see [`MODULE_INPUT.md`](./MODULE_INPUT.md)). Rare control messages (keyframe req, resize, clipboard, webcam_start/stop, etc.) use **JSON text** frames; everything high-frequency is binary.
+The Client module is the browser-based viewer and controller. It connects to the server via WebSocket (WSS), decodes video using the WebCodecs API, plays audio via AudioWorklet, and sends input events back to the server as **binary** WebSocket frames (compact 6-byte-header records — see [`MODULE_INPUT.md`](./MODULE_INPUT.md)). Rare control messages (keyframe req, resize, clipboard, etc.) use **JSON text** frames; everything high-frequency is binary.
 
 ---
 
@@ -24,7 +24,6 @@ The client is a single-page application embedded in the server binary via `go:em
 | `input.js` | Binary input encode (DataView), HID-usage map, pointer-lock, InputAck latency |
 | `clipboard.js` | clipboardchange / copy / paste interception; host-update apply |
 | `files.js` | Drag-drop upload + Files panel for downloads (separate `/files` WS) |
-| `webcam.js` | getUserMedia + WebCodecs VideoEncoder + binary 0x50 send |
 | `gamepad.js` | rAF poll of getGamepads, diff-send 0x40, connect/disconnect 0x41/0x42, rumble apply |
 | `stats.js` | FPS/bandwidth/latency display |
 
@@ -201,10 +200,10 @@ function recordAck(seq /*, serverTs */) {
   disable mouse acceleration; Safari ignores the option).
 - Every record carries `Seq`; the server's `InputAck` (binary type 14) echoes it
   for latency measurement.
-- **Control** messages (keyframe, resize, set_*, clipboard, webcam_*) still use
+- **Control** messages (keyframe, resize, set_*, clipboard) still use
   JSON **text** frames: `ws.send('{"type":"keyframe"}')`.
 
-### Clipboard, File Transfer, Webcam, Gamepad (client side)
+### Clipboard, File Transfer, Gamepad (client side)
 
 - **Clipboard** (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)): on Chrome/Edge,
   request `clipboard-read`/`clipboard-write` and use the `clipboardchange` event
@@ -215,10 +214,6 @@ function recordAck(seq /*, serverTs */) {
   `dragover`/`drop` on the canvas → open the dedicated `/files` WebSocket → stream
   `file.stream()` in 64 KiB chunks. Show a drop overlay. A **Files** panel lists
   the host Outgoing folder for downloads (`showSaveFilePicker` on Chrome/Edge).
-- **Webcam** (see [`MODULE_WEBCAM.md`](./MODULE_WEBCAM.md), Chrome/Edge only):
-  `getUserMedia(720p30)` → WebCodecs `VideoEncoder` (H.264 CBP, realtime) →
-  binary frames (type 0x50) on the main socket. A camera-sharing indicator + stop
-  control are shown.
 - **Gamepad** (see [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)): poll
   `navigator.getGamepads()` on `requestAnimationFrame`, send binary
   `GamepadState` (type 0x40) only when the snapshot changes; emit `GamepadConnect`
@@ -289,7 +284,6 @@ client/
 ├── input.js         // Binary input, HID-usage map, pointer-lock
 ├── clipboard.js     // clipboardchange/copy/paste interception
 ├── files.js         // Drag-drop + Files panel (separate /files WS)
-├── webcam.js        // getUserMedia + WebCodecs VideoEncoder
 ├── gamepad.js       // Gamepad-API poll + rumble apply
 └── stats.js         // FPS/bandwidth display
 ```

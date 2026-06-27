@@ -292,7 +292,7 @@ controlled by URL query param:
 
 | URL | Role | Permissions |
 |-----|------|------------|
-| `wss://host/ws?role=control` + `bearer.<token>` subprotocol | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, `webcam_start/stop`, `/files` connect, gamepad |
+| `wss://host/ws?role=control` + `bearer.<token>` subprotocol | Controller | Binary input, keyframe req, `resize`/`set_*`, clipboard C→H, `/files` connect, gamepad |
 | `wss://host/ws?role=view` + `bearer.<token>` subprotocol | Viewer | Receive video/audio/cursor/clipboard-pushes only |
 | `wss://host/ws` (no role; token via subprotocol) | Auto: first connection = controller, rest = viewer | — |
 

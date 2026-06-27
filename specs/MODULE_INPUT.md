@@ -45,8 +45,7 @@ binary decode is ~121× faster, zero-allocation, ~70-79% smaller on the wire, an
 has a far smaller attack surface than JSON.
 
 **Channel discrimination by WebSocket opcode:**
-- **Binary** WebSocket frames from the client = input events (and webcam, see
-  [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)).
+- **Binary** WebSocket frames from the client = input events.
 - **Text** WebSocket frames from the client = rare human-triggered JSON control
   (`keyframe`, `pong`, `stats`, `resize`, `set_*`, `clipboard`).
 
@@ -75,8 +74,8 @@ Offset  Size  Type   Field     Notes
 0xF0-0xFF  vendor / experimental
 ```
 
-> Client→server media (webcam) lives at `0x50` and is decoded by the protocol
-> layer, not the input dispatcher (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)).
+> `0x50` is reserved for a future webcam type (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md));
+> the dispatcher drops any 0x50 frame today.
 
 ### Records (all little-endian)
 
@@ -374,7 +373,7 @@ normal key (their `SecureAttention` is absent, step 3b drops with a log).
 ```
 WebSocket BINARY frame (client → server)
     → byte[1] (Type):
-        0x50            → webcam.Receiver.HandleFrame (via server.SetWebcamCallback), NOT input
+        0x50            → reserved for future webcam — current binaries drop
         0x01-0x4F       → input.Dispatcher.Dispatch(frame):
             decode record (zero-alloc, bounds-checked)
             validate: Version==1, len matches Type, ranges in bounds

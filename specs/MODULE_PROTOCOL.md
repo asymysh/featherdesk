@@ -16,8 +16,8 @@ const HeaderSize = 22
 // Frame type constants.
 // Server → client uses these binary frame types with the 22-byte FrameHeader.
 // Client → server uses BINARY frames for input (compact 6-byte record header,
-// see MODULE_INPUT.md) + webcam (FrameTypeWebcamH264 with the 22-byte header),
-// and TEXT frames for rare JSON control. See "Channel Model" below.
+// see MODULE_INPUT.md), and TEXT frames for rare JSON control. See "Channel
+// Model" below.
 const (
     FrameTypeVideoH264    uint8 = 1
     FrameTypePing         uint8 = 2
@@ -30,7 +30,9 @@ const (
     FrameTypeClipboard    uint8 = 12 // S→C clipboard push (JSON payload; see MODULE_CLIPBOARD.md)
     FrameTypeInputAck     uint8 = 14 // S→C echoes client input seq + recv timestamp
     FrameTypeGamepadRumble uint8 = 15 // S→C gamepad rumble (controller index + magnitudes + duration; MODULE_GAMEPAD.md)
-    FrameTypeWebcamH264   uint8 = 0x50 // C→S webcam access unit (Annex B H.264; see MODULE_WEBCAM.md)
+    // 0x50 reserved for future webcam redirection (deferred from v1).
+    // Do NOT reuse without a protocol version bump — when webcam returns it
+    // MUST reclaim 0x50 to keep wire compatibility consistent.
 )
 
 // Custom WebSocket close codes (RFC 6455 allows 4000-4999 for private use)
@@ -87,8 +89,8 @@ Offset  Size  Type     Field         Encoding
 
 **Server → client** frames use the 22-byte `FrameHeader` below.
 **Client → server** uses two channels distinguished by the WebSocket opcode:
-**binary** frames (input + webcam) and **text** frames (JSON control). See
-"Channel Model" below.
+**binary** frames (input) and **text** frames (JSON control). See "Channel
+Model" below.
 
 | Type | Value | Dir | Header | Payload Content | Width/Height |
 |------|-------|-----|--------|-----------------|--------------|
@@ -103,7 +105,7 @@ Offset  Size  Type     Field         Encoding
 | Clipboard | 12 | S→C | 22-byte | JSON clipboard push (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)) | Unused (0) |
 | InputAck | 14 | S→C | 22-byte | Client input `seq` (u32 LE) + server-recv timestamp (u64 LE) | Unused (0) |
 | GamepadRumble | 15 | S→C | 22-byte | 9-byte payload `[Index u8][WeakMag u16][StrongMag u16][DurationMs u32]` (see [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) | Unused (0) |
-| **WebcamH264** | **0x50** | **C→S** | 22-byte | Webcam access unit, Annex B H.264 (see [`MODULE_WEBCAM.md`](./MODULE_WEBCAM.md)) | Frame dims |
+| _(reserved)_ | 0x50 | — | — | Reserved for future webcam redirection. Do not reuse without protocol version bump. | — |
 | **Input events** | **0x01-0x4F** | **C→S** | 6-byte | Binary input records (keyboard 0x10-0x1F, mouse 0x20-0x2F, touch 0x30-0x3F, gamepad 0x40-0x4F; see [`MODULE_INPUT.md`](./MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./MODULE_GAMEPAD.md)) | n/a |
 
 > **Input record total size = 6-byte shared header + per-type payload.** The
@@ -120,8 +122,8 @@ SERVER → CLIENT : binary frames only (22-byte FrameHeader + payload)
 
 CLIENT → SERVER : discriminated by WebSocket opcode
   ├─ BINARY opcode:
-  │     byte[1] == 0x50         → WebcamH264 (22-byte header, MODULE_WEBCAM)
   │     byte[1] in 0x01..0x4F   → input record (6-byte header, MODULE_INPUT)
+  │     (0x50 reserved for future webcam — current binaries reject)
   └─ TEXT opcode (JSON):           rare, human-triggered control
 ```
 
@@ -145,15 +147,13 @@ and human-readability aids debugging):
 {"type": "set_fps", "fps": 30}                       // dynamic frame rate (control role only)
 {"type": "set_hdr", "hdr": true}                     // toggle HDR pipeline
 {"type": "clipboard", "format": "text/plain", "text": "..."}   // clipboard C→H (MODULE_CLIPBOARD)
-{"type": "webcam_start", "width": 1280, "height": 720, "fps": 30}  // begin webcam share
-{"type": "webcam_stop"}                              // end webcam share
 ```
 
 - **Input events are NOT here** — they are binary (see above).
-- `keyframe`/`pong`/`stats`/`resize`/`set_*`/`clipboard`/`webcam_*` carry no input `seq`.
-- `resize`, `set_*`, `clipboard` (C→H), `webcam_*` are gated by authorization role
-  (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); the server silently drops them from
-  `view` role clients. `clipboard` (C→H) is additionally gated by
+- `keyframe`/`pong`/`stats`/`resize`/`set_*`/`clipboard` carry no input `seq`.
+- `resize`, `set_*`, `clipboard` (C→H) are gated by authorization role
+  (see [`MODULE_AUTH.md`](./MODULE_AUTH.md)); the server silently drops them
+  from `view` role clients. `clipboard` (C→H) is additionally gated by
   `[clipboard] direction`: dropped when `direction = "host_to_client"` or
   `"disabled"` (see [`MODULE_CLIPBOARD.md`](./MODULE_CLIPBOARD.md)).
 - Parameter-change messages flow through the `stream.Params` contract (see
@@ -319,9 +319,8 @@ This module is already pure (no dependencies). Move it directly to `pkg/protocol
 | Unit | Deterministic encoding (same input → same bytes) | No |
 | Unit | Buffer reuse safety | No |
 | Unit | Annex B access-unit assembly (SPS+PPS+IDR ordering, start codes) | No |
-| Unit | Client→server JSON control parsing (keyframe, pong, stats, resize, set_*, clipboard, webcam_*) | No |
+| Unit | Client→server JSON control parsing (keyframe, pong, stats, resize, set_*, clipboard) | No |
 | Unit | Binary input record decode (every Type, truncated/oversized/unknown Type, InputBatch caps) | No |
-| Unit | Webcam frame routing (type 0x50 → webcam receiver, NOT input dispatcher) | No |
 | Benchmark | Marshal throughput (target: <1ns/op) | No |
 | Benchmark | Unmarshal throughput (target: <0.5ns/op) | No |
 | Fuzz | Random bytes → UnmarshalHeader (no panics) | No |

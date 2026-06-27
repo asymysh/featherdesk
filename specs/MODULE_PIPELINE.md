@@ -12,7 +12,7 @@ The Pipeline module is the runtime wiring layer that connects all other modules 
 package pipeline
 
 // Pipeline connects capture, encode, server, input, clipboard, file transfer,
-// webcam (deferred), and audio (deferred) into a streaming system.
+// and audio (deferred) into a streaming system.
 type Pipeline struct {
     cfg       *config.Config           // parsed TOML config (owned by caller, read-only)
     capturer  capture.Capturer
@@ -23,11 +23,10 @@ type Pipeline struct {
     input     input.Dispatcher         // nil → view-only (no input add-on compiled in)
     clipboard clipboard.Monitor        // nil if [clipboard] disabled or Probe failed
     files     filetransfer.Service     // nil if [filetransfer] disabled
-    webcam    webcam.Receiver          // nil if no webcam add-on / disabled  (deferred refinement)
     params    stream.Params            // current dynamic stream parameters
     logger    *slog.Logger
     stats     *Stats
-    // (audio deferred; input/clipboard/filetransfer/webcam are live modules)
+    // (audio + webcam deferred; input/clipboard/filetransfer are live modules)
 }
 
 // New creates a Pipeline from a parsed TOML configuration. Does NOT start anything.
@@ -82,8 +81,7 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    `[input] enabled`: build `KeyMouseInjector` (interception/uinput/cgevent) and
    optional `TouchInjector` (win_touch), sized to the SAME stream dims. If no
    input add-on is compiled in, the binary is **view-only** (log it; not an error).
-9. Probe + create webcam Receiver + Sink if a webcam add-on is compiled in AND
-   `[webcam] enabled`. Otherwise no webcam capability.
+9. (Webcam was here — deferred to a future version, see CENTRAL_SPEC "Deferred".)
 10. Create clipboard Monitor + file-transfer Service if their `[*] enabled`.
 11. Create audio capturer. [DEFERRED — the `[audio]` section is not in the
     Config struct yet; this step is inert until MODULE_AUDIO un-defers.]
@@ -91,8 +89,6 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    - server.ConfigProvider          → returns current ConfigPayload (codec, dims, fps, hdr, cursorMode, session_token)
    - server.OnNewClient             → p.forceKeyframe() ONLY (server already gates on cached keyframe)
    - server.SetInputCallback        → input.Dispatcher.Dispatch (binary; nil if view-only)
-   - server.SetWebcamCallback       → webcam.Receiver.HandleFrame (nil if no webcam add-on)
-   - server.SetWebcamControlCallback→ webcam.Receiver.OnClientStart/OnClientStop/Reconfigure (nil if no webcam add-on)
    - server.SetClipboardCallback    → clipboard.Monitor.Set (direction + role gated by server)
    - server.SetFileTransferService  → filetransfer.Service (nil if [filetransfer] disabled → /files returns 404)
    - server.OnKeyframeRequest       → p.forceKeyframe() (server rate-limits before calling)
@@ -285,22 +281,20 @@ Invariant: **capture dims == encoder dims == Config dims == uinput range.** No h
 1. Context cancelled (signal handler or explicit cancel)
 2. Frame loop exits (ctx.Done select case)
 3. Audio loop exits (ctx.Done select case)        [audio deferred — placeholder]
-4. Close webcam Receiver + active Sink            (if open)
-5. Close encoder (flushes pending frames)
-6. Close capturer (releases DRM/EGL/subprocess)
-7. Close audio (kills pw-cat)                     [audio deferred]
-8. Close input Dispatcher (closes active KeyMouse / Touch / Gamepad injectors,
+4. Close encoder (flushes pending frames)
+5. Close capturer (releases DRM/EGL/subprocess)
+6. Close audio (kills pw-cat)                     [audio deferred]
+7. Close input Dispatcher (closes active KeyMouse / Touch / Gamepad injectors,
    releasing all held keys + buttons on the way out)
-9. Close clipboard Monitor (stops the message pump / X event loop)
-10. Close filetransfer Service (drains in-flight, fsyncs, removes orphan .part files)
-11. Server.Start returns (graceful HTTP shutdown with 5s timeout)
-12. Print final statistics
-13. Exit
+8. Close clipboard Monitor (stops the message pump / X event loop)
+9. Close filetransfer Service (drains in-flight, fsyncs, removes orphan .part files)
+10. Server.Start returns (graceful HTTP shutdown with 5s timeout)
+11. Print final statistics
+12. Exit
 ```
 
 Order matters: encoder before capturer (encoder may reference captured DMA-BUF),
-webcam before encoder (webcam decode owns its own decoder state independent of
-the screen encoder), server last (clients get final frames + an orderly close).
+server last (clients get final frames + an orderly close).
 
 ---
 
@@ -433,8 +427,6 @@ func (r *RollingStats) P99() time.Duration
 | Audio chunk channel closed | Warn | Attempt audio reconnect |
 | Input device error | Warn | Log, disable input (viewers still work) |
 | Clipboard Monitor error (Wayland unsupported, X display drop) | Warn | Log, disable clipboard sync, leave video unaffected |
-| Webcam Sink open error | Warn | Refuse `webcam_start`; log; client retries on user action |
-| Webcam decode error mid-stream | Warn | Drop frame, request keyframe via host→client control, continue |
 | File-transfer write error | Warn | Send `ERROR` to client for that transfer; drop only that transfer |
 | Gamepad add-on connect failure | Warn | Drop subsequent gamepad records; log once per index |
 | Context cancelled | - | Graceful shutdown |
