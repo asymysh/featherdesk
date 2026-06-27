@@ -3,7 +3,7 @@
 ## Purpose
 
 The `vigem` add-on is the Windows virtual-gamepad backend for the core Gamepad
-module (see [`specs/MODULE_GAMEPAD.md`](../../../../specs/MODULE_GAMEPAD.md)).
+module (see [`specs/MODULE_GAMEPAD.md`](../../../specs/MODULE_GAMEPAD.md)).
 It implements `input.GamepadInjector`.
 
 It uses **ViGEmBus** (Nefarius Virtual Gamepad Emulation Bus) - a kernel-mode
@@ -214,7 +214,7 @@ internal/input/vigem/
 ## Configuration
 
 Reads `[addon_module_vigem]` from the TOML config
-(see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+(see [`specs/MODULE_CONFIG.md`](../../../specs/MODULE_CONFIG.md)).
 
 ```toml
 [addon_module_vigem]

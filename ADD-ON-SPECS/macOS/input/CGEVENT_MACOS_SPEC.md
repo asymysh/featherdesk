@@ -3,7 +3,7 @@
 ## Purpose
 
 The `cgevent` add-on is the macOS keyboard+mouse injection backend for the core
-Input module (see [`specs/MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md)).
+Input module (see [`specs/MODULE_INPUT.md`](../../../specs/MODULE_INPUT.md)).
 It implements `input.KeyMouseInjector` using Core Graphics event synthesis
 (`CGEventPost` to `kCGHIDEventTap`).
 
@@ -193,7 +193,7 @@ internal/input/cgevent/
 
 ## Configuration
 
-Reads `[addon_module_cgevent]` (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+Reads `[addon_module_cgevent]` (see [`specs/MODULE_CONFIG.md`](../../../specs/MODULE_CONFIG.md)).
 
 ```toml
 [addon_module_cgevent]

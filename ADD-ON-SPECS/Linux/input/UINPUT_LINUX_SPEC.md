@@ -3,7 +3,7 @@
 ## Purpose
 
 The `uinput` add-on is the Linux keyboard+mouse injection backend for the core
-Input module (see [`specs/MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md)).
+Input module (see [`specs/MODULE_INPUT.md`](../../../specs/MODULE_INPUT.md)).
 It implements `input.KeyMouseInjector`.
 
 It is the **single, unified Linux input solution**: the kernel `uinput` subsystem
@@ -172,7 +172,7 @@ internal/input/uinput/
 
 ## Configuration
 
-Reads `[addon_module_uinput]` (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+Reads `[addon_module_uinput]` (see [`specs/MODULE_CONFIG.md`](../../../specs/MODULE_CONFIG.md)).
 
 ```toml
 [addon_module_uinput]
@@ -189,7 +189,7 @@ If absent, defaults apply. Strictly validated only when this add-on is compiled 
 This add-on implements `input.GamepadInjector` in addition to
 `KeyMouseInjector` — uinput is the universal evdev injector and adding a
 gamepad device costs only an extra device-create call. See
-[`../../../../specs/MODULE_GAMEPAD.md`](../../../../specs/MODULE_GAMEPAD.md)
+[`../../../../specs/MODULE_GAMEPAD.md`](../../../specs/MODULE_GAMEPAD.md)
 for the cross-platform contract.
 
 One independent uinput device is created **per controller index** so SDL/games
@@ -236,7 +236,7 @@ add-on must implement both phases or the kernel blocks the game:
 
 The pipeline forwards the emitter call to the server, which sends a
 `FrameTypeGamepadRumble` **datagram** to the controller client (see
-[`MODULE_GAMEPAD.md`](../../../../specs/MODULE_GAMEPAD.md)).
+[`MODULE_GAMEPAD.md`](../../../specs/MODULE_GAMEPAD.md)).
 
 ### Touch (future)
 

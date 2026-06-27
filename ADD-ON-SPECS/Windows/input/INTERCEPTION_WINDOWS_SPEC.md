@@ -3,7 +3,7 @@
 ## Purpose
 
 The `interception` add-on is the Windows keyboard+mouse injection backend for the
-core Input module (see [`specs/MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md)).
+core Input module (see [`specs/MODULE_INPUT.md`](../../../specs/MODULE_INPUT.md)).
 It implements `input.KeyMouseInjector`.
 
 It uses the **Interception** filter driver (oblitum/Interception) rather than
@@ -107,7 +107,7 @@ The Interception driver **cannot** generate SAS — Windows intercepts the real
 hardware Ctrl+Alt+Del in `winlogon`/`csrss` before any filter driver, and refuses
 software-synthesized SAS for security. The add-on implements the optional
 `input.SecureAttention` capability; the core dispatcher detects the CAD chord
-(see [`../../../../specs/MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md)
+(see [`../../../../specs/MODULE_INPUT.md`](../../../specs/MODULE_INPUT.md)
 "Ctrl+Alt+Del Chord Detection") and calls `SendSAS()`:
 
 ```c
@@ -148,7 +148,7 @@ the `SecureAttention` implementation is Windows-specific.
 ## Held-input release (no stuck keys)
 
 The authoritative owner of "release everything still held" is the core
-`Dispatcher.ReleaseAll` (see [`MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md)),
+`Dispatcher.ReleaseAll` (see [`MODULE_INPUT.md`](../../../specs/MODULE_INPUT.md)),
 which the server calls on controller disconnect/takeover. This add-on cooperates:
 
 - It injects exactly the key-down/button-down events it is told to, so the
@@ -242,7 +242,7 @@ internal/input/interception/
 ## Configuration
 
 Reads `[addon_module_interception]` from the TOML config
-(see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+(see [`specs/MODULE_CONFIG.md`](../../../specs/MODULE_CONFIG.md)).
 
 ```toml
 [addon_module_interception]

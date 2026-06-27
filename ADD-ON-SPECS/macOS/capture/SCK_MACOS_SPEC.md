@@ -278,7 +278,7 @@ under the `sck` build tag without changing the underlying capture logic.
 ## Configuration
 
 This add-on reads its tuning knobs from the `[addon_module_sck]` section
-of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+of the TOML config (see [`specs/MODULE_CONFIG.md`](../../../specs/MODULE_CONFIG.md)).
 
 If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is compiled into the binary; unknown
@@ -290,7 +290,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableCapturer` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../../specs/MODULE_STREAM_PARAMS.md)). SCK supports hot reconfiguration via `updateConfiguration:`.
+This add-on implements `stream.ConfigurableCapturer` (see [`../../../../specs/MODULE_STREAM_PARAMS.md`](../../../specs/MODULE_STREAM_PARAMS.md)). SCK supports hot reconfiguration via `updateConfiguration:`.
 
 | Param change | SCK API | Hot? |
 |--------------|---------|------|

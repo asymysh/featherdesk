@@ -3,7 +3,7 @@
 ## Purpose
 
 The `win_touch` add-on adds multitouch injection on Windows. It implements
-`input.TouchInjector` (see [`specs/MODULE_INPUT.md`](../../../../specs/MODULE_INPUT.md))
+`input.TouchInjector` (see [`specs/MODULE_INPUT.md`](../../../specs/MODULE_INPUT.md))
 and is **separate** from the `interception` keyboard/mouse add-on — they compose:
 a Windows build that wants both compiles `interception,win_touch`.
 
@@ -163,7 +163,7 @@ internal/input/wintouch/
 
 ## Configuration
 
-Reads `[addon_module_win_touch]` (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+Reads `[addon_module_win_touch]` (see [`specs/MODULE_CONFIG.md`](../../../specs/MODULE_CONFIG.md)).
 
 ```toml
 [addon_module_win_touch]

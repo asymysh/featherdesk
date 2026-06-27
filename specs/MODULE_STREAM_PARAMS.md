@@ -408,5 +408,5 @@ The TOML `[stream]` section provides **initial defaults**; runtime
    `ConfigurableHardwareEncoder` / `ConfigurableCapturer` interfaces
 2. Pipeline updates — telemetry loop, adaptation policy, resize message handler
 3. Per-add-on `UpdateStreamParams` implementations
-4. Protocol additions — `{"type":"resize"}` JSON text message handler
+4. Protocol additions — `{"type":"resize"}` control-stream JSON message handler
 5. HDR pipeline — encoder switching logic when `Params.HDR` flips

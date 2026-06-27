@@ -3,7 +3,7 @@
 ## Purpose
 
 The `gcvirtual` add-on is the macOS virtual-gamepad backend for the core
-Gamepad module (see [`specs/MODULE_GAMEPAD.md`](../../../../specs/MODULE_GAMEPAD.md)).
+Gamepad module (see [`specs/MODULE_GAMEPAD.md`](../../../specs/MODULE_GAMEPAD.md)).
 It implements `input.GamepadInjector` using Apple's `GCVirtualController`
 (Game Controller framework).
 
@@ -223,7 +223,7 @@ internal/input/gcvirtual/
 
 ## Configuration
 
-Reads `[addon_module_gcvirtual]` (see [`specs/MODULE_CONFIG.md`](../../../../specs/MODULE_CONFIG.md)).
+Reads `[addon_module_gcvirtual]` (see [`specs/MODULE_CONFIG.md`](../../../specs/MODULE_CONFIG.md)).
 
 ```toml
 [addon_module_gcvirtual]
