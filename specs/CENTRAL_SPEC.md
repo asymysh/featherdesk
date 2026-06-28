@@ -563,7 +563,7 @@ pub trait Capturer {
     /// Ok(Some(frame)) = a new frame; Ok(None) = no new frame (pacing / static
     /// screen); Err = failure. Across the add-on ABI `frame.data` is an owned
     /// RVec<u8> whose ownership transfers to the host (deterministic drop).
-    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError>;
+    fn next_frame(&mut self) -> Result<Option<Frame>, StreamError>;
 }
 
 pub struct Frame {
@@ -730,7 +730,7 @@ pub trait SurfaceCapturer: Capturer {
     /// FbInfo's Drop releases the resource, it is released exactly once on every
     /// path automatically — the Go "call Release() on every path (M-1)" discipline
     /// and the TD-01 DMA-BUF fd leak class are eliminated by ownership.
-    fn next_surface(&mut self) -> Result<Option<FbInfo>, CaptureError>;
+    fn next_surface(&mut self) -> Result<Option<FbInfo>, StreamError>;
 }
 
 // Platform-specific surface handle as a tagged enum (not a struct of nullable

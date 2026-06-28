@@ -64,10 +64,28 @@ pub struct CapabilityDescriptor {
 #[sabi_trait]
 pub trait FeatherDeskAddon {
     fn descriptor(&self) -> CapabilityDescriptor;
-    fn probe(&self) -> RResult<ProbeResult, u32>;          // u32 = AbiErr code (registry below)
+    fn probe(&self) -> RResult<ProbeReport, u32>;          // u32 = AbiErr code (registry below)
     fn construct(&self, cfg: RAddonConfig) -> RResult<AddonObject, u32>; // sabi object for `kind`
 }
+
+// Layer-1 probe result — ALL abi_stable types. (The host's richer Layer-2
+// `ProbeResult` in MODULE_PIPELINE carries String / HashMap / serde_json::Value
+// and is NOT boundary-safe; the adapter BUILDS it from this report.)
+#[repr(C)] #[derive(StableAbi)]
+pub struct ProbeReport {
+    pub available: bool,        // false = prerequisite missing — this is Ok(available:false), NOT an error
+    pub reason: RString,        // human-readable detail when !available
+    pub codecs: RVec<CodecId>,  // what this backend can actually emit/consume
+}
 ```
+
+> **`RAddonConfig` / `AddonObject` are abi-stable unions.** `RAddonConfig` carries
+> the kind-appropriate config (the host's `CaptureConfig` / `EncoderConfig` /
+> `HWEncoderConfig` / `InjectorConfig` / `AudioConfig`, rendered in abi-stable
+> types — `RString`, not `String`). `AddonObject` is the abi-stable enum wrapping
+> the kind's sabi object (`CapturerBox` / `EncoderBox` / …). The Layer-2 adapter
+> converts host config → `RAddonConfig`, calls `construct()`, and wraps the
+> returned `AddonObject` as a `Box<dyn HostTrait>`.
 
 ### Rich types across the boundary
 
@@ -81,8 +99,8 @@ pub trait FeatherDeskAddon {
 ### Errors cross as `u32`
 
 Errors cross as `RResult<T, u32>` where the `u32` is a stable `AbiErr` code; the
-host **maps the code back into its own `StreamError` / `CaptureError` /
-`AudioError` / `InputError` enum** so the pipeline's normal `match`/`?` works. (In
+host **maps the code back into its own `StreamError` / `AudioError` /
+`InputError` enum** so the pipeline's normal `match`/`?` works. (In
 Go this mapping silently failed because sentinel error *values* differ per copy;
 in Rust it is explicit and centrally registered.)
 
@@ -139,18 +157,19 @@ each code back to the matching host enum:
 
 | AbiErr | Code | Maps to host variant | Meaning |
 |--------|------|----------------------|---------|
-| `Generic`            | `1` | `*::Backend` / `*::Other` | unspecified failure (detail logged, not on the wire); **also the code an add-on returns for a caught panic** (see "FFI panic safety") |
+| `Generic`            | `1` | the crate's catch-all (`StreamError::Backend` / `AudioError::Backend` / `InputError::Io`) | unspecified failure (detail logged, not on the wire); **also the code an add-on returns for a caught panic** (see "FFI panic safety") |
 | `FallbackToSoftware` | `2` | `StreamError::FallbackToSoftware` | HW path unusable → degrade to SW for the session |
 | `ChromaUnsupported`  | `3` | `StreamError::ChromaUnsupported`  | encoder can't emit the requested chroma |
 | `HdrUnsupported`     | `4` | `StreamError::HdrUnsupported`     | encoder can't emit 10-bit / HEVC-Main10 |
 | `RequiresRestart`    | `5` | `StreamError::RequiresRestart`    | param change needs teardown + rebuild |
-| `DeviceLost`         | `6` | `CaptureError::DeviceLost` / `AudioError::DeviceLost` | capture/audio device vanished |
-| `Unsupported`        | `7` | `*::Unsupported` | requested config not supported by this backend |
-| `NotAvailable`       | `8` | (probe negative) | prerequisite missing — returned by `probe()` |
+| `DeviceLost`         | `6` | `StreamError::DeviceLost` / `AudioError::DeviceLost` | capture/encode/audio device or context lost |
 
-Code `0` is reserved; success is `ROk`, never an error code. **All three registry
-spaces are append-only** — a retired id/code is never reused (same discipline as
-the wire `frame_type::` and `close::` spaces).
+Code `0` is reserved; success is `ROk`, never an error code. **Availability is NOT
+an error** — a negative probe is `Ok(ProbeReport { available: false, reason })`,
+never an `AbiErr`. The codes above are the full v1 set; the space is **append-only**
+(a retired code is never reused — same discipline as the wire `frame_type::` and
+`close::` spaces), so new conditions (e.g. a future `Unsupported`) take the next
+free id.
 
 ---
 

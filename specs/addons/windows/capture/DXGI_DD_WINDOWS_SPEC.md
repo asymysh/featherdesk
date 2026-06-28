@@ -368,7 +368,7 @@ via a future `[capture] display = 0` key.
 ```rust
 // crate: featherdesk-addon-dxgi_dd  (cfg(windows))
 
-pub fn probe_dxgi_dd() -> Result<DxgiDdCapabilities, CaptureError> {
+pub fn probe_dxgi_dd() -> Result<DxgiDdCapabilities, String> {
     // 1. CoInitializeEx (COM required)
     // 2. CreateDXGIFactory1 -> enumerate adapters
     // 3. For each adapter: enumerate outputs

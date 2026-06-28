@@ -201,10 +201,10 @@ NVENC add-on encoder.
 ```rust
 // crate: featherdesk-addon-nvfbc  (cfg(target_os = "linux"))
 
-fn probe_nvfbc() -> Result<NvFbcCapabilities, CaptureError> {
+fn probe_nvfbc() -> Result<NvFbcCapabilities, String> {
     // 1. dlopen libnvidia-fbc.so (check NVIDIA proprietary driver presence)
     // 2. NvFBC_GetStatus → check bIsCapturePossible
-    // 3. If false on consumer card, return CaptureError::NvFbcRestricted (suggest patcher)
+    // 3. If false on consumer card, return Err("NvFBC restricted") (suggest patcher)
     // 4. Enumerate display outputs, return resolution/refresh per output
 }
 ```

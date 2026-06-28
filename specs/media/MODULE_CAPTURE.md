@@ -87,7 +87,7 @@ pub trait Capturer {
     ///   Err(_)          — capture failed (device lost, etc.).
     /// It never returns a stale frame as if it were new, and never blocks
     /// forever on an idle screen.
-    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError>;
+    fn next_frame(&mut self) -> Result<Option<Frame>, StreamError>;
 }
 
 // SurfaceCapturer is the optional zero-copy contract.
@@ -107,7 +107,7 @@ pub trait SurfaceCapturer: Capturer {
     /// that case. ONLY if the surface is never handed to an encoder (e.g.
     /// probe/teardown) does dropping the FbInfo here release it — release is
     /// automatic (RAII) per-platform via SurfaceHandle's Drop.
-    fn next_surface(&mut self) -> Result<Option<FbInfo>, CaptureError>;
+    fn next_surface(&mut self) -> Result<Option<FbInfo>, StreamError>;
 }
 
 // CaptureConfig holds the capturer's INITIAL configuration. Once running,

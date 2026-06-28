@@ -117,6 +117,15 @@ pub const DEFAULT_CHANNELS: u8 = 2;   // stereo when the host is stereo (the com
 pub const MAX_CHANNELS: u8 = 8;       // 7.1
 pub const DEFAULT_FRAME_MS: u32 = 20; // 20 ms @ 48 kHz = 960 samples/chan
 // chunk_bytes(ch) for a 20 ms frame = 960 * ch * 2B (e.g. stereo 3840, 5.1 11520).
+
+// AudioError — the audio crate's error enum. Audio is a SEPARATE crate with its
+// own loop, so it is NOT folded into StreamError. Across the add-on ABI it crosses
+// as the AbiErr u32 the host maps back (see MODULE_ABI).
+#[derive(Debug, thiserror::Error)]
+pub enum AudioError {
+    #[error("audio: capture device lost / invalidated")] DeviceLost, // AbiErr::DeviceLost (6)
+    #[error("audio: backend failure: {0}")] Backend(String),         // AbiErr::Generic (1)
+}
 ```
 
 > **Why the encoder is in-process (not a subprocess):** unlike x264 (GPL, isolated

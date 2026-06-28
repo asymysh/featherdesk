@@ -104,10 +104,12 @@ parameter changes:
 ```rust
 // crate: featherdesk-stream
 
-// Error sentinels — defined in the stream crate (one thiserror-derived enum) to
-// avoid the cross-crate cycle between encode, hwencode, and capture. Across the
-// add-on ABI these cross as a stable u32 code the host maps back into StreamError
-// (see CENTRAL "Add-on ABI contract").
+// Error sentinels — defined in the stream crate (ONE thiserror-derived enum) to
+// avoid the cross-crate cycle between encode, hwencode, and capture. It is the
+// SINGLE hot-path error: capture (next_frame / next_surface), the SW Encoder, and
+// the HardwareEncoder all return StreamError — there is NO separate CaptureError.
+// Across the add-on ABI these cross as a stable u32 code (AbiErr) the host maps
+// back into StreamError (see MODULE_ABI).
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
     /// Returned by update_stream_params when the requested change cannot be
@@ -136,6 +138,18 @@ pub enum StreamError {
     /// Pipeline catches this once per session and degrades permanently to SW path.
     #[error("stream: hardware path unavailable, fall back to software")]
     FallbackToSoftware,
+
+    /// Capture/encode device or context lost (monitor unplugged, GPU reset on the
+    /// SW path, device invalidated). The pipeline's error-recovery ladder
+    /// (warn → restart → shutdown, see MODULE_PIPELINE) handles it.
+    #[error("stream: capture/encode device lost")]
+    DeviceLost,
+
+    /// Catch-all backend failure with no more specific variant. Carries a
+    /// human-readable detail for the LOG (never the wire); across the ABI it is
+    /// the `AbiErr::Generic` code and the host fills the detail.
+    #[error("stream: backend failure: {0}")]
+    Backend(String),
 }
 
 /// Manager coordinates dynamic parameter changes across the pipeline.

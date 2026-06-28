@@ -202,12 +202,12 @@ client-side cursor compositing approach.
 ```rust
 // crate: featherdesk-addon-kms_egl  (cfg(target_os = "linux"))
 
-fn probe_kms_egl() -> Result<KmsEglCapabilities, CaptureError> {
+fn probe_kms_egl() -> Result<KmsEglCapabilities, String> {
     // 1. Check CAP_SYS_ADMIN / root via geteuid + check effective caps
     // 2. Enumerate /dev/dri/card* devices
     // 3. For each: open, set UNIVERSAL_PLANES, find primary plane with fb_id
     // 4. Get CRTC dimensions + refresh rate
-    // 5. Return per-display dimensions or CaptureError::NoUsableCard
+    // 5. Return per-display dimensions or Err("no usable DRM card")
 }
 ```
 

@@ -242,7 +242,7 @@ featherdesk-addon-sck/   (its own cdylib crate)
 ```rust
 // cfg(target_os = "macos")
 
-pub fn probe_sck() -> Result<SckCapabilities, CaptureError> {
+pub fn probe_sck() -> Result<SckCapabilities, String> {
     // 1. Verify running inside a code-signed app bundle (check CFBundleIdentifier)
     // 2. Check Screen Recording TCC permission via CGPreflightScreenCaptureAccess()
     //    If not granted: CGRequestScreenCaptureAccess() to trigger dialog
