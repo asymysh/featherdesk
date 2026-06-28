@@ -35,7 +35,7 @@ The client is a single-page application embedded in the server binary via `rust-
 
 ```javascript
 async function connect() {
-    const role = isController ? "control" : "view";
+    const role = getRole();  // "control" | "view" | "player" — from URL hash (see Role Selection)
     const sessionToken = getSessionToken(); // from URL hash or /auth POST
 
     // 1. Certificate trust. In self-signed mode the browser opens WebTransport
@@ -96,7 +96,8 @@ async function connect() {
   Firefox recent). **Safari's support is incomplete** — on Safari the self-signed
   mode may fail to connect, and a CA-trusted cert (`server.tls.cert`/`key`) is
   required. See MODULE_SERVER "Browser certificate trust".
-- Role-based: `control` for input + video, `view` for video-only.
+- Role-based: `control` (input + video), `view` (video-only), or `player`
+  (gamepad-only co-op, when `[gamepad] allow_coop`).
 - Token-based authentication via the **first control-stream message** (not the
   URL or HTTP headers — browsers can't set the latter on WebTransport).
 
@@ -105,8 +106,13 @@ async function connect() {
 The client determines its role from the URL:
 - `https://host:port/` → viewer mode (default)
 - `https://host:port/#control` → controller mode
+- `https://host:port/#player` → gamepad co-op player mode
 - Viewer mode: disables keyboard/mouse capture, shows stream only
 - Controller mode: captures input, requests pointer lock, sends events
+- Player mode: sends **gamepad input only** (no kb/mouse), claims one virtual-pad
+  slot. Honored only when the host has `[gamepad] allow_coop`; otherwise the
+  server treats it as `view`. See [`MODULE_GAMEPAD.md`](../interaction/MODULE_GAMEPAD.md)
+  "Co-op" and [`MODULE_AUTH.md`](../core/MODULE_AUTH.md).
 
 ### Handshake & Frame Dispatch
 
@@ -437,7 +443,7 @@ Use ES modules (`import`/`export`) since all target browsers support them.
 
 ### R-CLI-11: Add Connection Token
 Carry the session token in the **first JSON message on the WebTransport
-control stream** — `{"type":"auth","token":"<bearer>","role":"control|view"}`
+control stream** — `{"type":"auth","token":"<bearer>","role":"control|view|player"}`
 — NOT as a URL query parameter (which leaks to proxy logs / Referer / browser
 history). See [`MODULE_AUTH.md`](../core/MODULE_AUTH.md).
 
