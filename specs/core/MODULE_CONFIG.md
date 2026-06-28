@@ -156,16 +156,17 @@ path    = "/metrics"
 [addons]
 # Directory the host scans at startup for add-on shared libraries
 # (featherdesk-addon-<id>.{so,dylib,dll}). Each is dlopen'd, its ABIVersion
-# checked, and its capability descriptor registered. Default is per-OS and MUST
-# be an admin-owned location (loading a library runs native code at startup, and
-# the host often runs elevated — a user-writable add-ons dir is a local
-# privilege-escalation vector). The loader verifies the dir is writable only by
-# the host's privilege level and refuses a world-writable dir. See CENTRAL_SPEC
-# "Security — add-on directory trust".
-#   Linux:   /usr/lib/featherdesk/addons                  (admin-owned; NOT $XDG_DATA_HOME)
-#   macOS:   /Library/Application Support/FeatherDesk/addons   (admin-owned; NOT ~/Library)
-#   Windows: %PROGRAMDATA%\FeatherDesk\addons              (admin-owned)
-dir          = ""                 # "" = per-OS default above (restart required)
+# checked, and its capability descriptor registered.
+# Portable / drop-anywhere: point this at ANY absolute or relative path. The
+# default ("") resolves to an `addons/` folder next to the running core (the host
+# executable's own directory), so the binary + its `addons/` travel together in
+# whatever folder you keep the project. A missing dir is treated as empty (warn) —
+# the host still runs, just with no backends loaded.
+# Advisory (not enforced): loading a library runs its native code in the host;
+# place only add-ons you trust here, and secure the folder yourself if you run
+# the host elevated. FeatherDesk does NOT police this directory's ownership or
+# permissions. See CENTRAL_SPEC "Add-on directory (portable, user-controlled)".
+dir          = ""                 # "" = `<core's own dir>/addons`; or any abs/rel path (restart required)
 abi_strict   = false              # true = a single ABI-mismatched library aborts startup
                                   # false = skip incompatible libraries with a warning
 

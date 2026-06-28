@@ -173,15 +173,24 @@ An add-on library MUST match the host's **OS *and* CPU arch** (an x86_64 `.dylib
 will not load into an arm64 host); add-ons are built natively per target, not
 cross-composed.
 
-**Security — add-on directory trust.** Loading a library executes native code at
-startup, and the host often runs elevated (KMS+EGL needs root/`CAP_SYS_ADMIN`;
-Interception/SendSAS needs SYSTEM). The add-ons directory and every library in it
-**MUST be owned by, and writable only by, the host's privilege level**; the
-loader verifies this on startup (as MODULE_AUTH does for the TLS key) and refuses
-(or warns) on a world-writable dir. The default dir is therefore an admin-owned
-location (`/usr/lib/featherdesk/addons`, `%PROGRAMDATA%\FeatherDesk\addons`),
-**not** a user-writable `$XDG_DATA_HOME` path, to avoid a local
-privilege-escalation vector.
+**Add-on directory (portable, user-controlled).** FeatherDesk is a **portable,
+drop-anywhere** deployment: keep the host binary and its add-ons together in any
+folder. The add-ons directory is whatever `[addons] dir` points to (any absolute
+or relative path). **The default is `addons/` resolved relative to the running
+core's own location** (the directory of the host executable), so dropping the
+binary + an `addons/` folder side-by-side works wherever the project lives, with
+no install step and no privileged system path. If the configured/derived dir
+does not exist it is treated as empty (warn) — the binary still runs, just with
+no backends loaded.
+
+> **Security note (advisory, not enforced).** Loading a library executes its
+> native code in the host process, and the host may run elevated (KMS+EGL needs
+> root/`CAP_SYS_ADMIN`; Interception/SendSAS needs SYSTEM). FeatherDesk only
+> *provides* the module-loading mechanism; **it does not police the add-ons
+> directory** — it loads whatever trusted-by-you libraries you place there. Put
+> only add-ons you trust in that folder, and, if you run the host elevated,
+> secure the folder's permissions yourself. The loader does **not** refuse a
+> world-writable directory.
 
 ### Why zero-by-default
 
