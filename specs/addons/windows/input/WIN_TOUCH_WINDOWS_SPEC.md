@@ -133,10 +133,10 @@ the abi_stable `FeatherDeskAddonOpen` entry point). Available on Windows 8+.
 /// InitializeTouchInjection itself (that has the side effect of registering a
 /// per-thread injection context, which would conflict with the pinned-thread
 /// pattern used at construction).
-pub fn probe() -> bool;
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
 /// Initialize touch injection (max contacts) and start the pinned thread.
-pub fn new(cfg: input::InjectorConfig) -> Result<Box<dyn input::TouchInjector>, input::Error>;
+fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::TouchInjector>, input::InputError>;
 ```
 
 ---

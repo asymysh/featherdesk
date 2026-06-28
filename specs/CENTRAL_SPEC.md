@@ -110,8 +110,8 @@ per-deployment rebuild of the host.
 - Every add-on uses `abi_stable` to export one **root module** (the entry point,
   conceptually `FeatherDeskAddonOpen`) exposing **(1)** the ABI version
   (`abi_stable` checks this *and* a structural layout hash automatically),
-  **(2)** a capability descriptor (kind = capture / encode / hwencode / audio /
-  input; codec(s); os+arch), and   **(3)** the add-on's `#[sabi_trait]` object
+  **(2)** a capability descriptor (`kind` — an `AddonKind` from the registry
+  below; codec(s); os+arch), and   **(3)** the add-on's `#[sabi_trait]` object
   (`Capturer`, `Encoder`, `HardwareEncoder`, `AudioCapturer`, `AudioEncoder`, or
   an injector — `KeyMouseInjector` / `TouchInjector` / `GamepadInjector`, which
   `MODULE_INPUT` groups under the umbrella name `Injector`), selected by the
@@ -191,6 +191,108 @@ no backends loaded.
 > only add-ons you trust in that folder, and, if you run the host elevated,
 > secure the folder's permissions yourself. The loader does **not** refuse a
 > world-writable directory.
+
+### Add-on ABI registry (single source of truth in `featherdesk-abi`)
+
+Every value the host and an add-on must agree on at the `dlopen` boundary — the
+**kind** discriminants, the **codec** ids, the **error** codes, the ABI version —
+is defined **once**, as constants/enums in the **`featherdesk-abi`** crate
+(`#[derive(StableAbi)]`). Neither side hardcodes a literal; both `use
+featherdesk_abi::*`. This is the data-model that makes the jigsaw fit: a number
+means the same thing on both sides, or the load is rejected. The registry spaces
+are **append-only** — a retired id/code is never reused (same discipline as the
+wire `frame_type::` and `close::` spaces).
+
+**Two layers — do not conflate them:**
+
+- **Layer 1 — raw `cdylib` export (crosses `dlopen`).** Each add-on exports
+  exactly ONE symbol: the `abi_stable` root module `FeatherDeskAddon`. It carries
+  the ABI version, the capability descriptor, a `probe()`, and a `construct()`
+  returning the kind's `#[sabi_trait]` object. **Every type here is an
+  `abi_stable` type** (`RResult`, `RVec`, `RString`, `RStr`, sabi-trait objects) —
+  **never** `std::result::Result`, `Box<dyn _>`, or a host error enum, none of
+  which can cross `dlopen` safely.
+- **Layer 2 — host-side registry adapter.** The loader wraps each loaded root
+  module in a `CaptureAddon` / `EncoderAddon` / `InputAddon` / `AudioAddon`
+  adapter (see [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md)),
+  translating Layer-1 abi types into the host's ergonomic `Result<_, HostError>`
+  + `Box<dyn HostTrait>`. Per-OS add-on impl specs describe the concrete backend;
+  the host only ever talks to it through these adapters. (Where an impl spec shows
+  a `probe()`/`new()` snippet, that is the Layer-2 adapter shape: `probe(&self) ->
+  Result<ProbeResult, PipelineError>` and a typed `new(&self, …)`.)
+
+**Root module surface (Layer 1) — every add-on exports this and nothing else:**
+
+```rust
+// crate: featherdesk-abi   (compiled into the host AND every add-on)
+pub const ABI_VERSION: u32 = 1;     // bumped on ANY breaking change to this crate
+
+#[repr(C)] #[derive(StableAbi)]
+pub struct CapabilityDescriptor {
+    pub kind: AddonKind,        // what this add-on is (table below)
+    pub id: RString,            // add-on id, e.g. "kms_egl" (== filename + config-section suffix)
+    pub codecs: RVec<CodecId>,  // codecs it can emit/consume (encoders + audio); empty otherwise
+    pub os: Os, pub arch: Arch, // must equal the host's, else the load is rejected
+    pub abi_version: u32,       // == ABI_VERSION it was built against
+}
+
+#[sabi_trait]
+pub trait FeatherDeskAddon {
+    fn descriptor(&self) -> CapabilityDescriptor;
+    fn probe(&self) -> RResult<ProbeResult, u32>;          // u32 = AbiErr code (table below)
+    fn construct(&self, cfg: RAddonConfig) -> RResult<AddonObject, u32>; // sabi object for `kind`
+}
+```
+
+**AddonKind registry** (stable ids; the descriptor's `kind` is one of these):
+
+| Kind | Id | Layer-1 sabi object | Layer-2 host trait | Host trait the backend implements |
+|------|----|---------------------|--------------------|-----------------------------------|
+| `Capture`        | `0x01` | `CapturerBox`         | `CaptureAddon` | `capture::Capturer` (+ optional `SurfaceCapturer`) |
+| `SoftwareEncode` | `0x02` | `EncoderBox`          | `EncoderAddon` (`kind()=="sw"`) | `encode::Encoder` |
+| `HardwareEncode` | `0x03` | `HwEncoderBox`        | `EncoderAddon` (`kind()=="hw"`) | `hwencode::HardwareEncoder` |
+| `AudioCapture`   | `0x04` | `AudioCapturerBox`    | `AudioAddon` (`kind()=="capture"`) | `audio::AudioCapturer` |
+| `AudioCodec`     | `0x05` | `AudioEncoderBox`     | `AudioAddon` (`kind()=="codec"`) | `audio::AudioEncoder` |
+| `InputKeyMouse`  | `0x06` | `InjectorBox`         | `InputAddon` | `input::KeyMouseInjector` |
+| `InputTouch`     | `0x07` | `InjectorBox`         | `InputAddon` | `input::TouchInjector` |
+| `InputGamepad`   | `0x08` | `InjectorBox`         | `InputAddon` | `input::GamepadInjector` |
+| `Network`        | `0x09` | `ProviderBox`         | `network::Provider` | (v2; **reserved**, see [`./v2/MODULE_NETWORK.md`](./v2/MODULE_NETWORK.md)) |
+
+`Injector` is the umbrella MODULE_INPUT uses for the three `Input*` kinds. The old
+loose phrasing "kind = capture/encode/hwencode/audio/input" is **superseded by this
+table** — `encode`→`SoftwareEncode`, `hwencode`→`HardwareEncode`, and `audio`/`input`
+split into the sub-kinds above so one descriptor unambiguously names one trait.
+
+**CodecId registry** (an add-on's codec ↔ its wire frame type):
+
+| CodecId | Id | Media | Wire `frame_type` | Notes |
+|---------|----|-------|-------------------|-------|
+| `H264`     | `0x01` | video | `VIDEO_H264` (1) | universal default |
+| `Hevc`     | `0x02` | video | `VIDEO_HEVC` (7) | HW only; HDR |
+| `Av1`      | `0x03` | video | — (none yet)     | descriptor accepted but **load-rejected** (no wire type assigned) |
+| `Opus`     | `0x10` | audio | `AUDIO_OPUS` (8) | default audio codec |
+| `PcmS16le` | `0x11` | audio | `AUDIO_PCM` (4)  | built-in fallback (no codec add-on) |
+
+A descriptor naming a `CodecId` that has no wire `frame_type` (e.g. `Av1` today) is
+skipped with a warning — matches the load-failure taxonomy above.
+
+**AbiErr registry** — the `u32` carried by every `RResult<_, u32>` across the
+boundary. The host maps each code back to the matching host enum
+(`CaptureError` / `StreamError` / `AudioError` / `InputError` / `PipelineError`),
+so the pipeline's normal `match`/`?` works:
+
+| AbiErr | Code | Maps to host variant | Meaning |
+|--------|------|----------------------|---------|
+| `Generic`            | `1` | `*::Backend` / `*::Other` | unspecified failure (detail logged, not on the wire) |
+| `FallbackToSoftware` | `2` | `StreamError::FallbackToSoftware` | HW path unusable → degrade to SW for the session |
+| `ChromaUnsupported`  | `3` | `StreamError::ChromaUnsupported`  | encoder can't emit the requested chroma |
+| `HdrUnsupported`     | `4` | `StreamError::HdrUnsupported`     | encoder can't emit 10-bit / HEVC-Main10 |
+| `RequiresRestart`    | `5` | `StreamError::RequiresRestart`    | param change needs teardown + rebuild |
+| `DeviceLost`         | `6` | `CaptureError::DeviceLost` / `AudioError::DeviceLost` | capture/audio device vanished |
+| `Unsupported`        | `7` | `*::Unsupported` | requested config not supported by this backend |
+| `NotAvailable`       | `8` | (probe negative) | prerequisite missing — returned by `probe()` |
+
+(Code `0` is reserved; success is `ROk`, never an error code.)
 
 ### Why zero-by-default
 

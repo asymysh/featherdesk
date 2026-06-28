@@ -94,11 +94,11 @@ cargo build --release -p featherdesk-addon-opus   # cdylib  featherdesk-addon-op
 
 /// probe returns true on macOS 13+ AND when the sck capture add-on is the active
 /// capturer (so an SCStream exists to attach the audio output to).
-pub fn probe() -> bool;
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
 /// new attaches the audio output to the shared SCStream and starts emitting
 /// PcmChunks. It receives a handle to the sck stream via the pipeline wiring.
-pub fn new(cfg: AudioConfig) -> Result<Box<dyn AudioCapturer>, AudioError>;
+fn new(&self, cfg: AudioConfig) -> Result<Box<dyn AudioCapturer>, AudioError>;
 ```
 
 ---

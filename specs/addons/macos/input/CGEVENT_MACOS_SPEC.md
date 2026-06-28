@@ -169,10 +169,10 @@ Accessibility once. Apple Silicon and Intel use the identical API.
 
 /// probe returns true on macOS (the API always exists); it does NOT guarantee
 /// Accessibility permission — that is checked in `new` with an actionable error.
-pub fn probe() -> bool;
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
 /// new creates the injector. Returns Err(InputError::NoAccessibility) if not trusted.
-pub fn new(cfg: InjectorConfig) -> Result<Box<dyn KeyMouseInjector>, InputError>;
+fn new(&self, cfg: InjectorConfig) -> Result<Box<dyn KeyMouseInjector>, InputError>;
 ```
 
 ---

@@ -181,11 +181,11 @@ The ViGEmBus driver is a signed kernel driver; install once, reboot once:
 
 /// `probe` returns true if ViGEmClient.dll loads AND vigem_connect succeeds
 /// (driver present and not in a broken state).
-pub fn probe() -> bool;
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
 /// Allocate the client, connect to the driver, and return the injector.
 /// No virtual controllers are plugged in until `connect(index, id)` is called.
-pub fn new(cfg: input::InjectorConfig) -> Result<Box<dyn input::GamepadInjector>, input::Error>;
+fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::GamepadInjector>, input::InputError>;
 ```
 
 `probe` is non-destructive: it calls `vigem_alloc` + `vigem_connect`, then

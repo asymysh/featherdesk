@@ -484,8 +484,12 @@ pub trait InputAddon {
 
 pub trait AudioAddon {
     fn name(&self) -> &str; // add-on ID (e.g. "pipewire", "wasapi", "sck_audio", "opus")
-    fn kind(&self) -> &str; // "capture" or "codec"
+    fn kind(&self) -> &str; // "capture" (AddonKind::AudioCapture) | "codec" (AddonKind::AudioCodec)
     fn probe(&self) -> Result<ProbeResult, PipelineError>;
+    // Exactly one constructor is valid per kind() — the other returns PipelineError.
+    // (Closes the gap where an audio add-on had no host-side instantiation path.)
+    fn new_capturer(&self, cfg: audio::AudioConfig) -> Result<Box<dyn audio::AudioCapturer>, PipelineError>; // kind=="capture"
+    fn new_codec(&self, cfg: audio::AudioConfig) -> Result<Box<dyn audio::AudioEncoder>, PipelineError>;     // kind=="codec"
 }
 
 pub struct ProbeResult {

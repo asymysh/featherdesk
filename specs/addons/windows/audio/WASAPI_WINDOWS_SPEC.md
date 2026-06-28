@@ -107,11 +107,11 @@ cargo build --release -p featherdesk-addon-wasapi   # cdylib  featherdesk-addon-
 
 /// `probe` returns true if a default render endpoint exists and IAudioClient
 /// activates with the loopback flag (side-effect-free; releases what it opens).
-pub fn probe() -> bool;
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
 /// Open the loopback client at [audio] frame_ms and start the capture thread.
 /// Honors [addon_module_wasapi] device (default = default endpoint).
-pub fn new(cfg: audio::AudioConfig) -> Result<Box<dyn audio::AudioCapturer>, audio::Error>;
+fn new(&self, cfg: audio::AudioConfig) -> Result<Box<dyn audio::AudioCapturer>, audio::AudioError>;
 ```
 
 ---

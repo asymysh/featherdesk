@@ -187,11 +187,11 @@ Apple Silicon and Intel use the identical framework API.
 
 /// probe returns true only on macOS 14 (Sonoma) and later. It does not
 /// allocate any virtual controllers; that happens in `connect`.
-pub fn probe() -> bool;
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
 /// new stores config and prepares the shim. No virtual controllers are
 /// brought online until `connect(index, id)` is called.
-pub fn new(cfg: InjectorConfig) -> Result<Box<dyn GamepadInjector>, InputError>;
+fn new(&self, cfg: InjectorConfig) -> Result<Box<dyn GamepadInjector>, InputError>;
 ```
 
 `probe` checks `@available(macOS 14, *)` via the shim. On pre-Sonoma it

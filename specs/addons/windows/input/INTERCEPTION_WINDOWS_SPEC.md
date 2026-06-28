@@ -145,8 +145,8 @@ Implementation in Rust satisfies the capability:
 
 ```rust
 /// Implements the `input::SecureAttention` capability on the interception injector.
-/// Returns `input::Error::SasUnavailable` if the policy or privilege blocks it.
-fn send_sas(&self) -> Result<(), input::Error>;
+/// Returns `input::InputError::SasUnavailable` if the policy or privilege blocks it.
+fn send_sas(&self) -> Result<(), input::InputError>;
 ```
 
 **Requirements:**
@@ -159,7 +159,7 @@ fn send_sas(&self) -> Result<(), input::Error>;
   NOT enable services and is treated as disabled by this add-on. The installer
   sets the value to **3** if it is currently 0 or 2.
 - If `SendSAS` cannot run (policy / privilege), the function returns
-  `input::Error::SasUnavailable`; the dispatcher logs a one-time warning and drops
+  `input::InputError::SasUnavailable`; the dispatcher logs a one-time warning and drops
   the chord. The constituent Ctrl/Alt keys are never injected as a fallback.
 
 The chord detection algorithm is platform-neutral and lives in the core
@@ -232,10 +232,10 @@ The Interception **driver** is a kernel driver and must be installed once
 /// `probe` returns true if interception.dll loads AND the driver is present.
 /// Side-effect-free: if a context is allocated to test connectivity, it is
 /// destroyed before returning.
-pub fn probe() -> bool;
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
 /// Create the injector. Fails if the driver is not installed.
-pub fn new(cfg: input::InjectorConfig) -> Result<Box<dyn input::KeyMouseInjector>, input::Error>;
+fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::KeyMouseInjector>, input::InputError>;
 ```
 
 `probe` checks `interception_create_context()` returns non-null (driver present),
