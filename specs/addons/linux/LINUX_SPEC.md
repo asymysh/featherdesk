@@ -73,7 +73,7 @@ want. The full set:
 ```
 encoders/
 ├── SW/
-│   ├── OPENH264_CGO_LINUX_SPEC.md     ← BSD-licensed Cisco SW (commercial use)
+│   ├── OPENH264_LINUX_SPEC.md     ← BSD-licensed Cisco SW (commercial use)
 │   └── X264_SUBPROCESS_LINUX_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 └── HW/
     ├── LIBVA_LINUX_SPEC.md            ← Intel + AMD + NVIDIA via VA-API (MIT)

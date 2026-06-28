@@ -326,13 +326,21 @@ fn apply_params(&mut self, np: stream::Params) {
 
 // degrade_to_software permanently swaps the HW path for the SW path mid-session
 // (GPU reset / driver constraint). Builds the Converter + SW encoder, clears
-// hw_encoder/surf_cap, forces a keyframe. Called only from the frame-loop thread.
+// hw_encoder/surf_cap, pushes a fresh config (the codec string changes — HW
+// HEVC/H.264 → SW H.264), then forces a keyframe. Called only from the
+// frame-loop thread.
 fn degrade_to_software(&mut self) {
     tracing::warn!(target: "pipeline", "hardware encoder unavailable; degrading to software");
     let params = self.params.clone();
     self.build_software_path(&params); // sets self.converter + self.encoder
     self.hw_encoder = None;
     self.surf_cap = None;
+    // The codec changes (HW HEVC/H.264 → SW H.264), so every ALREADY-CONNECTED
+    // client MUST reconfigure its VideoDecoder. Push a fresh {"type":"config"}
+    // BEFORE the keyframe — same discipline as apply_params. A bare
+    // force_keyframe alone would leave existing viewers feeding the new codec
+    // into a decoder still configured for the old one.
+    self.server.send_config(self.current_config());
     self.force_keyframe();
 }
 ```
@@ -638,8 +646,9 @@ on each scrape — scraping never blocks the frame loop.
 If hardware encoder becomes unavailable mid-stream (GPU reset, driver crash), fall back to software encoder without dropping the connection:
 1. Detect encode error
 2. Create software encoder with same config
-3. Force keyframe on new encoder
-4. Swap atomically
+3. Send a fresh `{"type":"config"}` — the codec string changes (HW HEVC/H.264 → SW H.264), so connected clients reconfigure their `VideoDecoder`
+4. Force keyframe on new encoder
+5. Swap atomically
 
 ### R-PIP-04: Configuration Validation
 Validate `config::Config` at `new()` time (in addition to MODULE_CONFIG validation):

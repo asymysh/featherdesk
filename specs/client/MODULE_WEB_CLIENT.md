@@ -36,6 +36,8 @@ The client is a single-page application embedded in the server binary via `rust-
 ```javascript
 async function connect() {
     const role = getRole();  // "control" | "view" | "player" — from URL hash (see Role Selection)
+    const isController = role === "control";
+    const isPlayer     = role === "player";  // gamepad-only co-op; also opens the input stream
     const sessionToken = getSessionToken(); // from URL hash or /auth POST
 
     // 1. Certificate trust. In self-signed mode the browser opens WebTransport
@@ -68,9 +70,10 @@ async function connect() {
     const authResp = await readJSON(ctlR);
     if (authResp.type !== "auth_ok") throw new Error("auth failed");
 
-    // 4. Open the INPUT stream (controller only); first byte tag 0x01.
+    // 4. Open the INPUT stream (controller for full input, or co-op player for
+    //    gamepad-only); first byte tag 0x01. Viewers never open it.
     let inp = null;
-    if (isController) {
+    if (isController || isPlayer) {
         inp = await wt.createBidirectionalStream();
         await inp.writable.getWriter().write(new Uint8Array([0x01])); // StreamInput
     }
@@ -136,7 +139,7 @@ BOOTSTRAP STREAM (incoming UNI; first byte tag 0x10, then [u32 Len][FrameHeader�
       then close. Seeds the decoder before any datagram is decoded.
 
 CONTROL STREAM (newline-delimited JSON, both directions — NO FrameHeader)
-    → S → C lines: auth_ok, auth_failed, config, hdr_unavailable, server_shutdown
+    → S → C lines: auth_ok, auth_failed, config, hdr_unavailable, resize_suppressed, server_shutdown
         config:  configure decoder (ONLY if codec/width/height changed), set cursorMode
     → C → S lines: auth, keyframe, pong, stats, resize, set_* (NOT clipboard)
 

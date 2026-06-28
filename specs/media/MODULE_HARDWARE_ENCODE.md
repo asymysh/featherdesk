@@ -195,9 +195,12 @@ That dispatch lives in [`MODULE_PIPELINE.md`](../core/MODULE_PIPELINE.md), which
 4. On `StreamError::FallbackToSoftware`, switches to a SW encoder add-on for the
    remainder of the session
 
-There is **no `HWCodec` enum** in this module. Codec selection is by the
-add-on advertising what it supports via `codec()` and the pipeline picking
-based on browser handshake preferences.
+There is **no `HWCodec` enum** in this module. The add-on advertises its active
+codec via `codec()` — H.264 (`avc1.*`) by default, HEVC (`hvc1.*`) only when HDR
+is requested (HDR needs HEVC Main10 — see [`../core/MODULE_STREAM_PARAMS.md`](../core/MODULE_STREAM_PARAMS.md)
+"HDR Pipeline"). The server forwards that exact string to the client in `config`;
+there is **no** separate browser codec-preference handshake (the only client-driven
+codec negotiation is the chroma downgrade — see MODULE_PROTOCOL).
 
 ---
 
@@ -224,8 +227,9 @@ licensing, add-on IDs, and Rust FFI specifics all live in the add-on specs.
   VA-API context creation, no MFT setup. Those all live in add-on specs.
 - **No subprocess management.** Hardware encoders are always in-process via
   Rust FFI. (Subprocess-isolated GPL is only relevant for SW x264.)
-- **No codec selection algorithm.** Each add-on advertises supported codecs
-  via `codec()`; the pipeline matches against browser handshake preferences.
+- **No codec selection algorithm.** Each add-on advertises its active codec via
+  `codec()` (H.264 by default; HEVC only for HDR — see MODULE_STREAM_PARAMS); the
+  server forwards it to the client in `config`. No browser codec-preference handshake.
 - **No keyframe interval logic.** Periodic IDRs are not configured — every
   IDR is on-demand via `force_keyframe()` (triggered by client gap detection).
 

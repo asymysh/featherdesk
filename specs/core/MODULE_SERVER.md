@@ -275,9 +275,11 @@ noted in the browser-compat matrix in `MODULE_WEB_CLIENT.md` and `PLATFORM_COMPA
     [u32 Len][FrameHeader‖IDR] of the cached access unit, then close it. If NO
     keyframe is cached yet (very first client), invoke onNewClient → pipeline
     forces a keyframe; the first encoded IDR is then sent on the bootstrap stream.
-14. INPUT stream: the stream tagged 0x01 (controller role only). Spawn an
-    input-reader task that reads [u16 RecLen]-prefixed records and forwards
-    each to input::Dispatcher::dispatch; it writes InputAck back length-prefixed.
+14. INPUT stream: the stream tagged 0x01 (controller, or a co-op `player` when
+    [gamepad] allow_coop). Spawn an input-reader task that reads [u16 RecLen]-
+    prefixed records and forwards each to input::Dispatcher::dispatch; it writes
+    InputAck back length-prefixed. For a `player`, only gamepad records
+    (0x40-0x4F) are forwarded — keyboard/mouse/touch are dropped (see Controller Model).
 15. The same streamAcceptor loop dispatches the remaining tags: 0x02 → clipboard
     handler (a [u32 Len][JSON] reader/writer; direction+role gated), 0x03 → a new
     file-transfer stream handed to filetransfer::Service. An unknown tag, or an
@@ -369,7 +371,8 @@ TTL comes from `[reconnect] cache_ttl_seconds` (default 300s). The cache is in-m
 pub struct Session {
     wt: Box<dyn transport::Session>,            // underlying WebTransport session
     control: Box<dyn transport::Stream>,        // bidi control stream (tag 0x00)
-    input: Option<Box<dyn transport::Stream>>,  // bidi input stream (tag 0x01; None for viewers)
+    input: Option<Box<dyn transport::Stream>>,  // bidi input stream (tag 0x01; controller or
+                                                // co-op player; None for viewers)
     clip: Option<Box<dyn transport::Stream>>,   // bidi clipboard stream (tag 0x02; None until opened)
     frame_out: tokio::sync::mpsc::Sender<bytes::Bytes>, // bounded queue of WHOLE access units
                                                 // (cap datagram_send_queue_frames=8; drop-OLDEST)
@@ -404,9 +407,10 @@ Three independent timers, each owning a distinct concern — do not conflate the
   (see the pipeline shutdown sequence).
 - `controlReader()`: reads newline-JSON messages on the control stream →
   dispatches keyframe/pong/stats/resize/set_* (NOT clipboard — see below).
-- `inputReader()` (controller only): reads `[u16 RecLen]`-prefixed binary
-  records on the input stream → `input::Dispatcher::dispatch`; writes `InputAck`
-  back length-prefixed on the same stream.
+- `inputReader()` (controller, or co-op `player` for gamepad records only): reads
+  `[u16 RecLen]`-prefixed binary records on the input stream →
+  `input::Dispatcher::dispatch`; writes `InputAck` back length-prefixed on the
+  same stream.
 - `clipboardReader()` (started when a 0x02 stream is accepted): reads
   `[u32 Len][JSON]` clipboard messages → `clipboard.Monitor.Set`
   (direction+role gated); writes host→client clipboard the same way.

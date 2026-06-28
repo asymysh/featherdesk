@@ -9,7 +9,7 @@ libraries you want into the add-ons directory.
 ```
 encoders/
 ├── SW/
-│   ├── OPENH264_CGO_WINDOWS_SPEC.md          ← BSD-licensed Cisco SW (commercial use)
+│   ├── OPENH264_WINDOWS_SPEC.md          ← BSD-licensed Cisco SW (commercial use)
 │   └── X264_SUBPROCESS_WINDOWS_SPEC.md       ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 └── HW/
     ├── MEDIAFOUNDATION_HW_WINDOWS_SPEC.md    ← cross-vendor HW via MFT routing (NVIDIA + AMD + Intel + Qualcomm)
@@ -60,7 +60,7 @@ royalty arrangement keep the binary fully proprietary.
 contamination is isolated to the ffmpeg subprocess (your main binary stays
 under your chosen license).
 
-See [`SW/OPENH264_CGO_WINDOWS_SPEC.md`](./SW/OPENH264_CGO_WINDOWS_SPEC.md)
+See [`SW/OPENH264_WINDOWS_SPEC.md`](./SW/OPENH264_WINDOWS_SPEC.md)
 and [`SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](./SW/X264_SUBPROCESS_WINDOWS_SPEC.md).
 
 ---

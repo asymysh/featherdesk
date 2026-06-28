@@ -168,7 +168,7 @@ Sunshine-style first-launch pairing:
    pairing window. After 3 failures, exponential backoff (1s, 2s, 4s, 8s...)
    between allowed attempts. After `max_pin_attempts` total, window closes.
    An 8-digit PIN with 10 allowed attempts = 0.00001% brute-force probability.
-5. Future connections from that client use the device token (same
+6. Future connections from that client use the device token (same
    mechanism as `mode = "token"` but per-client).
 
 ### After the pairing window

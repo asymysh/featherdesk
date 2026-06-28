@@ -19,7 +19,7 @@ machines) or no vendor HW encoder add-on installed, this is the encoder that run
 | MPEG-LA H.264 royalties | **Cisco pays** | Same on every platform |
 | Our Rust FFI binding | MIT | Same Rust source as Linux + macOS |
 
-Zero royalty concern — see `specs/addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md` for the
+Zero royalty concern — see `specs/addons/linux/encoders/SW/OPENH264_LINUX_SPEC.md` for the
 full licensing background. This applies identically on Windows.
 
 ---
@@ -75,7 +75,7 @@ distribution).
 ## Implementation
 
 Identical to the Linux spec. See
-[`linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../../../linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md)
+[`linux/encoders/SW/OPENH264_LINUX_SPEC.md`](../../../linux/encoders/SW/OPENH264_LINUX_SPEC.md)
 for:
 - FFI session setup
 - Per-frame encode loop
@@ -199,5 +199,5 @@ This add-on implements the `stream::ConfigurableEncoder` trait (see [`../../../.
 | `BitrateBps` | `ISVCEncoder::SetOption(ENCODER_OPTION_BITRATE, &b)` | yes |
 | `QP` | `ENCODER_OPTION_SVC_ENCODE_PARAM_EXT` | yes |
 | `KeyframeInterval` | `param.uiIntraPeriod` | yes |
-| `Width`, `Height` | teardown + `Initialize` (returns `stream::Error::RequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | rejected with `stream::Error::HdrUnsupported` -- pipeline switches to `mf_hw`/`nvenc`/`amf` HEVC Main10 | n/a |
+| `Width`, `Height` | teardown + `Initialize` (returns `stream::StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | rejected with `stream::StreamError::HdrUnsupported` -- pipeline switches to `mf_hw`/`nvenc`/`amf` HEVC Main10 | n/a |

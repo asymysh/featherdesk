@@ -237,9 +237,9 @@ This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`..
 
 | Param change | MF API | Hot? |
 |--------------|--------|------|
-| `FPS` | `MF_MT_FRAME_RATE` on output media type -- requires `ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM)` + reinit (returns `stream::Error::RequiresRestart`) | no |
+| `FPS` | `MF_MT_FRAME_RATE` on output media type -- requires `ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM)` + reinit (returns `stream::StreamError::RequiresRestart`) | no |
 | `BitrateBps` | `ICodecAPI::SetValue(CODECAPI_AVEncCommonMeanBitRate, b)` | yes |
 | `QP` | `ICodecAPI::SetValue(CODECAPI_AVEncCommonQuality, q)` | yes |
 | `KeyframeInterval` | `ICodecAPI::SetValue(CODECAPI_AVEncMPVGOPSize, ki)` -- behavior varies per GPU vendor MFT | vendor-dependent |
-| `Width`, `Height` | Full `IMFTransform` teardown + recreation (returns `stream::Error::RequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 MFT subtype -- requires HEVC-capable MFT + D3D11 10-bit surfaces; full reinit (returns `stream::Error::RequiresRestart`) | no |
+| `Width`, `Height` | Full `IMFTransform` teardown + recreation (returns `stream::StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 MFT subtype -- requires HEVC-capable MFT + D3D11 10-bit surfaces; full reinit (returns `stream::StreamError::RequiresRestart`) | no |

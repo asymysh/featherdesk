@@ -87,6 +87,13 @@ pub struct Params {
 }
 ```
 
+> **Field-name note.** The struct above is canonical: fields are snake_case
+> (`width`, `height`, `fps`, `bitrate_bps`, `qp`, `bit_depth`, `hdr`,
+> `color_space`, `chroma_subsampling`, `keyframe_interval`, `network_rtt_ms`,
+> `packet_loss_pct`). The translation tables and prose below use shorthand
+> (`Width`, `BitrateBps`, `HDR`, `ChromaSubsampling`, …) — read those as the same
+> fields, not different ones.
+
 ---
 
 ## Configurable Interfaces

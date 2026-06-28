@@ -192,7 +192,7 @@ Session opens
   │     ├─ Config (S → C, JSON line)
   │     ├─ JSON control C → S (keyframe, resize, set_*, pong, stats)
   │     └─ (Stays open for the life of the session)
-  ├─ Input stream       (client-opened bidi, tag 0x01; controller role only)
+  ├─ Input stream       (client-opened bidi, tag 0x01; controller or co-op player)
   │     ├─ [u16 RecLen] binary input records C → S
   │     └─ [u16 RecLen] InputAck S → C
   ├─ Bootstrap stream   (server-opened UNI, tag 0x10; once per join/resume)
@@ -225,7 +225,7 @@ bug. Instead, **every stream is self-identifying**: the opener writes a 1-byte
 // on the bootstrap uni stream. Defined in featherdesk-protocol, shared with the client.
 pub mod stream_type {
     pub const CONTROL: u8 = 0x00;   // bidi, client-opened, exactly one per session
-    pub const INPUT: u8 = 0x01;     // bidi, client-opened, controller role only
+    pub const INPUT: u8 = 0x01;     // bidi, client-opened, controller or co-op player
     pub const CLIPBOARD: u8 = 0x02; // bidi, client-opened, on demand
     pub const FILE: u8 = 0x03;      // bidi, client-opened, one per transfer
     pub const BOOTSTRAP: u8 = 0x10; // uni,  server-opened, one per join/resume
@@ -415,7 +415,7 @@ await ctlWriter.write(jsonEncode({
 const authResp = await readJSON(ctlReader);  // expects {"type":"auth_ok",...}
 // then a {"type":"config",...} line follows on the same stream.
 
-// Input stream (controller role only). First byte = StreamType tag 0x01.
+// Input stream (controller or co-op player). First byte = StreamType tag 0x01.
 const input = await wt.createBidirectionalStream();
 const inWriter = input.writable.getWriter();
 await inWriter.write(new Uint8Array([0x01]));          // StreamInput tag

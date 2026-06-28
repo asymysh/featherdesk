@@ -73,7 +73,7 @@ Two files to study before writing a single line of code. Both MIT licensed.
 
 ### 2. pion/mediadevices — `pkg/codec/vaapi/vp8.go`
 - **URL:** https://github.com/pion/mediadevices/blob/master/pkg/codec/vaapi/vp8.go
-- **572 lines** — a compact CGo example; a good template to mirror in Rust FFI
+- **572 lines** — a compact C-API example; a good template to mirror in Rust FFI
 - Template for how to structure the Rust side
 - Shows the bitfield helper pattern (VA-API structs have bitfields that bindgen can't access directly — wrap them in C accessors)
 - Shows the `new` / `next_frame()` / `Drop` architecture to follow

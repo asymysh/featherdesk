@@ -22,7 +22,7 @@
 2. H.264 hardware  — hardware accelerated, no CPU cost
                      licensing: covered by GPU/OS vendor
 
-3. H.264 software  — OpenH264 CGo, Cisco pays MPEG-LA royalties
+3. H.264 software  — OpenH264 (Rust FFI), Cisco pays MPEG-LA royalties
                      licensing: zero concern, runs on any hardware
 ```
 
@@ -47,23 +47,23 @@ whatever arrives.
 
 | Platform | Hardware | H.264 HW | HEVC HW | AV1 HW | SW Fallback |
 |----------|----------|---------|---------|--------|------------|
-| Linux | Intel (VA-API) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 CGo |
-| Linux | AMD (VA-API) | ✅ GCN+ | ✅ Polaris+ | ✅ RDNA3+ (RX 7000+) | OpenH264 CGo |
-| Linux | NVIDIA (via nvidia-vaapi-driver) | ✅ | ✅ | ❌ | OpenH264 CGo |
-| Linux | No GPU | ❌ | ❌ | ❌ | OpenH264 CGo |
-| Windows | NVIDIA (NVENC) | ✅ | ✅ | ✅ RTX40+ | OpenH264 CGo |
-| Windows | AMD (AMF) | ✅ | ✅ | ✅ RDNA3+ (RX 7000+) | OpenH264 CGo |
-| Windows | Intel (QSV) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 CGo |
-| Windows | No GPU | ❌ | ❌ | ❌ | OpenH264 CGo |
-| macOS | Apple Silicon M1 | ✅ | ✅ | ❌ encode | OpenH264 CGo* |
-| macOS | Apple Silicon M2 | ✅ | ✅ | ❌ | OpenH264 CGo* |
-| macOS | Apple Silicon M3+ | ✅ | ✅ | ❌ (decode only) | OpenH264 CGo* |
-| macOS | Intel + AMD discrete | ✅ | ✅ | ❌ | OpenH264 CGo* |
-| macOS | Intel integrated Skylake+ | ✅ | ✅ | ❌ | OpenH264 CGo* |
-| macOS | Intel integrated pre-Skylake | ✅ | ❌ | ❌ | OpenH264 CGo* |
+| Linux | Intel (VA-API) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 (Rust FFI) |
+| Linux | AMD (VA-API) | ✅ GCN+ | ✅ Polaris+ | ✅ RDNA3+ (RX 7000+) | OpenH264 (Rust FFI) |
+| Linux | NVIDIA (via nvidia-vaapi-driver) | ✅ | ✅ | ❌ | OpenH264 (Rust FFI) |
+| Linux | No GPU | ❌ | ❌ | ❌ | OpenH264 (Rust FFI) |
+| Windows | NVIDIA (NVENC) | ✅ | ✅ | ✅ RTX40+ | OpenH264 (Rust FFI) |
+| Windows | AMD (AMF) | ✅ | ✅ | ✅ RDNA3+ (RX 7000+) | OpenH264 (Rust FFI) |
+| Windows | Intel (QSV) | ✅ Sandy Bridge+ | ✅ Skylake+ | ✅ Arc+ | OpenH264 (Rust FFI) |
+| Windows | No GPU | ❌ | ❌ | ❌ | OpenH264 (Rust FFI) |
+| macOS | Apple Silicon M1 | ✅ | ✅ | ❌ encode | OpenH264 (Rust FFI)* |
+| macOS | Apple Silicon M2 | ✅ | ✅ | ❌ | OpenH264 (Rust FFI)* |
+| macOS | Apple Silicon M3+ | ✅ | ✅ | ❌ (decode only) | OpenH264 (Rust FFI)* |
+| macOS | Intel + AMD discrete | ✅ | ✅ | ❌ | OpenH264 (Rust FFI)* |
+| macOS | Intel integrated Skylake+ | ✅ | ✅ | ❌ | OpenH264 (Rust FFI)* |
+| macOS | Intel integrated pre-Skylake | ✅ | ❌ | ❌ | OpenH264 (Rust FFI)* |
 
-> *macOS software fallback: VideoToolbox SW H.264 preferred over OpenH264 CGo since
-> VideoToolbox is macOS-native. OpenH264 CGo is the universal fallback if VT fails.
+> *macOS software fallback: VideoToolbox SW H.264 preferred over OpenH264 (Rust FFI) since
+> VideoToolbox is macOS-native. OpenH264 (Rust FFI) is the universal fallback if VT fails.
 
 ---
 

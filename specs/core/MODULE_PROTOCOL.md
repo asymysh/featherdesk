@@ -239,7 +239,7 @@ SESSION (one per client)
   │     S → C: {"type":"auth_ok"|"auth_failed"|"config"|"hdr_unavailable"|...}
   │     C → S: {"type":"auth"|"keyframe"|"pong"|"stats"|"resize"|"set_*"}
   │
-  ├─ INPUT STREAM  (reliable bidi; SECOND stream the client opens, controller only)
+  ├─ INPUT STREAM  (reliable bidi; SECOND stream the client opens; controller or co-op player)
   │     Framing: [u16 RecLen LE][record], BOTH directions.
   │     C → S: input records (6-byte header + per-type payload)
   │     S → C: InputAck (13-byte message)
@@ -278,6 +278,9 @@ ordered, **both directions**. A reader frames a message by reading to the next
                       "cursorMode": "separate", "session_token": "…",
                       "session_ttl_sec": 3600, "resumed": false}
 {"type": "hdr_unavailable"}                          // HDR requested but no HEVC/10-bit encoder
+{"type": "resize_suppressed", "width": 1920, "height": 1080} // resize ignored (below hysteresis);
+                                                     // client letterboxes — see MODULE_STREAM_PARAMS
+{"type": "server_shutdown"}                          // graceful shutdown notice (then QUIC close 4503)
 
 // Client → server:
 {"type": "auth", "token": "…", "role": "control|view|player", "resume": false}

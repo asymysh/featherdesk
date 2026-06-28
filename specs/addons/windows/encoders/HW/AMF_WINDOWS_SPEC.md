@@ -218,6 +218,6 @@ This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`..
 | `BitrateBps` | `SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, b)` | yes |
 | `QP` | `SetProperty(AMF_VIDEO_ENCODER_QP_I/QP_P, qp)` | yes |
 | `KeyframeInterval` | `SetProperty(AMF_VIDEO_ENCODER_IDR_PERIOD, ki)` | yes |
-| `Width`, `Height` | `Terminate` + `ReInit` (returns `stream::Error::RequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 -- `AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires session-start negotiation (returns `stream::Error::RequiresRestart`) | no |
+| `Width`, `Height` | `Terminate` + `ReInit` (returns `stream::StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 -- `AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires session-start negotiation (returns `stream::StreamError::RequiresRestart`) | no |
 | `NetworkRTTMs`, `PacketLossPct` | Feeds `HQVBR_QVBR` quality boost | yes |

@@ -8,7 +8,7 @@ add-on shared library. Users drop in exactly the encoders they want.
 ```
 specs/addons/linux/encoders/
 ├── SW/
-│   ├── OPENH264_CGO_LINUX_SPEC.md     ← BSD-licensed Cisco SW (commercial use)
+│   ├── OPENH264_LINUX_SPEC.md     ← BSD-licensed Cisco SW (commercial use)
 │   └── X264_SUBPROCESS_LINUX_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 └── HW/
     ├── LIBVA_LINUX_SPEC.md            ← Intel + AMD + NVIDIA via VA-API (MIT)
@@ -57,7 +57,7 @@ royalty arrangement keep the binary fully proprietary.
 contamination is isolated to the ffmpeg subprocess (your main binary stays
 under your chosen license).
 
-See [`SW/OPENH264_CGO_LINUX_SPEC.md`](./SW/OPENH264_CGO_LINUX_SPEC.md)
+See [`SW/OPENH264_LINUX_SPEC.md`](./SW/OPENH264_LINUX_SPEC.md)
 and [`SW/X264_SUBPROCESS_LINUX_SPEC.md`](./SW/X264_SUBPROCESS_LINUX_SPEC.md).
 
 ---

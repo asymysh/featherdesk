@@ -357,7 +357,7 @@ allow_coop      = false        # opt-in: let "role":"player" clients each claim 
 # ─────────────────────────────────────────────────────────────────────────
 
 [addon_module_openh264]
-# Cisco OpenH264 — BSD licensed, CGo in-process. For commercial deployments.
+# Cisco OpenH264 — BSD licensed, Rust FFI in-process. For commercial deployments.
 threads      = 0                  # 0 = auto (min(cpu_count, 4) — saturates at 4)
                                   # Range: 1–16. Above 4 has diminishing returns.
 slice_mode   = "fixed"            # "single" (1 slice) | "fixed" (N slices = N threads)
@@ -488,7 +488,9 @@ hi_res_scroll = true   # use REL_WHEEL_HI_RES if the kernel supports it
 
 [input.macos]
 # macOS kb/mouse is the in-core `enigo` default (CGEventPost) — NOT a separate
-# add-on, so this is a core [input] subsection, not [addon_module_*].
+# add-on, so this is a core [input] subsection, not [addon_module_*]. It maps to
+# an OPTIONAL `input.macos` sub-table on InputSection (present in the schema on
+# every OS so deny_unknown_fields accepts it; read only on macOS).
 # Requires Accessibility permission.
 prompt_accessibility = true   # auto-open the Accessibility pane if not trusted
 
@@ -641,7 +643,8 @@ pub struct Config {
     pub stream: StreamSection,        // dynamic params: width/height/fps/bitrate/qp/hdr
     pub auth: AuthSection,            // mode, password_hash, token, pin_*
     pub reconnect: ReconnectSection,  // cache_ttl_seconds, require_same_auth
-    pub input: InputSection,          // enabled, relative_mouse
+    pub input: InputSection,          // enabled, relative_mouse, macos: Option<MacosInput>
+                                      // (the [input.macos] sub-table; optional, read on macOS)
     pub clipboard: ClipboardSection,  // enabled, direction, max_bytes, formats
     pub filetransfer: FileTransferSection, // enabled, dirs, caps
     pub gamepad: GamepadSection,      // enabled, max_controllers, allow_rumble

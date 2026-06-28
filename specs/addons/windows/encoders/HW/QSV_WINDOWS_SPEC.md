@@ -207,5 +207,5 @@ This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`..
 | `BitrateBps` | `mfxVideoParam.mfx.TargetKbps` + `MFXVideoENCODE_Reset` | yes |
 | `QP` | `mfxVideoParam.mfx.QPI/QPP/QPB` (CQP) or `mfxExtCodingOption.ICQQuality` (ICQ) + `MFXVideoENCODE_Reset` | yes |
 | `KeyframeInterval` | `mfxVideoParam.mfx.GopPicSize` + `MFXVideoENCODE_Reset` | yes |
-| `Width`, `Height` | `MFXVideoENCODE_Close` + re-alloc surfaces + `MFXVideoENCODE_Init` (returns `stream::Error::RequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 profile via `MFX_PROFILE_HEVC_MAIN10`; requires full session recreation (returns `stream::Error::RequiresRestart`) | no |
+| `Width`, `Height` | `MFXVideoENCODE_Close` + re-alloc surfaces + `MFXVideoENCODE_Init` (returns `stream::StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 profile via `MFX_PROFILE_HEVC_MAIN10`; requires full session recreation (returns `stream::StreamError::RequiresRestart`) | no |

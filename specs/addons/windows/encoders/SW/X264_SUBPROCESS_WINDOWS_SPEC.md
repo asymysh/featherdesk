@@ -223,7 +223,7 @@ This add-on implements the `stream::ConfigurableEncoder` trait (see [`../../../.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|
-| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | `update_stream_params` returns `stream::Error::RequiresRestart` -- pipeline tears down + respawns ffmpeg with new `-s WxH -r FPS -crf QP -g KI` (CRF mode) or `-s WxH -r FPS -b:v B -g KI` (bitrate mode). `-crf` and `-b:v` are mutually exclusive. | no |
-| `BitDepth=10` / `HDR=true` | rejected with `stream::Error::HdrUnsupported` -- H.264 HDR profile not in WebCodecs spec | n/a |
+| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | `update_stream_params` returns `stream::StreamError::RequiresRestart` -- pipeline tears down + respawns ffmpeg with new `-s WxH -r FPS -crf QP -g KI` (CRF mode) or `-s WxH -r FPS -b:v B -g KI` (bitrate mode). `-crf` and `-b:v` are mutually exclusive. | no |
+| `BitDepth=10` / `HDR=true` | rejected with `stream::StreamError::HdrUnsupported` -- H.264 HDR profile not in WebCodecs spec | n/a |
 
 **Restart semantics:** the bridge forces an IDR on the first frame from the new ffmpeg instance so the client decoder picks up the new SPS/PPS cleanly.

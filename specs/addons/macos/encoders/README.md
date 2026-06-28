@@ -8,7 +8,7 @@ add-on shared library. Users drop in exactly the encoders they want.
 ```
 specs/addons/macos/encoders/
 ├── SW/
-│   ├── OPENH264_CGO_MACOS_SPEC.md     ← BSD-licensed Cisco SW (commercial, cross-platform)
+│   ├── OPENH264_MACOS_SPEC.md     ← BSD-licensed Cisco SW (commercial, cross-platform)
 │   ├── X264_SUBPROCESS_MACOS_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 │   └── VIDEOTOOLBOX_SW_MACOS_SPEC.md  ← Apple's tuned SW (macOS-native, best on Apple Silicon)
 └── HW/
@@ -65,7 +65,7 @@ Three options for software H.264 encoding:
 
 See:
 - [`SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](./SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) — macOS-native
-- [`SW/OPENH264_CGO_MACOS_SPEC.md`](./SW/OPENH264_CGO_MACOS_SPEC.md) — BSD cross-platform
+- [`SW/OPENH264_MACOS_SPEC.md`](./SW/OPENH264_MACOS_SPEC.md) — BSD cross-platform
 - [`SW/X264_SUBPROCESS_MACOS_SPEC.md`](./SW/X264_SUBPROCESS_MACOS_SPEC.md) — GPL-isolated, 2× faster
 
 ---

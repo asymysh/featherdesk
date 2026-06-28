@@ -199,7 +199,7 @@ specs.
 
 | Add-on | Add-on ID | License | Linux | macOS | Windows |
 |--------|-----------|---------|-------|-------|---------|
-| OpenH264 (FFI) | `openh264` | BSD-2 (Cisco) | [`specs/addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) |
+| OpenH264 (FFI) | `openh264` | BSD-2 (Cisco) | [`specs/addons/linux/encoders/SW/OPENH264_LINUX_SPEC.md`](../addons/linux/encoders/SW/OPENH264_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/OPENH264_MACOS_SPEC.md`](../addons/macos/encoders/SW/OPENH264_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/OPENH264_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/OPENH264_WINDOWS_SPEC.md) |
 | x264 subprocess | `x264` | GPL-2 (isolated) | [`specs/addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](../addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](../addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) |
 | VideoToolbox SW | `vt_sw` | Apple system | — | [`specs/addons/macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../addons/macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | — |
 

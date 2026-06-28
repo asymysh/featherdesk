@@ -225,9 +225,16 @@ producing `featherdesk-addon-kms_egl.so`). See each platform's
 When multiple add-ons are loaded, the pipeline picks at runtime based on:
 
 1. `[capture] force_addon` / `[encode] force_addon` in TOML (forces a specific add-on by ID)
-2. Probe order (HEVC HW > H.264 HW > x264 SW > VT SW > OpenH264 SW)
+2. Probe order — the per-OS vendor order defined authoritatively in
+   [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md) (HW: nvenc → amf →
+   libva → qsv → mf_hw → vt_hw; SW: x264 → vt_sw → openh264)
 3. Hardware presence (NVENC only fires if NVIDIA GPU present, etc.)
 4. `StreamError::FallbackToSoftware` from HW encoder triggers SW fallback for the session
+5. Codec — the chosen encoder advertises H.264 (`avc1.*`) by default (universal,
+   widest browser support); HEVC (`hvc1.*`) is emitted only when HDR is requested
+   (HDR needs HEVC Main10 — see [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md)
+   "HDR Pipeline"). The SW path is always H.264. There is no browser codec-preference
+   handshake; the server just advertises the active codec in `config`.
 
 Per-add-on tuning lives in `[addon_module_<id>]` TOML sections, not
 in code. See [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md).
@@ -379,7 +386,7 @@ for the full rationale.
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](./addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
+| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`linux/encoders/SW/OPENH264_LINUX_SPEC.md`](./addons/linux/encoders/SW/OPENH264_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
 | x264 subprocess | SW | GPL-2 (isolated) | [`linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](./addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
 | libva direct | HW | MIT | [`linux/encoders/HW/LIBVA_LINUX_SPEC.md`](./addons/linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
 | NVENC direct | HW | NVIDIA SDK | [`linux/encoders/HW/NVENC_LINUX_SPEC.md`](./addons/linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
@@ -410,7 +417,7 @@ for the full rationale.
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](./addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
+| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`macos/encoders/SW/OPENH264_MACOS_SPEC.md`](./addons/macos/encoders/SW/OPENH264_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
 | x264 subprocess | SW | GPL-2 (isolated) | [`macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](./addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | Any CPU; needs ffmpeg | 📋 Specced |
 | VideoToolbox SW | SW | Apple system | [`macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](./addons/macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
 | VideoToolbox HW | HW | Apple system | [`macos/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](./addons/macos/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC). No AV1 HW encode on any current Apple Silicon. | 📋 Specced |
@@ -448,7 +455,7 @@ for the full rationale, recommended combinations, and headless install flow.
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | ✅ Benchmarked |
+| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`windows/encoders/SW/OPENH264_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/OPENH264_WINDOWS_SPEC.md) | Any CPU | ✅ Benchmarked |
 | x264 subprocess | SW | GPL-2 (isolated) | [`windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
 | MediaFoundation HW | HW | Microsoft system | [`windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | ✅ Benchmarked |
 | NVENC | HW | NVIDIA SDK | [`windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | ✅ Benchmarked |
@@ -782,7 +789,7 @@ pub trait HardwareEncoder {
 **Contract Rules:**
 - `FbInfo` ownership transfers capture add-on → HW encoder add-on by value. It is released **exactly once on every path** by `Drop` — the capturer and pipeline never release it (single-owner rule, M-1, now compiler-guaranteed).
 - If `encode_surface` returns `StreamError::FallbackToSoftware`, the pipeline degrades permanently to the software path for the rest of the session.
-- Codec advertisement: the HW encoder advertises its codec via `codec()`; the pipeline matches against browser handshake preferences.
+- Codec advertisement: the HW encoder advertises its active codec via `codec()` (H.264 by default; HEVC only when HDR is requested — see MODULE_STREAM_PARAMS); the server forwards that exact WebCodecs string to the client in the `config` message. There is no separate browser codec-preference handshake — the only client-driven codec negotiation is the chroma downgrade.
 
 ---
 

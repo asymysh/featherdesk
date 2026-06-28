@@ -95,7 +95,7 @@ shared library. The full set:
 ```
 encoders/
 ├── SW/
-│   ├── OPENH264_CGO_MACOS_SPEC.md     ← BSD-licensed Cisco SW (commercial use, cross-platform)
+│   ├── OPENH264_MACOS_SPEC.md     ← BSD-licensed Cisco SW (commercial use, cross-platform)
 │   ├── X264_SUBPROCESS_MACOS_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
 │   └── VIDEOTOOLBOX_SW_MACOS_SPEC.md  ← Apple's tuned SW H.264/HEVC (macOS-native)
 └── HW/
