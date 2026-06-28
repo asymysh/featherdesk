@@ -18,44 +18,44 @@ read together.
 
 ## Public Interface
 
-```go
-package protocol
+```rust
+// crate: featherdesk-protocol
 
-const HeaderSize = 22
+pub const HEADER_SIZE: usize = 22;
 
 // FrameHeader Type constants. The 22-byte FrameHeader is carried only by the
 // MEDIA datagram types (video + audio) and on the bootstrap stream. The control
 // datagram types (Ping/CursorUpdate/GamepadRumble) and the control/input/
 // clipboard streams do NOT use FrameHeader (see "Channel Model" + "media vs
 // control" below).
-const (
-    FrameTypeVideoH264    uint8 = 1   // datagram media (S→C); fragmented + bootstrap-stream join IDR
-    FrameTypePing         uint8 = 2   // datagram control (S→C); 8-byte nonce, no FrameHeader
+pub mod frame_type {
+    pub const VIDEO_H264: u8 = 1;     // datagram media (S→C); fragmented + bootstrap-stream join IDR
+    pub const PING: u8 = 2;           // datagram control (S→C); 8-byte nonce, no FrameHeader
     // 3 reserved (client Pong routed on the control stream as JSON)
-    FrameTypeAudioPCM     uint8 = 4   // datagram media (S→C); fragmented; raw S16LE (PCM fallback codec)
+    pub const AUDIO_PCM: u8 = 4;      // datagram media (S→C); fragmented; raw S16LE (PCM fallback codec)
     // 5 reserved (formerly VideoVP8 — VP8 rejected; never reuse without protocol version bump)
-    // 6 retired (was FrameTypeConfig; Config is now a control-stream JSON message)
-    FrameTypeVideoHEVC    uint8 = 7   // datagram media (S→C); fragmented + bootstrap-stream join IDR
-    FrameTypeAudioOpus    uint8 = 8   // datagram media (S→C); single-datagram Opus packet (default audio codec)
-    FrameTypeCursorUpdate uint8 = 11  // datagram control (S→C); latest-wins, no FrameHeader
-    // 12 retired (was FrameTypeClipboard; clipboard is now a clipboard-stream message)
-    FrameTypeInputAck     uint8 = 14  // input stream (S→C), length-prefixed
-    FrameTypeGamepadRumble uint8 = 15 // datagram control (S→C); MODULE_GAMEPAD, no FrameHeader
+    // 6 retired (was Config; Config is now a control-stream JSON message)
+    pub const VIDEO_HEVC: u8 = 7;     // datagram media (S→C); fragmented + bootstrap-stream join IDR
+    pub const AUDIO_OPUS: u8 = 8;     // datagram media (S→C); single-datagram Opus packet (default audio codec)
+    pub const CURSOR_UPDATE: u8 = 11; // datagram control (S→C); latest-wins, no FrameHeader
+    // 12 retired (was Clipboard; clipboard is now a clipboard-stream message)
+    pub const INPUT_ACK: u8 = 14;     // input stream (S→C), length-prefixed
+    pub const GAMEPAD_RUMBLE: u8 = 15;// datagram control (S→C); MODULE_GAMEPAD, no FrameHeader
     // 0x50 reserved for future webcam redirection (deferred from v1).
     // Do NOT reuse 6, 12, or 0x50 without a protocol version bump.
-)
+}
 
-// Application-layer close codes (carried by transport.Session.CloseWithError
-// and stream cancellation). pkg/protocol is the SOLE owner of these; the
-// transport module references protocol.Close* rather than redefining them.
-const (
-    CloseNormal             uint32 = 0
-    CloseProtocolError      uint32 = 4400 // malformed message
-    CloseAuthFailed         uint32 = 4401 // bad / expired session token (also: resume token expired)
-    CloseAuthTimeout        uint32 = 4408 // client didn't open + auth the control stream within 5 s
-    CloseControllerTakeover uint32 = 4410 // controller slot seized
-    CloseServerShutdown     uint32 = 4503
-)
+// Application-layer close codes (carried by transport `Session::close_with_error`
+// and stream cancellation). featherdesk-protocol is the SOLE owner of these; the
+// transport crate references these rather than redefining them.
+pub mod close {
+    pub const NORMAL: u32 = 0;
+    pub const PROTOCOL_ERROR: u32 = 4400;      // malformed message
+    pub const AUTH_FAILED: u32 = 4401;         // bad / expired session token (also: resume token expired)
+    pub const AUTH_TIMEOUT: u32 = 4408;        // client didn't open + auth the control stream within 5 s
+    pub const CONTROLLER_TAKEOVER: u32 = 4410; // controller slot seized
+    pub const SERVER_SHUTDOWN: u32 = 4503;
+}
 // NOTE: There is no binary KeyframeReq, Resize, or Config type.
 //   - Keyframe requests arrive as JSON on the control stream: {"type":"keyframe"}
 //   - Resolution changes are pushed as a fresh control-stream {"type":"config"}.
@@ -63,25 +63,27 @@ const (
 
 // FrameHeader is the 22-byte header prepended to every MEDIA access unit
 // (inside datagram fragment 0, and inside each bootstrap-stream message).
-type FrameHeader struct {
-    Version     uint8  // Protocol version (currently 1)
-    Type        uint8  // Frame type identifier
-    Sequence    uint32 // Monotonic frame counter (per-type: video and audio independent)
-    Timestamp   uint64 // CLOCK_MONOTONIC nanoseconds
-    Width       uint16 // Video frame width. UNUSED for audio (=0) — audio rate/
-                       // channels/codec are advertised in the `config` message.
-    Height      uint16 // Video frame height. UNUSED for audio (=0).
-    PayloadSize uint32 // Size of payload following this header
+#[repr(C)]
+pub struct FrameHeader {
+    pub version: u8,       // Protocol version (currently 1)
+    pub kind: u8,          // Frame type identifier (a `frame_type::*` value)
+    pub sequence: u32,     // Monotonic frame counter (per-type: video and audio independent)
+    pub timestamp_ns: u64, // CLOCK_MONOTONIC nanoseconds
+    pub width: u16,        // Video frame width. UNUSED for audio (=0) — audio rate/
+                           // channels/codec are advertised in the `config` message.
+    pub height: u16,       // Video frame height. UNUSED for audio (=0).
+    pub payload_size: u32, // Size of payload following this header
 }
 
-// MarshalHeader writes h into buf (must be >= HeaderSize bytes).
-// Zero allocation. Returns error if buf is too short.
-func MarshalHeader(h FrameHeader, buf []byte) error
+impl FrameHeader {
+    /// Serialize into `buf` (must be >= HEADER_SIZE). Zero allocation.
+    /// Err if `buf` is too short.
+    pub fn write_to(&self, buf: &mut [u8]) -> Result<(), ProtocolError> { /* … */ }
 
-// UnmarshalHeader reads a FrameHeader from buf.
-// Returns errShortBuffer if len(buf) < HeaderSize.
-// Returns errUnsupportedVersion if Version != 1.
-func UnmarshalHeader(buf []byte) (FrameHeader, error)
+    /// Parse a FrameHeader from `buf`. Err(ShortBuffer) if len < HEADER_SIZE;
+    /// Err(UnsupportedVersion) if version != 1.
+    pub fn read_from(buf: &[u8]) -> Result<FrameHeader, ProtocolError> { /* … */ }
+}
 ```
 
 ---
@@ -437,38 +439,42 @@ JSON message on the control stream, BEFORE any video/audio/IDR media flows:
 
 ### Shared Payload Types (Go)
 
-```go
-// ConfigPayload is a control-stream JSON message (newline-delimited). Like all
-// control messages it carries a "type" discriminator; here Type == "config".
-type ConfigPayload struct {
-    Type             string `json:"type"`             // always "config"
-    Version          int    `json:"version"`
-    Codec            string `json:"codec"`            // full WebCodecs string
-    Width            int    `json:"width"`
-    Height           int    `json:"height"`
-    FPS              int    `json:"fps"`
-    HDR              bool   `json:"hdr"`
-    ColorSpace       string `json:"color_space"`      // "bt709" | "bt2020"
-    Chroma           string `json:"chroma"`           // "420" | "422" | "444" (negotiated)
-    Audio            bool   `json:"audio"`
-    AudioCodec       string `json:"audioCodec"`       // "opus" | "pcm/s16le"
-    AudioSampleRate  int    `json:"audioSampleRate"`
-    AudioChannels    int    `json:"audioChannels"`    // 1..8 (stereo / 5.1 / 7.1)
-    AudioLayout      string `json:"audioLayout"`      // "stereo" | "5.1" | "7.1"
-    CursorMode       string `json:"cursorMode"`       // "separate" | "embedded"
-    SessionToken     string `json:"session_token"`    // for reconnection
-    SessionTTLSec    int    `json:"session_ttl_sec"`
-    Resumed          bool   `json:"resumed"`          // true on successful resume
+```rust
+/// ConfigPayload is a control-stream JSON message (newline-delimited). Like all
+/// control messages it carries a "type" discriminator; here type == "config".
+/// Wire JSON keys are preserved exactly (the browser client parses them).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ConfigPayload {
+    #[serde(rename = "type")] pub kind: String,                 // always "config"
+    pub version: u32,
+    pub codec: String,                                          // full WebCodecs string
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub hdr: bool,
+    pub color_space: String,                                    // "bt709" | "bt2020"
+    pub chroma: String,                                         // "420" | "422" | "444" (negotiated)
+    pub audio: bool,
+    #[serde(rename = "audioCodec")] pub audio_codec: String,    // "opus" | "pcm/s16le"
+    #[serde(rename = "audioSampleRate")] pub audio_sample_rate: u32,
+    #[serde(rename = "audioChannels")] pub audio_channels: u8,  // 1..8 (stereo / 5.1 / 7.1)
+    #[serde(rename = "audioLayout")] pub audio_layout: String,  // "stereo" | "5.1" | "7.1"
+    #[serde(rename = "cursorMode")] pub cursor_mode: String,    // "separate" | "embedded"
+    pub session_token: String,                                  // for reconnection
+    pub session_ttl_sec: u32,
+    pub resumed: bool,                                          // true on successful resume
 }
 
-// CursorUpdate is the payload of a FrameTypeCursorUpdate (type 11) message.
-// Binary little-endian: [x:u16][y:u16][visible:u8][imageChanged:u8][w:u16][h:u16][rgba...]
-type CursorUpdate struct {
-    X, Y          uint16
-    Visible       bool
-    ImageChanged  bool
-    W, H          uint16
-    RGBA          []byte // present only when ImageChanged
+/// CursorUpdate is the payload of a CURSOR_UPDATE (type 11) message.
+/// Binary little-endian: [x:u16][y:u16][visible:u8][image_changed:u8][w:u16][h:u16][rgba...]
+pub struct CursorUpdate {
+    pub x: u16,
+    pub y: u16,
+    pub visible: bool,
+    pub image_changed: bool,
+    pub w: u16,
+    pub h: u16,
+    pub rgba: Vec<u8>, // present only when image_changed
 }
 ```
 
