@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This branch is the **architectural refactor** of FeatherDesk. The working codebase on `feature-libav-vp8s8` has all five original tracks implemented and running, but accumulated several structural problems during iterative development. This branch contains the full modular redesign spec before any refactor code is written.
+This branch is the **architectural redesign** of FeatherDesk, targeting a **Rust** rewrite. The working Go codebase on `feature-libav-vp8s8` has all five original tracks implemented and running, but accumulated several structural problems during iterative development. This branch contains the full modular redesign spec.
 
-**No production code changes are in this branch yet.** It is a spec-first branch — implementation follows once the specs are reviewed and finalized.
+**This is a SPEC-ONLY branch — it contains no source code or build artifacts.** Only `specs/`, `PROJECT_ARTIFACTS/`, `README.md`, `BRANCH.md`, and `.gitignore` live here. The Go implementation (and its POC/benchmark tooling and vendored binaries) was removed from this branch and remains preserved on `feature-libav-vp8s8`; the specs cite it as the working reference. Implementation of the Rust rewrite happens in its own crates once the specs are finalized.
 
 ---
 

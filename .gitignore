@@ -1,20 +1,25 @@
-featherdesk
-coverage.out
-*.test
-*.prof
-*.pprof
+# This is the spec-first branch: it must contain ONLY specs + project artifacts.
+# Source/implementation lives on feature-libav-vp8s8 (Go reference); the Rust
+# rewrite will live in its own crates. No code or build output belongs here.
+
+# Rust build output
+/target/
+**/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Compiled artifacts / native blobs — NEVER commit binaries
+*.exe
+*.dll
+*.dylib
+*.so
+*.a
+*.lib
+*.o
+*.bz2
+
+# Scratch / OS / editor
 /tmp/
-
-bench.exe
-
-# Benchmark artifacts
-amf_bench.exe
-capture_dxgi.exe
-capture_nvfbc.exe
-dxgi_quick.exe
-headless_bench.exe
-pipeline_bench.exe
-featherdesk_bench.exe
 *.db
-bench_dxgi_*.csv
-openh264-2.4.1-win64.dll
+.DS_Store
