@@ -87,7 +87,7 @@ Two files to study before writing a single line of code. Both MIT licensed.
 ```
 
 The `libva` add-on is built as a standalone cdylib from the
-`internal/encode/libva/` crate; its `libva` FFI dependencies are linked into
+`addons/encode/libva/` crate; its `libva` FFI dependencies are linked into
 that library, never into the host. If the library isn't dropped into the
 add-ons directory, the host simply never loads it.
 
@@ -125,7 +125,7 @@ Understanding this prevents wasted time on false-start implementations.
 **Goal:** detect VA-API hardware at startup, no ffmpeg involved.
 
 ```rust
-// internal/encode/libva/probe.rs
+// addons/encode/libva/probe.rs
 pub struct VaapiCapabilities {
     pub available:     bool,
     pub render_node:   String,  // e.g. /dev/dri/renderD128
@@ -319,7 +319,7 @@ VAStatus va_import_dmabuf(VADisplay dpy, int dmabufFD,
 ## File Structure
 
 ```
-internal/encode/libva/
+addons/encode/libva/
 ├── probe.rs          // Phase 1: VaapiCapabilities, probe_vaapi()
 ├── encoder.rs        // Phases 2+4: VaapiEncoder struct, VaapiEncoder::new(), encode(), Drop
 ├── surface.rs         // Phase 5: encode_surface() zero-copy path

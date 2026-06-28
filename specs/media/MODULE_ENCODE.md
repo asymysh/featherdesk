@@ -6,9 +6,9 @@ The Encode module defines the **abstract software encoder interface contract**
 that every SW encoder add-on implements. It owns no encoder implementation
 itself — concrete encoders live in their respective add-on specs:
 
-- `internal/encode/openh264/` — Cisco OpenH264 via Rust FFI (add-on ID `openh264`, BSD)
-- `internal/encode/x264/` — x264 via ffmpeg subprocess (add-on ID `x264`, GPL-isolated)
-- `internal/encode/vt/` — VideoToolbox SW (add-on ID `vt_sw`, macOS-only)
+- `addons/encode/openh264/` — Cisco OpenH264 via Rust FFI (add-on ID `openh264`, BSD)
+- `addons/encode/x264/` — x264 via ffmpeg subprocess (add-on ID `x264`, GPL-isolated)
+- `addons/encode/vt/` — VideoToolbox SW (add-on ID `vt_sw`, macOS-only)
 
 This separation keeps the module spec stable while allowing add-on
 implementations to evolve independently.
@@ -99,7 +99,7 @@ pub trait ConfigurableEncoder: Encoder {
 // Required by the software path because every SW encoder accepts I420.
 // HW encoders bypass this entirely (they consume GPU surface handles).
 //
-// Not a trait — single implementation in internal/encode/convert/.
+// Not a trait — a single implementation in the featherdesk-encode crate (convert module).
 // Selects the libyuv conversion function based on input pixel format:
 //   PixelFormat::Bgra (macOS/Windows) → libyuv ARGBToI420
 //   PixelFormat::Rgba (Linux GL)      → libyuv ABGRToI420
@@ -165,8 +165,8 @@ RGBA &[u8] → libyuv ABGRToI420() → Y/U/V planes   (Linux GL)
   NOT memory byte order. So BGRA-in-memory = libyuv "ARGB", RGBA-in-memory
   = libyuv "ABGR". The Converter selects based on `Frame.pixel_fmt`.
 
-The Converter is **shared across all SW encoder add-ons** — it lives in
-`internal/encode/convert/` and is built unconditionally when any SW encoder
+The Converter is **shared across all SW encoder add-ons** — it lives in the
+`featherdesk-encode` crate (convert module) and is compiled whenever a SW encoder
 add-on is loaded.
 
 ### Chroma subsampling (4:2:0 / 4:2:2 / 4:4:4)
@@ -230,11 +230,11 @@ Encode module deliberately excludes:
 
 | Add-on | Status |
 |--------|--------|
-| OpenH264 (FFI) | ✅ Working in current code; refactor moves to `internal/encode/openh264/` under add-on ID `openh264` |
+| OpenH264 (FFI) | ✅ Working in current code; refactor moves to `addons/encode/openh264/` under add-on ID `openh264` |
 | x264 subprocess | ✅ Benchmarked via ffmpeg pipe (3.3ms @ 1080p on Ryzen 9 5900X); implementation pending |
 | VideoToolbox SW | 📋 Specced; macOS native benchmarks pending |
 
-The old `internal/encode/{ffmpeg,vp8,vaapi}.rs` files (FFmpeg subprocess
+The old Go `internal/encode/{ffmpeg,vp8,vaapi}.go` files (FFmpeg subprocess
 encoder, libvpx VP8 via libavcodec, VA-API probe stub) are **rejected** and
 will be removed as part of the implementation refactor. They served the
 pre-pluggable architecture and are superseded by:

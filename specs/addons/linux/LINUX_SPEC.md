@@ -150,7 +150,7 @@ Same Rust crate as Windows and macOS. No subprocess. No ffmpeg. BSD-2 licensed.
 | 1920×1080 | ~125 fps | ~8ms | ~25% |
 | 2560×1440 | ~65 fps | ~15ms | ~25% |
 
-**File:** `internal/encode/openh264.rs`
+**Crate:** `addons/encode/openh264/` (cdylib → `featherdesk-addon-openh264`)
 
 ### Hardware Path — libva (Rust FFI)
 

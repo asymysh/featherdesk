@@ -6,10 +6,10 @@ The Capture module defines the **abstract capturer interface contract** that
 every capture add-on implements. It owns no capturer implementation itself —
 concrete capturers live in their respective add-on specs:
 
-- `internal/capture/kms/` — Linux KMS+EGL DMA-BUF (add-on ID `kms_egl`)
-- `internal/capture/nvfbc/` — Linux NvFBC NVIDIA proprietary (add-on ID `nvfbc`)
-- `internal/capture/sck/` — macOS ScreenCaptureKit (add-on ID `sck`)
-- `internal/capture/dxgi/` — Windows DXGI Desktop Duplication (add-on ID `dxgi_dd`)
+- `addons/capture/kms_egl/` — Linux KMS+EGL DMA-BUF (add-on ID `kms_egl`)
+- `addons/capture/nvfbc/` — Linux NvFBC NVIDIA proprietary (add-on ID `nvfbc`)
+- `addons/capture/sck/` — macOS ScreenCaptureKit (add-on ID `sck`)
+- `addons/capture/dxgi_dd/` — Windows DXGI Desktop Duplication (add-on ID `dxgi_dd`)
 
 This separation keeps the module spec stable while letting per-OS capture
 implementations evolve independently.
@@ -230,11 +230,12 @@ input-coordinate range** without the capturer and encoder both trying to scale.
 
 | Add-on | Status |
 |--------|--------|
-| KMS+EGL DMA-BUF | ✅ Working (the original Linux capture path; refactor moves into `internal/capture/kms/`) |
+| KMS+EGL DMA-BUF | ✅ Working (the original Linux capture path; refactor moves into `addons/capture/kms_egl/`) |
 | NvFBC | 📋 Specced; Rust FFI bindings pending |
 | ScreenCaptureKit | ✅ Working (Hackintosh benchmark: 91 FPS @ 1080p, P50 10.5ms) |
 | DXGI Desktop Duplication | ✅ Working — **VALIDATED on this hardware: ~7 ms p50 acquire, ~2.4× better than GDI BitBlt** (also benchmarked sub-microsecond raw copy overhead on GTX 1080 Ti + RX 6800 XT). The virtual-display `DXGI_ERROR_UNSUPPORTED` case is handled by the IddCx virtual-display fallback (capture stays add-on-based). |
 
-The old `internal/capture/x11grab.rs` (subprocess-based X11 capture) and
-`internal/capture/screencast.py` (Mutter/PipeWire ScreenCast helper) are
-**rejected** and will be removed as part of the implementation refactor.
+The old Go `internal/capture/x11grab.go` (subprocess-based X11 capture) and
+`internal/capture/screencast.py` (Mutter/PipeWire ScreenCast helper) from the
+working `feature-libav-vp8s8` branch are **rejected** — they are not ported to
+the Rust rewrite.

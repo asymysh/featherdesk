@@ -75,5 +75,5 @@ The first available capture wins. Drop in only what you need.
 1. Write the spec at `specs/addons/linux/capture/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib from `internal/capture/{name}/`
+4. Build as a cdylib from `addons/capture/{name}/`
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`

@@ -478,7 +478,7 @@ pub struct CursorUpdate {
 }
 ```
 
-These live in `pkg/protocol` alongside `FrameHeader`, shared by server and (conceptually) any native client.
+These live in `featherdesk-protocol` alongside `FrameHeader`, shared by server and (conceptually) any native client.
 
 ### R-PRO-02: Add Bounds Check to MarshalHeader
 `MarshalHeader` should return an error if `buf` is shorter than `HeaderSize`, rather than panicking. This is a low-cost check (single comparison) that prevents crashes from propagating.
@@ -503,8 +503,8 @@ message (`{"type":"config",...}`). There are no binary magic bytes — the contr
 stream is newline-delimited JSON from its first byte, and the `"type"` field is
 the discriminator for every message on it.
 
-### R-PRO-08: Extract to `pkg/protocol`
-This module is already pure (no dependencies). Move it directly to `pkg/protocol/` as the canonical wire format shared between server and any future native client implementations.
+### R-PRO-08: Lives in the `featherdesk-protocol` crate
+This crate is pure (no dependencies). It is the canonical, transport-agnostic wire format (bytes in / bytes out) shared by the server and any future native client.
 
 ---
 

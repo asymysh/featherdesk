@@ -136,7 +136,7 @@ fn new(&self, cfg: AudioConfig) -> Result<Box<dyn AudioCapturer>, AudioError>;
 ## File Structure
 
 ```
-internal/audio/pipewire/
+addons/audio/pipewire/
 ├── pipewire.rs           // AudioCapturer impl, Rust FFI (built into the add-on cdylib)
 ├── pulse_fallback.rs     // libpulse monitor capture (no subprocess)
 ├── resample.rs           // graph format → 48k/stereo/S16LE

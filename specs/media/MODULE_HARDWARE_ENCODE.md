@@ -7,12 +7,12 @@ interface contract** that every HW encoder add-on implements. It owns no
 encoder implementation itself — concrete encoders live in their respective
 add-on specs:
 
-- `internal/encode/libva/` — Linux VA-API (add-on ID `libva`, MIT)
-- `internal/encode/nvenc/` — NVENC SDK direct (add-on ID `nvenc`, NVIDIA proprietary)
-- `internal/encode/amf/` — AMD AMF (add-on ID `amf` Windows, `amf_rocm` Linux, Apache 2.0)
-- `internal/encode/mf/` — Windows MediaFoundation (add-on ID `mf_hw`, Microsoft system)
-- `internal/encode/qsv/` — Intel oneVPL / QSV (add-on ID `qsv`, MIT)
-- `internal/encode/vt/` — macOS VideoToolbox HW (add-on ID `vt_hw`, Apple system)
+- `addons/encode/libva/` — Linux VA-API (add-on ID `libva`, MIT)
+- `addons/encode/nvenc/` — NVENC SDK direct (add-on ID `nvenc`, NVIDIA proprietary)
+- `addons/encode/amf/` — AMD AMF (add-on ID `amf` Windows, `amf_rocm` Linux, Apache 2.0)
+- `addons/encode/mf_hw/` — Windows MediaFoundation (add-on ID `mf_hw`, Microsoft system)
+- `addons/encode/qsv/` — Intel oneVPL / QSV (add-on ID `qsv`, MIT)
+- `addons/encode/vt/` — macOS VideoToolbox HW (add-on ID `vt_hw`, Apple system)
 
 > **Software encoders** implement a different contract in
 > [`MODULE_ENCODE.md`](./MODULE_ENCODE.md). Hardware encoders consume GPU
@@ -42,7 +42,7 @@ pub use capture::FbInfo;
 // EncodedUnit (ONE contiguous Annex B access unit + keyframe flag) is the
 // encoder's direct output, shared by the SW and HW paths (see MODULE_ENCODE).
 // The pipeline wraps it into stream::EncodedFrame, which lives in
-// pkg/stream/frame.rs — shared by SW and HW paths:
+// featherdesk-stream — shared by SW and HW paths:
 //
 //   pub struct EncodedFrame {
 //       pub data: bytes::Bytes,// Contiguous Annex B bitstream (NOT split per-NAL), host-side

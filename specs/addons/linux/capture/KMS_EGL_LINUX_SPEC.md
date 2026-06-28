@@ -223,7 +223,7 @@ None?                                 → fatal: no capture add-on configured
 ## File Structure
 
 ```
-internal/capture/kms/
+addons/capture/kms_egl/
 ├── kms.rs                      // KmsCapturer struct, KmsCapturer::new
 ├── drm.rs                      // DRM card discovery, plane enumeration
 ├── egl.rs                      // EGL context, DMA-BUF import, glReadPixels
@@ -235,8 +235,9 @@ internal/capture/kms/
 └── tests/kms.rs                // integration test (cfg(feature = "integration"))
 ```
 
-Already exists in working form at `internal/capture/{drm,egl,kms,cursor}.rs` —
-refactor moves it into the `kms_egl` add-on cdylib without changing the
+Already exists in working form (Go) on the `feature-libav-vp8s8` branch
+(`internal/capture/{drm,egl,kms,cursor}.go`) — the Rust rewrite lands it as the
+`kms_egl` add-on cdylib without changing the
 underlying code.
 
 ---
@@ -270,10 +271,10 @@ Skip when:
 
 ## Status
 
-✅ **Working** — implemented today in `internal/capture/{drm,egl,kms,cursor}.rs`,
-verified on Intel HD 630 at 2560×1440 with measured performance numbers. The
-refactor moves it to `internal/capture/kms/`, built as the `kms_egl` add-on
-cdylib without changing the underlying capture logic.
+✅ **Working** — implemented today (Go) as `internal/capture/{drm,egl,kms,cursor}.go`
+on the `feature-libav-vp8s8` branch, verified on Intel HD 630 at 2560×1440 with
+measured performance numbers. The Rust rewrite lands it as `addons/capture/kms_egl/`,
+built as the `kms_egl` add-on cdylib, keeping the same capture logic.
 
 ---
 

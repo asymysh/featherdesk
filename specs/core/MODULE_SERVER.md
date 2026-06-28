@@ -120,12 +120,12 @@ All endpoints run on the **same HTTP/3 server** (the QUIC/UDP port). There is
 
 | Path | Method | Handler | Description |
 |------|--------|---------|-------------|
-| `/` | GET | `http.FileServer` | Serves embedded web client (index.html + JS bundle) |
-| `/healthz` | GET | `handleHealth` | `200 {"status":"ok"}` for liveness probes |
-| `/wt` | GET (upgrade) | `handleWebTransport` | WebTransport session upgrade. All media + control + input + file transfer multiplexes here. |
-| `/auth` | POST | `handleAuth` | Credential exchange → session token (password/PIN modes) |
-| `/pair` | POST | `handlePair` | PIN-based pairing (Sunshine-style first-launch flow) — see [`MODULE_AUTH.md`](./MODULE_AUTH.md) |
-| `/logout` | POST | `handleLogout` | Revoke a session token immediately |
+| `/` | GET | `rust-embed` service | Serves embedded web client (index.html + JS bundle) |
+| `/healthz` | GET | `health()` | `200 {"status":"ok"}` for liveness probes |
+| `/wt` | GET (upgrade) | `webtransport_upgrade()` | WebTransport session upgrade. All media + control + input + file transfer multiplexes here. |
+| `/auth` | POST | `auth()` | Credential exchange → session token (password/PIN modes) |
+| `/pair` | POST | `pair()` | PIN-based pairing (Sunshine-style first-launch flow) — see [`MODULE_AUTH.md`](./MODULE_AUTH.md) |
+| `/logout` | POST | `logout()` | Revoke a session token immediately |
 
 > **Why no separate `/files`:** previously file transfer ran on its own
 > WebSocket to avoid HOL blocking video. Under QUIC each file transfer is its
@@ -419,8 +419,8 @@ Before shutting down, send a control frame to all clients indicating "server shu
 ### R-SRV-06: Origin Validation
 Replace any insecure skip-verify default with configurable origin checking. Default to same-host only; allow override via `server.allow_origin` in the TOML config (see MODULE_CONFIG.md).
 
-### R-SRV-07: Extract Interface to `pkg/server`
-Move the `Server` interface and `Config` to a public package. Keep the WebTransport server implementation in `internal/server/`.
+### R-SRV-07: Server lives in the `featherdesk-host` crate
+The `Server` type and `Config` live in `featherdesk-host`'s `server` module; it consumes the `featherdesk-transport` crate. No separate public `server` crate is needed (the v2 native client is a *client* — it never imports the server).
 
 ### R-SRV-08: Bandwidth Estimation (now base feature — flows into stream::Manager)
 The server derives RTT from the QUIC connection's **smoothed RTT** (quinn exposes it via the connection's path stats), augmented by an app-level `{"type":"ping"}`/`{"type":"pong"}` on the control stream for an end-to-end sample. The fast-path congestion signal is the **server's own datagram-drop rate** (frames dropped from `frame_out` on overflow), NOT the result of `send_datagram` (which is fire-and-forget and never reports loss), plus the client's `{"type":"stats"}` `dropped` delta. It feeds these signals to `stream::Manager` every 100ms (per `[stream.adaptive] interval_ms`); the Manager applies the adaptive policy from `[stream.adaptive]` and hands the effective `stream::Params` to the **pipeline's `param_ch`**. The pipeline's frame loop is the sole path that calls `update_stream_params` on the encoder/capturer (M-6: encode and param-update never run concurrently) — the Manager does **not** mutate the encoder or capturer directly. See [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md).

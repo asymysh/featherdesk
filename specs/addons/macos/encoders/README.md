@@ -34,8 +34,8 @@ cargo build --release -p featherdesk-addon-openh264   # cdylib  featherdesk-addo
 cargo build --release -p featherdesk-addon-vt_hw   # cdylib  featherdesk-addon-vt_hw.dylib
 cargo build --release -p featherdesk-addon-vt_sw   # cdylib  featherdesk-addon-vt_sw.dylib
 ```
-`vt_sw` and `vt_hw` are two variants of the same `./internal/encode/vt` package,
-selected by an **internal build tag at the add-on's own build step** (not host
+`vt_sw` and `vt_hw` are two variants built from the same `addons/encode/vt` crate,
+selected by an **internal Cargo feature at the add-on's own build step** (not host
 composition); each produces its own `.dylib` with its own capability descriptor.
 
 ---

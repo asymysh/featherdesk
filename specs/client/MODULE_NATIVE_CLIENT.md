@@ -46,7 +46,7 @@ control/input/clipboard/file, bootstrap stream for the join IDR).
 
 > This is exactly the "transport addition, not a rewrite" the architecture was
 > built for: the server already serves QUIC; a native client is another QUIC
-> peer. Nothing in `pkg/protocol` is browser-specific.
+> peer. Nothing in `featherdesk-protocol` is browser-specific.
 
 > **Roadmap — v2 control-message format (protobuf/`prost`).** v1's browser client
 > constrains control messages to **JSON** (`serde_json`) and media to the
@@ -117,7 +117,7 @@ The native client must reach the host across NATs. Options:
 
 The browser-first work was built so the native client is additive:
 
-- **Wire protocol is transport-agnostic** — `pkg/protocol` is bytes-in/bytes-out;
+- **Wire protocol is transport-agnostic** — `featherdesk-protocol` is bytes-in/bytes-out;
   the protocol header carries its own length; no HTTP/WS framing leaks in.
 - **Input encoding is platform-neutral** — HID usages + stream-pixel coordinates;
   a native client producing input from raw HID emits **byte-identical** records to

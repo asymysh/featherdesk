@@ -65,7 +65,7 @@ pub trait AudioCapturer {
 }
 
 // AudioEncoder turns PCM chunks into wire payloads. Selected by loaded add-on:
-//   opus  → internal/audio/opus/  (libopus, BSD, in-process Rust FFI)
+//   opus  → addons/audio/opus/  (libopus, BSD, in-process Rust FFI)
 //   <none>→ PCM passthrough (built-in; copies the S16LE bytes through)
 // Cleanup is RAII (Drop) — no Close().
 pub trait AudioEncoder {
@@ -311,7 +311,7 @@ audio silently disabled (matches the gamepad/input "needs an add-on" pattern).
 |----|-----|-----|
 | R-AUD-01 | race in `pw-cat reconnect()` | N/A — no subprocess; native capture add-ons own their lifecycle |
 | R-AUD-02/03 | SIGTERM/backoff for `pw-cat` | N/A — no subprocess |
-| R-AUD-04 | extract to `pkg/audio` | Core `AudioCapturer`/`AudioEncoder` in `pkg/audio`; impls in `internal/audio/<id>/` |
+| R-AUD-04 | defined in `featherdesk-audio` | Core `AudioCapturer`/`AudioEncoder` traits in `featherdesk-audio`; add-on impls in `addons/audio/<id>/` |
 | R-AUD-05 | custom logger | **Done** — `tracing` everywhere |
 | R-AUD-06 | Opus "future" | **Now the default codec** (`opus` add-on); PCM is the fallback |
 | R-AUD-07 | configurable buffer | Buffers are small + fixed for realtime; `frame_ms` is the only knob |

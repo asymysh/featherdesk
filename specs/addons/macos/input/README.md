@@ -80,5 +80,5 @@ though a typical gaming deployment uses both.
 1. Write the spec at `specs/addons/macos/input/{NAME}_MACOS_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the input index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib from `internal/input/{name}/`
+4. Build as a cdylib from `addons/input/{name}/`
 5. Wire the capability registration in `MODULE_PIPELINE.md`

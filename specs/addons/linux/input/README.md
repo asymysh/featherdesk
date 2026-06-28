@@ -82,5 +82,5 @@ in-core `enigo` default stays in charge:
 1. Write the spec at `specs/addons/linux/input/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the input index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib from `internal/input/{name}/`
+4. Build as a cdylib from `addons/input/{name}/`
 5. Wire the capability registration in `MODULE_PIPELINE.md`

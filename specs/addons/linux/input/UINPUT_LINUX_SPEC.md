@@ -163,7 +163,7 @@ All injection errors are surfaced to the dispatcher (no silent discard).
 ## File Structure
 
 ```
-internal/input/uinput/
+addons/input/uinput/
 ├── uinput.rs              // KeyMouseInjector impl (cfg(target_os = "linux"))
 ├── ioctl.rs               // UI_* ioctl numbers + input_event/uinput_setup structs
 ├── keymap.rs              // HID usage → KEY_* (generated)

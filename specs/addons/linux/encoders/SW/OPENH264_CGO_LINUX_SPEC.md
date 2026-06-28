@@ -166,7 +166,7 @@ This add-on not loaded either?               → fatal: no encoder
 ## File Structure
 
 ```
-internal/encode/openh264/
+addons/encode/openh264/
 ├── openh264.rs           // Encoder struct, OpenH264Encoder::new
 ├── ffi.rs                // Rust FFI bindings (built into the add-on cdylib)
 ├── probe.rs              // probe_openh264()
@@ -191,9 +191,10 @@ Skip when:
 
 ## Status
 
-✅ **Working** — implemented today as the default SW encoder in featherdesk
-(`internal/encode/openh264.rs`). The refactor moves it to `internal/encode/openh264/`,
-built as the `openh264` add-on cdylib, but the encode code stays the same.
+✅ **Working** — implemented today (Go) as the default SW encoder
+(`internal/encode/openh264.go`) on the `feature-libav-vp8s8` branch. The Rust
+rewrite lands it as `addons/encode/openh264/`, built as the `openh264` add-on
+cdylib, keeping the same encode logic.
 
 ---
 

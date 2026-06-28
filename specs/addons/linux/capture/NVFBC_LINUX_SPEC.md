@@ -74,7 +74,7 @@ NvFBC has been in every NVIDIA proprietary driver from ~2014 onward. Supported o
 cargo build --release -p featherdesk-addon-nvfbc   # cdylib → featherdesk-addon-nvfbc.so
 ```
 
-The `nvfbc` add-on cdylib is built from the `internal/capture/nvfbc/` crate.
+The `nvfbc` add-on cdylib is built from the `addons/capture/nvfbc/` crate.
 
 ### Runtime dependencies
 
@@ -221,7 +221,7 @@ None?                                → fatal: no capture add-on configured
 ## File Structure
 
 ```
-internal/capture/nvfbc/
+addons/capture/nvfbc/
 ├── nvfbc.rs                 // Capturer struct, NvFbcCapturer::new
 ├── ffi.rs                   // Rust FFI bindings (built into the add-on cdylib)
 ├── probe.rs                 // probe_nvfbc()

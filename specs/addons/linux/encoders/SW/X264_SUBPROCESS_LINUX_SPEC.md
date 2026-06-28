@@ -147,7 +147,7 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 ## File Structure
 
 ```
-internal/encode/x264/
+addons/encode/x264/
 ├── x264.rs              // Rust bridge: subprocess management, pipe I/O
 ├── nal_split.rs         // H.264 NAL unit splitting from pipe stream
 └── tests.rs             // Integration test (requires ffmpeg)

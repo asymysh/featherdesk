@@ -473,7 +473,7 @@ When adding a new vendor-specific encoder:
 1. Write the spec at `specs/addons/{platform}/encoders/{HW,SW}/{NAME}_SPEC.md`
 2. Add a row to the relevant table in **this** section of CENTRAL_SPEC.md
 3. Add a row to the compat matrix in `specs/PLATFORM_COMPAT.md`
-4. Build as a cdylib from `internal/encode/{name}/`
+4. Build as a cdylib from `addons/encode/{name}/`
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`
 
 ---

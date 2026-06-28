@@ -71,7 +71,7 @@ the cap rarely matters.
 cargo build --release -p featherdesk-addon-nvenc   # cdylib → featherdesk-addon-nvenc.so
 ```
 
-The `nvenc` add-on cdylib is built from the `internal/encode/nvenc/` crate.
+The `nvenc` add-on cdylib is built from the `addons/encode/nvenc/` crate.
 The NVIDIA SDK dependency is linked into that library only — the host binary never
 links it.
 
@@ -102,7 +102,7 @@ bindgen::Builder::default()
 ```
 
 The SDK headers (`nvEncodeAPI.h`, `cuda.h`) are checked into the source tree under
-`internal/encode/nvenc/sdk/` — NVIDIA's SDK license permits redistributing the headers
+`addons/encode/nvenc/sdk/` — NVIDIA's SDK license permits redistributing the headers
 inside an application source tree (this is what ffmpeg, Sunshine, OBS all do).
 
 ---
@@ -248,7 +248,7 @@ OpenH264?             → universal SW fallback
 ## File Structure
 
 ```
-internal/encode/nvenc/
+addons/encode/nvenc/
 ├── nvenc.rs              // Encoder struct, NvencEncoder::new
 ├── ffi.rs                // Rust FFI bindings, cfg(target_os = "linux") (built into the add-on cdylib)
 ├── probe.rs              // probe_nvenc()

@@ -69,7 +69,7 @@ use. Users on pure open-source Mesa get VA-API (the default binary path) only.
 cargo build --release -p featherdesk-addon-amf_rocm   # cdylib → featherdesk-addon-amf_rocm.so
 ```
 
-The `amf_rocm` add-on cdylib is built from the `internal/encode/amf/` crate.
+The `amf_rocm` add-on cdylib is built from the `addons/encode/amf/` crate.
 
 ### Runtime dependencies
 
@@ -232,7 +232,7 @@ OpenH264?            → universal SW fallback
 ## File Structure
 
 ```
-internal/encode/amf/
+addons/encode/amf/
 ├── amf.rs                // Encoder struct, AmfEncoder::new
 ├── ffi.rs                // Rust FFI bindings, cfg(target_os = "linux") (built into the add-on cdylib)
 ├── probe.rs              // probe_amf()
