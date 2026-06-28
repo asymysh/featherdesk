@@ -38,8 +38,21 @@ async function connect() {
     const role = isController ? "control" : "view";
     const sessionToken = getSessionToken(); // from URL hash or /auth POST
 
-    // 1. Open WebTransport session (role is NOT in the URL — it's in the auth msg)
-    const wt = new WebTransport(`https://${location.host}/wt`);
+    // 1. Certificate trust. In self-signed mode the browser opens WebTransport
+    //    ONLY if we pass the server cert's SHA-256(DER) hash(es) — a TLS
+    //    click-through does NOT satisfy WebTransport. Read the current+previous
+    //    hashes from /cert-hashes (also inlined as <meta> in index.html for the
+    //    first connect). CA-trusted mode returns [] and we omit the option.
+    //    Always re-fetched here so a cert rotation self-heals on reconnect.
+    //    See MODULE_SERVER "Browser certificate trust".
+    const { hashes } = await (await fetch("/cert-hashes")).json();
+    const opts = hashes.length ? {
+        serverCertificateHashes: hashes.map(b64 =>
+            ({ algorithm: "sha-256", value: base64ToArrayBuffer(b64) })),
+    } : {};
+
+    // 2. Open WebTransport session (role is NOT in the URL — it's in the auth msg)
+    const wt = new WebTransport(`https://${location.host}/wt`, opts);
     await wt.ready;
 
     // 2. Open the CONTROL stream; its FIRST byte is the StreamType tag 0x00.
@@ -79,6 +92,10 @@ async function connect() {
   **bootstrap stream**, not a datagram replay).
 - WebTransport requires HTTPS + TLS 1.3 (QUIC mandates it; WebCodecs also
   requires a secure context — both conditions satisfied at once).
+- **Self-signed cert trust** uses `serverCertificateHashes` (Chrome/Edge 107+,
+  Firefox recent). **Safari's support is incomplete** — on Safari the self-signed
+  mode may fail to connect, and a CA-trusted cert (`server.tls.cert`/`key`) is
+  required. See MODULE_SERVER "Browser certificate trust".
 - Role-based: `control` for input + video, `view` for video-only.
 - Token-based authentication via the **first control-stream message** (not the
   URL or HTTP headers — browsers can't set the latter on WebTransport).
@@ -345,8 +362,41 @@ Request `canvas.requestPointerLock()` on click for FPS-game-style mouse capture.
 ### R-CLI-05: Add Fullscreen Toggle
 Implement F11 or double-click for fullscreen mode: `document.documentElement.requestFullscreen()`.
 
-### R-CLI-06: Add Adaptive Quality Feedback
-Measure decode latency and frame drop rate. Send periodic stats back to server to enable adaptive bitrate/resolution.
+### R-CLI-06: Add Adaptive Quality Feedback (RESOLVED)
+
+The client is the **slow-path** signal source for the server's adaptive loop
+(the server's own datagram-drop rate + QUIC RTT are the fast path — see
+[`MODULE_SERVER.md`](../core/MODULE_SERVER.md) "adaptive" and
+[`MODULE_STREAM_PARAMS.md`](../core/MODULE_STREAM_PARAMS.md)). `stats.js` keeps a
+rolling 1-second window and emits one newline-JSON line on the **control stream**:
+
+```js
+// emitted once per second (or skipped if nothing decoded since the last tick)
+sendControl({
+  type: "stats",
+  decodeMs: p50DecodeLatency,   // median (decoder output ts − decode() call ts) over the window
+  dropped: droppedThisWindow,   // see below; reset each window (delta, not cumulative)
+  fps: framesPresentedThisWindow,
+});
+```
+
+- **`dropped` is derived from datagram sequence gaps**, the same signal the
+  decoder's gap detection already computes: for each live video frame accumulate
+  `max(0, seq − lastSeq − 1)` (skipping the fast-join transition per the
+  "Fast-join rule"), plus any `VideoDecoder` `dequeue`/error drops. It is sent as
+  a **per-window delta** (the server tracks the delta; see its `{"type":"stats"}`
+  `dropped` handling).
+- **`decodeMs`** is the median over the window of `(frame output timestamp −
+  decode() submit timestamp)`; a rising `decodeMs` means the client CPU/GPU can't
+  keep up (signals the server to back off fps/bitrate even when the network is
+  fine).
+- **Cadence:** 1 Hz. This is intentionally coarse — it is a *slow*-path hint that
+  augments the server's 100 ms fast path, not a per-frame ACK. Lines are
+  best-effort on the reliable control stream; a dropped/late line just means the
+  server leans on its own fast-path signals that tick.
+- **No client-driven resolution change.** The client only *reports*; the server's
+  `stream::Manager` decides bitrate/fps and (v2) resolution. Resolution-level
+  adaptation is deferred to v2 per `MODULE_STREAM_PARAMS.md`.
 
 ### R-CLI-07: Handle Stream Send Errors (RESOLVED)
 `send()` now writes through the WebTransport input-stream writer with an async

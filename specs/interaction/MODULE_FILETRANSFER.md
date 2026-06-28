@@ -217,18 +217,23 @@ Download (host → client) is the same flow with directions reversed; the client
 writes to disk via `showSaveFilePicker` (Chrome/Edge streaming) or Blob + `<a>`
 (Firefox/Safari, ≤ ~100 MB).
 
-### Chunk size & flow control
+### Chunk size, back-pressure & resume
 
 - **64 KiB** chunks (matches `File.stream()` reader output; stays under proxy
   fragmentation thresholds; ~5 ms transmit at 100 Mbps).
-- **Windowed flow control:** sender keeps ≤ 32 unacked chunks in flight; receiver
-  sends cumulative `ACK` as chunks are written. This bounds memory and lets the
-  receiver apply back-pressure without TCP-level stalls bleeding into the
-  (separate) video connection.
+- **Back-pressure is QUIC's, not an app window.** As stated in "Flow control
+  (re-justified for QUIC)" above, there is **no ≤32-unacked-chunk app window** —
+  that TCP/WebSocket-era mechanism is removed because it duplicates and conflicts
+  with QUIC's per-stream flow control (`[transport] initial_max_stream_data`).
+  The sender's `Write` blocks when the receiver hasn't consumed; that *is* the
+  back-pressure, and it stays inside this transfer's stream without bleeding into
+  the (datagram) video path. `ACK` is **only** a durable-write checkpoint for
+  `RESUME` (below), never a congestion/pacing signal.
 - **Resume (durability rule):** the receiver tracks two distinct watermarks —
   `lastWrittenSeq` (what's hit the kernel) and `lastFsyncSeq` (what's actually
-  on disk). At every window flush it `fsync`s and updates `lastFsyncSeq`.
-  `ACK` advertises `lastFsyncSeq` (NOT `lastWrittenSeq`), and on `RESUME` the
+  on disk). Periodically (every `fsync_interval` chunks, default 64 ≈ 4 MiB, and
+  on `COMPLETE`) it `fsync`s and updates `lastFsyncSeq`, then emits an `ACK`
+  advertising `lastFsyncSeq` (NOT `lastWrittenSeq`). On `RESUME` the
   receiver replies `ACCEPT {resume_from_seq: lastFsyncSeq+1}`. Without this rule
   a crash between write and fsync would let resume skip an unwritten chunk; the
   SHA-256 check catches it but at the cost of the whole transfer.
@@ -350,7 +355,7 @@ rate_limit_bps = 0                    # 0 = unlimited; else throttle to protect 
 |-------|------|----------|
 | Unit | Filename sanitization + path-traversal rejection (`..`, absolute, symlink) | No |
 | Unit | Chunk framing encode/decode, CRC32C verify | No |
-| Unit | Windowed flow control (advance on cumulative ACK) | No |
+| Unit | Resume checkpoint: `ACK` advertises `lastFsyncSeq` (not `lastWrittenSeq`) | No |
 | Unit | SHA-256 mismatch → file discarded | No |
 | Integration | Drop file → lands in Incoming, hash matches | Yes |
 | Integration | Download from Outgoing → client receives, hash matches | Yes |

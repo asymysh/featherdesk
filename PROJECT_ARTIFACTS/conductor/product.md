@@ -1,3 +1,7 @@
+> ⚠️ **HISTORICAL — original Go prototype.** Superseded by `specs/`. The Rust
+> redesign is authoritative (see `specs/CENTRAL_SPEC.md`). Retained as a
+> historical artifact. The working Go reference lives on `feature-libav-vp8s8`.
+
 # Initial Concept
 
 A low-latency remote desktop streaming server in Go, porting the Windows FeatherDesk project to Linux with KMS capture, VA-API/OpenH264 encoding, WebSocket streaming, PipeWire audio, and uinput injection.

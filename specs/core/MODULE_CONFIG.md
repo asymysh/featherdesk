@@ -108,18 +108,29 @@ max_message_bytes = 4096          # max control-stream JSON message size (bytes)
 input_rate_limit  = 1000          # max input events/sec per client (mousemove coalesced)
 
 [server.tls]
-# If both cert + key are empty, a self-signed cert is generated on startup
-# (development only — browsers will warn). For production, set both to
-# absolute paths of a certificate chain and matching private key in PEM form.
+# Two trust modes (see MODULE_SERVER "TLS Configuration" + "Browser certificate
+# trust"):
+#   CA-trusted  — set cert + key to absolute paths of a PEM chain + private key
+#                 (real domain, directly or behind an ACME reverse proxy).
+#   self-signed — BOTH empty (the self-hosted/LAN default): the server manages a
+#                 short-lived (≤14d) auto-rotated ECDSA P-256 cert. The browser
+#                 reaches WebTransport via serverCertificateHashes (NOT a TLS
+#                 click-through); the SPA reads the hash list from /cert-hashes.
 # TLS 1.3 is MANDATORY under QUIC; no version knob.
 cert = ""                         # (restart required)
 key  = ""                         # (restart required)
+extra_sans    = []                # self-signed mode: extra SANs, e.g. ["host.lan","10.0.0.5"]
+rotate_before = "3d"              # self-signed mode: regenerate when < this validity remains
 
 [transport]
 # Tunables for the QUIC / WebTransport transport (see MODULE_TRANSPORT.md).
 # Defaults are good; expose for ops debugging.
-keepalive_period        = "15s"   # idle keepalive
-max_idle_timeout        = "30s"   # close session after this much silence
+keepalive_period        = "15s"   # QUIC keepalive PINGs (transport-level liveness)
+max_idle_timeout        = "30s"   # QUIC closes the session after this much silence (the
+                                  # real dead-peer mechanism). Must be > keepalive_period.
+ping_interval           = "2s"    # app-level Ping datagram cadence (RTT sampling, NOT liveness).
+                                  # 0 disables app pings (QUIC RTT only). See MODULE_SERVER
+                                  # "Keepalive, liveness & timeouts".
 initial_max_data        = "10MiB" # initial connection-level flow control window
 initial_max_stream_data = "1MiB"  # per-stream flow control window
 max_streams_bidi        = 16      # cap on concurrent bidi streams per session
@@ -427,6 +438,10 @@ allow_frame_reordering = false
 [addon_module_kms_egl]
 # Linux KMS+EGL DMA-BUF capture.
 drm_card         = ""             # "" = auto-discover. e.g. "/dev/dri/card0"
+output_index     = 0             # Which connected CRTC/connector to capture (0 = first active).
+                                  # The per-capturer display selector (cf. dxgi_dd/nvfbc output_index,
+                                  # sck display_id). v1 captures exactly one display; see MODULE_CAPTURE
+                                  # "Display selection". Multi-monitor / runtime switch is v2.
 cursor_plane     = true           # Capture cursor plane separately for client-side compositing
 
 [addon_module_nvfbc]

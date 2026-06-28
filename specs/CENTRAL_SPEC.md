@@ -991,7 +991,7 @@ featherdesk/                         # Cargo workspace
 │   ├── featherdesk-config/          # TOML schema (serde) + load + Validate + Watch
 │   ├── featherdesk-transport/       # HTTP/3 + WebTransport (quinn + wtransport)
 │   ├── featherdesk-clipboard/       # CORE clipboard (cfg(target_os): windows/linux/macos modules)
-│   ├── featherdesk-filetransfer/    # CORE file transfer (windowed flow control, SHA-256, sandbox)
+│   ├── featherdesk-filetransfer/    # CORE file transfer (QUIC-native flow control, CRC32C per-chunk + SHA-256 whole-file, sandbox)
 │   └── featherdesk-host/            # The BINARY crate
 │       └── src/
 │           ├── main.rs              # config::load() → Pipeline::new() → pipeline.start() (#[tokio::main])

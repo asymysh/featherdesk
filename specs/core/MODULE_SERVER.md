@@ -120,7 +120,8 @@ All endpoints run on the **same HTTP/3 server** (the QUIC/UDP port). There is
 
 | Path | Method | Handler | Description |
 |------|--------|---------|-------------|
-| `/` | GET | `rust-embed` service | Serves embedded web client (index.html + JS bundle) |
+| `/` | GET | `rust-embed` service | Serves embedded web client (index.html + JS bundle); injects the current cert-hash `<meta>` in self-signed mode |
+| `/cert-hashes` | GET | `cert_hashes()` | `200 {"hashes":[<base64 SHA-256(cert DER)>,…]}` — current + previous self-signed cert hashes for the SPA's `serverCertificateHashes`. Returns `{"hashes":[]}` in CA-trusted mode. See "Browser certificate trust". |
 | `/healthz` | GET | `health()` | `200 {"status":"ok"}` for liveness probes |
 | `/wt` | GET (upgrade) | `webtransport_upgrade()` | WebTransport session upgrade. All media + control + input + file transfer multiplexes here. |
 | `/auth` | POST | `auth()` | Credential exchange → session token (password/PIN modes) |
@@ -147,28 +148,93 @@ All endpoints run on the **same HTTP/3 server** (the QUIC/UDP port). There is
 TLS is **mandatory and TLS 1.3** — QUIC requires TLS 1.3, so the
 `min_version` knob from the earlier WSS-era spec is gone (informational only).
 
-Sources, in order:
+There are **two supported trust modes**, selected by whether a cert is
+configured. Both are first-class — self-signed is **not** "dev only" (see
+"Browser certificate trust" below for why the browser path differs from a normal
+HTTPS warning).
 
-1. **`server.tls.cert` + `server.tls.key` both set** in the TOML config →
-   load the PEM chain and key from those paths. Hot reload on SIGHUP.
-2. **Both empty** (development) → server generates a self-signed ECDSA P-256
-   certificate at startup:
-   - Common Name: `featherdesk`
-   - SANs: `localhost`, `127.0.0.1`, hostname
-   - Valid: 1 year
-   - Cached on disk under the OS-conventional state directory so restarts
-     reuse the same cert. **Private key file permissions: mode 0600 (Unix)
-     / restrictive ACL (Windows). Verified on startup — if permissions
-     are too open, server refuses to start with a clear error.**
+1. **CA-trusted** — `server.tls.cert` + `server.tls.key` both set in the TOML
+   config → load the PEM chain and key from those paths. Hot reload on SIGHUP.
+   Used when the deployment has a real domain (directly, or behind an ACME
+   reverse proxy). The browser trusts it normally; the SPA passes **no**
+   `serverCertificateHashes` (see below).
+2. **Self-signed (the self-hosted / LAN default)** — both empty → the server
+   generates and manages a self-signed ECDSA **P-256** certificate. Because the
+   browser reaches WebTransport via `serverCertificateHashes` (below), this cert
+   has constraints the CA path does not:
+   - Common Name `featherdesk`; SANs `localhost`, `127.0.0.1`, hostname, and any
+     `server.tls.extra_sans`.
+   - **Validity ≤ 14 days.** The WebTransport `serverCertificateHashes` API
+     **rejects any certificate whose total validity exceeds 14 days** (Chromium
+     enforces `notAfter − notBefore ≤ 14 days`). FeatherDesk issues a **13-day**
+     cert to leave rotation headroom. (The old "valid 1 year" self-signed cert
+     would be **refused by the browser** on the WebTransport path — that was the
+     bug this section fixes.)
+   - **Auto-rotation.** A background task regenerates the cert before expiry
+     (default: when < 3 days remain). The previous cert+key are retained until
+     they expire so that **already-loaded pages and in-flight sessions keep
+     working across a rotation** — the server publishes **both** the current and
+     the previous hash (the API accepts a list). On SIGHUP / restart the current
+     cert is reused if still > 3 days valid.
+   - Cached on disk under the OS-conventional state directory (current +
+     previous). **Private key file permissions: mode 0600 (Unix) / restrictive
+     ACL (Windows). Verified on startup — if permissions are too open, the server
+     refuses to start with a clear error.**
 
 The cert is loaded into the rustls `ServerConfig` that backs the QUIC endpoint
 (quinn + wtransport share the one rustls config). One cert, one private key,
-one HTTP/3 server.
+one HTTP/3 server. A rotation swaps the `ServerConfig`'s certified key in place
+(no socket rebind, no dropped sessions).
 
-There is no Let's Encrypt integration — front the server with a reverse
-proxy (Caddy, nginx, traefik) for ACME if needed. NOTE: many ACME-issuing
-proxies do not yet support proxying HTTP/3 + WebTransport upstream; verify
-your proxy's QUIC support before deploying.
+There is no Let's Encrypt integration in-process — for the CA-trusted mode, front
+the server with a reverse proxy (Caddy, nginx, traefik) for ACME if needed.
+NOTE: many ACME-issuing proxies do not yet support proxying HTTP/3 + WebTransport
+upstream; verify your proxy's QUIC support before deploying.
+
+### Browser certificate trust (`serverCertificateHashes`)
+
+This is mandatory reading for the self-signed mode: **a browser will not open a
+`WebTransport` session to a self-signed certificate just because the user clicked
+through a TLS warning.** WebTransport performs its **own** certificate check that
+ignores the page's click-through trust; for a non-CA cert it connects **only** if
+the page passes the cert's hash explicitly:
+
+```js
+new WebTransport(url, {
+  serverCertificateHashes: [
+    { algorithm: "sha-256", value: <ArrayBuffer of SHA-256(cert DER)> },
+    // … previous cert's hash too, during a rotation overlap
+  ]
+})
+```
+
+API constraints (all satisfied by mode 2 above): the cert must use an **ECDSA**
+key, total **validity ≤ 14 days**, and the hash is **SHA-256 over the DER of the
+whole certificate** (not the SPKI).
+
+**Hash delivery (resolves the chicken-and-egg).** The SPA is served by the same
+self-signed origin, so:
+
+1. The user navigates to `https://host:port/` and clicks through the **one-time**
+   browser interstitial (this trusts the *origin* for normal fetch/HTML, but
+   **not** WebTransport).
+2. The host serves the SPA with the **current + previous cert hashes** available
+   to it — exposed via `GET /cert-hashes` (JSON, served on the already-trusted
+   origin) **and** inlined into `index.html` as a `<meta name="featherdesk-cert-hashes">`
+   so the first connection needs no extra round-trip. In CA-trusted mode this
+   list is **empty/absent**, signalling the SPA to omit `serverCertificateHashes`
+   entirely.
+3. The SPA passes the hashes to `new WebTransport(...)` and the session opens
+   because the presented cert's DER hash matches one in the list.
+
+If a rotation happens **while a page is open**, the next reconnect re-fetches
+`/cert-hashes` (cheap, on the trusted origin) before constructing the transport,
+so a stale inlined hash self-heals.
+
+**Browser support caveat:** `serverCertificateHashes` is supported on
+Chrome/Edge 107+ and Firefox (recent). Safari's support is incomplete; on Safari
+the self-signed mode may fail and a CA-trusted cert (mode 1) is required. This is
+noted in the browser-compat matrix in `MODULE_WEB_CLIENT.md` and `PLATFORM_COMPAT.md`.
 
 ### WebTransport Session Lifecycle
 
@@ -318,6 +384,24 @@ pub struct Session {
   into ≤~1192-byte datagrams, and calls `wt.send_datagram()` per fragment. Loss
   is whole-frame, never mid-frame. QUIC has its own keepalive (configured via
   `[transport] keepalive_period`).
+
+### Keepalive, liveness & timeouts
+
+Three independent timers, each owning a distinct concern — do not conflate them:
+
+| Timer | Layer | Default | What it does |
+|-------|-------|---------|--------------|
+| `auth_deadline` | app | 5 s | Closes a session that hasn't authed the control stream (`close::AUTH_TIMEOUT 4408`). Armed on session accept. |
+| `keepalive_period` / `max_idle_timeout` | QUIC | 15 s / 30 s | **The real liveness mechanism.** QUIC sends keepalive PINGs and closes the connection after `max_idle_timeout` of no received packets. Because the server streams datagrams that elicit client ACKs, a vanished client stops ACKing and is dropped within `max_idle_timeout`. No app logic needed. |
+| `ping_interval` | app | 2 s | Server sends a `Ping` **datagram** (type 2, 8-byte nonce); client replies `{"type":"pong","nonce":…}` on the control stream. This is purely an **RTT sample** for the adaptive loop (MODULE_STREAM_PARAMS) — it is **NOT** a liveness check (lost ping/pong datagrams are normal and ignored). `ping_interval = 0` disables it and the adaptive loop uses QUIC `smoothed_rtt` alone. |
+
+- **No idle-input disconnect in v1.** A viewer (or an idle controller) that sends
+  no input is legitimate and is **never** dropped for inactivity — liveness is
+  QUIC's job above. Session *lifetime* is bounded only by the session-token TTL
+  (MODULE_AUTH), which is checked on reconnect/resume, not enforced as a live
+  kick.
+- **Graceful shutdown** closes all sessions with `close::SERVER_SHUTDOWN 4503`
+  (see the pipeline shutdown sequence).
 - `controlReader()`: reads newline-JSON messages on the control stream →
   dispatches keyframe/pong/stats/resize/set_* (NOT clipboard — see below).
 - `inputReader()` (controller only): reads `[u16 RecLen]`-prefixed binary

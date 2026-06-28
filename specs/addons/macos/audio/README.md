@@ -25,7 +25,7 @@ streams video only. Audio is an opt-in add-on shared library. Audio is
 
 | Add-on ID | Effect |
 |-----------|--------|
-| `opus` | Opus codec (BSD libopus, in-process). FEC/PLC, ~96–128 kbps. **Recommended.** |
+| `opus` | Opus codec (BSD libopus, in-process). FEC/PLC, ~96–128 kbps. **Recommended.** See [`OPUS_AUDIO_CODEC_SPEC.md`](../../OPUS_AUDIO_CODEC_SPEC.md). |
 | _(none)_ | Raw S16LE PCM passthrough (1.536 Mbps, no loss concealment). |
 
 Build each add-on as its own shared library and drop the set into the add-ons directory:

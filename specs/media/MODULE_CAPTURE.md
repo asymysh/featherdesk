@@ -168,6 +168,34 @@ runtime — loaded add-ons + TOML config decide.
 
 ---
 
+## Display selection (which monitor)
+
+**v1 captures exactly one display.** Which one is chosen by a **static
+per-capturer config key**, resolved once at startup (a restart applies a change —
+consistent with the rest of the add-on model). The key is uniform in intent
+across every capture add-on, named per each backend's native concept:
+
+| Add-on | Config key | `[addon_module_*]` default | Selects |
+|--------|-----------|----------------------------|---------|
+| `kms_egl` (Linux) | `output_index` | `0` | connected CRTC/connector index |
+| `nvfbc` (Linux) | `output_index` | `0` | NvFBC output index |
+| `dxgi_dd` (Windows) | `output_index` (+ `adapter_index`) | `0` | `IDXGIOutput` index |
+| `sck` (macOS) | `display_id` | `0` | main display / `NSScreen` index |
+
+- **Default `0` = the primary/first active display.**
+- The selected display's native resolution flows through the pipeline; `[capture]
+  width/height = 0` means "use the display's native mode" (the encoder scales, per
+  "Resolution: capture is always native").
+- **Out of scope for v1 (deferred to v2 / the native client):** runtime display
+  **enumeration** advertised to the client, client-driven **monitor switching**,
+  and **multi-monitor capture** (stitched or per-monitor streams). See
+  [`MODULE_NATIVE_CLIENT.md`](../client/MODULE_NATIVE_CLIENT.md) (multi-monitor row)
+  and `PLATFORM_COMPAT.md`. A monitor hotplug/mode change on the *selected* display
+  is still handled live via the resolution-change flow (CENTRAL_SPEC
+  "Resolution-Change Flow").
+
+---
+
 ## What Was Rejected
 
 The module intentionally does NOT support:

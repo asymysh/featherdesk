@@ -33,6 +33,11 @@ whatever arrives.
 
 > **Minimum browser: Chrome 107+, Edge 98+, Firefox 130+, Safari 18.2+** (the
 > WebCodecs + WebTransport intersection — see [`./client/MODULE_WEB_CLIENT.md`](./client/MODULE_WEB_CLIENT.md)).
+> **Self-signed TLS caveat:** the self-signed (LAN/self-hosted default) mode reaches
+> WebTransport via `serverCertificateHashes` (Chrome/Edge 107+, Firefox recent).
+> **Safari's support is incomplete** — Safari clients may need a CA-trusted cert
+> (`server.tls.cert`/`key`). See [`./core/MODULE_SERVER.md`](./core/MODULE_SERVER.md)
+> "Browser certificate trust".
 > **HEVC caveat:** Chrome/Edge/Safari decode HEVC; Firefox's WebCodecs does
 > **not**. A host that selects HEVC (e.g. for HDR) is decodable only by
 > Chromium/WebKit clients — Firefox clients need an H.264 stream (the universal

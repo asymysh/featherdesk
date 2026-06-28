@@ -590,6 +590,34 @@ metrics port — see MODULE_CONFIG `[metrics]`). The legacy `/status` JSON endpo
 on the main port is removed; liveness is `/healthz`, detailed counters are
 Prometheus. No unauthenticated observability surface on the main TLS server.
 
+**Exported metrics catalog.** The exporter maps `StatsSnapshot` (+ a few
+server/transport fields) onto these series. Names use the `featherdesk_` prefix
+and Prometheus type conventions (`_total` for counters); all are process-global
+unless noted.
+
+| Metric | Type | Source | Meaning |
+|--------|------|--------|---------|
+| `featherdesk_frames_captured_total` | counter | `frames_captured` | frames pulled from the capturer |
+| `featherdesk_frames_encoded_total` | counter | `frames_encoded` | access units produced by the encoder |
+| `featherdesk_frames_dropped_total` | counter | `frames_dropped` | frames skipped at capture (pacing/overload) |
+| `featherdesk_frames_broadcast_total` | counter | `frames_broadcast` | frames fanned out to ≥1 session |
+| `featherdesk_bytes_broadcast_total` | counter | `bytes_broadcast` | encoded video bytes sent (pre-fragmentation) |
+| `featherdesk_clients` | gauge | `client_count` | currently connected sessions |
+| `featherdesk_audio_chunks_total` | counter | `audio_chunks` | PCM chunks encoded (0 while audio deferred) |
+| `featherdesk_audio_drops_total` | counter | `audio_drops` | audio chunks dropped |
+| `featherdesk_frame_time_seconds` | summary | `frame_time` (60-sample window) | capture→broadcast latency; exports min/max/avg/p99 |
+| `featherdesk_datagram_send_drops_total` | counter | server `frame_out` overflow | per-session out-queue drop-oldest events (the fast-path congestion signal) |
+| `featherdesk_rtt_seconds` | gauge | QUIC `smoothed_rtt` (+ app ping/pong) | per-client RTT (labeled `client`); also the adaptive input |
+| `featherdesk_effective_bitrate_kbps` | gauge | `stream::Manager` | current adaptive target bitrate |
+| `featherdesk_effective_fps` | gauge | pipeline pacing | current target fps |
+| `featherdesk_keyframes_forced_total` | counter | server keyframe path | IDRs forced (join/gap), useful for storm detection |
+| `featherdesk_build_info` | gauge=1 | host | version/codec/OS as labels |
+
+Add-on selection (which capture/encoder add-on won the probe) is emitted once at
+startup as a `tracing` event and as labels on `featherdesk_build_info`, not as a
+time series. The exporter reads `snapshot()` (atomics + a brief ring-buffer lock)
+on each scrape — scraping never blocks the frame loop.
+
 ### R-PIP-03: Hot-Reload Encoder
 If hardware encoder becomes unavailable mid-stream (GPU reset, driver crash), fall back to software encoder without dropping the connection:
 1. Detect encode error

@@ -283,7 +283,7 @@ ordered, **both directions**. A reader frames a message by reading to the next
 {"type": "auth", "token": "…", "role": "control|view|player", "resume": false}
 {"type": "keyframe"}                                 // request an IDR after a gap
 {"type": "pong", "nonce": 12345}                     // reply to a server Ping datagram
-{"type": "stats", "decodeMs": 3.2, "dropped": 0}     // optional client telemetry
+{"type": "stats", "decodeMs": 3.2, "dropped": 0, "fps": 60} // 1 Hz client telemetry; dropped = per-window delta (adaptive slow path; see MODULE_WEB_CLIENT R-CLI-06)
 {"type": "resize", "width": 1280, "height": 720}     // dynamic resolution change
 {"type": "set_bitrate", "kbps": 8000}                // dynamic bitrate (control role only)
 {"type": "set_fps", "fps": 30}                       // dynamic frame rate (control role only)
@@ -394,6 +394,27 @@ The video payload is the **complete access unit** for one frame, with all NAL un
 - **Versioned:** Byte 0 enables future protocol evolution without out-of-band negotiation
 - **Sequenced:** Per-type counters enable server-side drop detection without ack overhead
 - **Clock-aligned:** Both video and audio share CLOCK_MONOTONIC for A/V sync
+
+### Version pinning (why there is no negotiation handshake)
+
+There is deliberately **no protocol version negotiation** in v1, because the v1
+client is the **embedded web client served by the same binary** — server and
+client are always the *same build*, so the version cannot mismatch by design.
+`version` byte = `1`; a receiver rejects any other value
+(`Err(UnsupportedVersion)`), it does not negotiate down.
+
+- **Stale browser cache** is the only realistic mismatch (a user's browser
+  serving an old SPA against a freshly-upgraded server). Mitigation: the SPA
+  bundle is served with **content-hashed asset URLs + `Cache-Control: no-cache`
+  on `index.html`**, so a server upgrade invalidates the cached bundle on the
+  next load. As a backstop, `index.html` carries a `featherdesk-build` value and
+  the SPA aborts with a "refresh to update" notice if the `config` message's
+  `version`/build does not match what it was built against.
+- **The v2 native client** is the case that *will* need real negotiation
+  (independently shipped, may lag the server). That is exactly why protobuf/
+  `prost` is reserved for the v2 control protocol (see CENTRAL_SPEC "Technology
+  Choices") — version negotiation is a v2 concern, not retrofitted onto v1's
+  fixed binary header. See [`../client/MODULE_NATIVE_CLIENT.md`](../client/MODULE_NATIVE_CLIENT.md).
 
 ---
 

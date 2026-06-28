@@ -389,8 +389,18 @@ entirely; everything the client needs lives on the QUIC/UDP port.
 const r = await fetch('/auth', { method: 'POST', body: JSON.stringify({…}) });
 const { session_token } = await r.json();
 
+// Certificate trust: in self-signed mode the browser opens WebTransport ONLY if
+// we pass the cert's SHA-256(DER) hash(es). CA-trusted mode returns an empty
+// list and we omit the option. See MODULE_SERVER "Browser certificate trust".
+const hashes = await (await fetch('/cert-hashes')).json();   // {hashes:[base64,…]}
+const opts = hashes.hashes.length ? {
+    serverCertificateHashes: hashes.hashes.map(b64 => ({
+        algorithm: 'sha-256', value: base64ToArrayBuffer(b64),
+    })),
+} : {};
+
 // Transport
-const wt = new WebTransport(`https://${location.host}/wt`);
+const wt = new WebTransport(`https://${location.host}/wt`, opts);
 await wt.ready;
 
 // Control stream first (always). First byte = StreamType tag 0x00.
@@ -482,9 +492,14 @@ max_message_bytes = 4096           # max control-stream message
 input_rate_limit  = 1000           # per-client input events/sec cap
 
 [server.tls]
-cert         = ""                  # production: path to PEM cert chain
-key          = ""                  # production: path to PEM private key
-                                   # empty = self-signed (dev only, browsers warn)
+cert         = ""                  # CA-trusted mode: path to PEM cert chain
+key          = ""                  # CA-trusted mode: path to PEM private key
+                                   # BOTH empty = self-signed mode (the self-hosted/LAN
+                                   # default): short-lived (≤14d) auto-rotated ECDSA P-256
+                                   # cert; browser connects via serverCertificateHashes.
+                                   # See MODULE_SERVER "Browser certificate trust".
+extra_sans   = []                  # self-signed mode: extra SANs (e.g. ["host.lan","10.0.0.5"])
+rotate_before = "3d"               # self-signed mode: regenerate when < this remains
 min_version  = "1.3"               # TLS 1.3 mandatory under QUIC; field is informational
 
 [transport]
@@ -512,8 +527,12 @@ auth_deadline            = "5s"    # close unauthed sessions (close::AUTH_TIMEOU
 ## Security
 
 - **TLS 1.3 is mandatory** in QUIC; weaker negotiation is not possible.
-- **Cert handling** identical to the previous WSS path (config-supplied PEM or
-  startup-generated self-signed). Self-signed cert private key file is mode
+- **Cert handling** — two modes (see MODULE_SERVER "TLS Configuration" +
+  "Browser certificate trust"): config-supplied PEM (CA-trusted) **or** a
+  short-lived (≤14-day) auto-rotated self-signed ECDSA P-256 cert reached from
+  the browser via `serverCertificateHashes`. Unlike the old WSS path, a
+  self-signed cert is **not** trusted by a click-through — the browser requires
+  the cert hash, served via `/cert-hashes`. Self-signed private key file is mode
   `0600` (Unix) / ACL-restricted (Windows), verified at startup.
 - **Origin header** validated on the HTTP/3 upgrade (`Origin` is sent on
   WebTransport just as on WebSocket). Default `allow_origin = ""` is

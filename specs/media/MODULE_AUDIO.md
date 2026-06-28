@@ -145,7 +145,7 @@ capture — same process, same clock.
 
 | Codec | Add-on ID | Library | Bandwidth | On loss | Wire type |
 |-------|-----------|---------|-----------|---------|-----------|
-| **Opus** (default when loaded) | `opus` | libopus (BSD, Rust FFI) | ~96–128 kbps VBR | **FEC + PLC conceals** dropped packets | `frame_type::AUDIO_OPUS` (0x08) |
+| **Opus** (default when loaded) | [`opus`](../addons/OPUS_AUDIO_CODEC_SPEC.md) | libopus (BSD, Rust FFI) | ~96–128 kbps VBR | **FEC + PLC conceals** dropped packets | `frame_type::AUDIO_OPUS` (0x08) |
 | **Raw PCM** (built-in fallback) | — | none | 1.536 Mbps | a lost packet = a ~20 ms gap (no concealment) | `frame_type::AUDIO_PCM` (0x04) |
 
 - The server advertises the codec in the **`config`** control-stream message

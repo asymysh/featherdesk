@@ -1,5 +1,11 @@
 # Tech Stack - FeatherDesk
 
+> ⚠️ **HISTORICAL — original Go prototype stack.** The project was **rewritten in
+> Rust**; this Go/cgo stack is **not** the current design. Authoritative stack:
+> `specs/CENTRAL_SPEC.md` ("Implementation Language & Conventions" + "Technology
+> Choices & Risks"). Retained as a historical artifact; the Go reference lives on
+> `feature-libav-vp8s8`.
+
 ## Language
 
 - **Go 1.26+** (primary language)
