@@ -45,6 +45,9 @@ These conventions are global; every module spec below assumes them.
 | Platform / vendor FFI | Windows: **`windows`** (windows-rs). macOS: **`objc2`** + ScreenCaptureKit/VideoToolbox bindings. Linux: **`nix`**, `drm`/`gbm`/EGL via `bindgen`/raw FFI. Vendor SDKs (NVENC, VA-API, AMF) via `bindgen` or a `cc`-built shim. |
 | Optional in-host features | Cargo **features** (rare — almost everything pluggable is an add-on `cdylib`, not a feature). |
 | No `init()` registries | Rust has no package `init()`. The add-on registry is populated by the loader scanning the add-ons directory at startup. |
+| Testing / benchmarks | `criterion` for microbenchmarks (protocol marshal, pipeline bookkeeping — the perf targets stated per spec); `proptest` for round-trip / property tests |
+| Fuzzing | **`cargo-fuzz`** (libFuzzer) on the untrusted wire decoders — the 22-byte header, datagram reassembly, and binary input records (the bytes-from-the-network surface) |
+| Global allocator | **`mimalloc`**, set once in `featherdesk-host`'s `main` — lower RSS + steadier tail latency than the system allocator (serves the <50 MB / low-latency targets) |
 
 **Crate layout (Cargo workspace).** Public contracts are library crates; the
 host is a binary crate; each add-on is its own `cdylib` crate. See
@@ -134,44 +137,20 @@ Because the host and add-ons are **all Rust with no runtime/GC**, a
 runtime-loaded add-on is just a native library — there is **no two-runtime
 problem** (the reason Go was rejected). The loader and every add-on share the
 stable ABI defined in the **`featherdesk-abi`** crate, built on
-[`abi_stable`](https://crates.io/crates/abi_stable). **This was validated by a
-working spike**: a host scanned a directory, loaded a separately-compiled
-`cdylib`, and frame buffers + an error code crossed the boundary correctly with
-deterministic cleanup.
+[`abi_stable`](https://crates.io/crates/abi_stable) and validated by a working
+spike (a host scanned a dir, loaded a separately-compiled `cdylib`, and frame
+buffers + an error code crossed the boundary with deterministic cleanup).
 
-- **Entry point:** the add-on's `abi_stable` root module. `abi_stable` verifies
-  the ABI version **and** a structural layout hash of every type crossing the
-  boundary on load — a mismatch is rejected, not miscompiled. The host accepts an
-  add-on iff its `abi_stable` version + layout are compatible.
-- **Rich types cross safely** (no flat-C marshaling needed): `RVec<u8>` for
-  buffers, `RString`, `RResult<T, u32>`, and `#[sabi_trait]` objects. An
-  `RVec<u8>` returned by the add-on **transfers ownership to the host**; it
-  carries the add-on's deallocator, so dropping it on the host side is
-  deterministic — **no GC, no use-after-free.**
-- **Errors** cross as `RResult<T, u32>` where the `u32` is a stable error-code
-  enum (`AbiErr::FallbackToSoftware = 2`, `ChromaUnsupported = 3`, …); the host
-  **maps the code back into its own `StreamError`/`CaptureError` enum** so the
-  pipeline's normal `match`/`?` works. (In Go this mapping silently failed
-  because sentinel error *values* differ per copy; in Rust it is explicit.)
-- **Channels** are produced **host-side**: an audio add-on exposes a
-  `next_chunk()` trait method and the host's audio task pumps it into a
-  `tokio::sync::mpsc` channel — the channel never crosses the boundary.
-
-**Load-failure taxonomy** (default = skip the library with a WARN; `[addons]
-abi_strict = true` aborts startup for any of these):
-
-| Failure | Default behavior |
-|---------|------------------|
-| library fails to load (corrupt, wrong **os/arch**, missing transitive dep) | skip + warn |
-| not an add-on (no `abi_stable` root module — stray library in dir) | skip + warn |
-| root-module constructor returns an error | skip + warn |
-| ABI version / layout mismatch (`abi_stable`) | skip + warn |
-| capability descriptor names an unknown kind, or a codec with no wire type (e.g. AV1) | skip + warn |
-| add-ons dir does not exist | treated as empty + warn |
-
-An add-on library MUST match the host's **OS *and* CPU arch** (an x86_64 `.dylib`
-will not load into an arm64 host); add-ons are built natively per target, not
-cross-composed.
+**The full ABI contract is its own spec:
+[`./core/MODULE_ABI.md`](./core/MODULE_ABI.md)** — the two-layer model, the
+root-module surface, rich-type/ownership rules, the `AddonKind` / `CodecId` /
+`AbiErr` registries (the single source of truth in `featherdesk-abi`), FFI
+panic-safety, the load-failure taxonomy, and ABI versioning. In one line:
+`abi_stable` verifies the ABI version **and** a structural layout hash on load
+(mismatch is rejected, not miscompiled); buffers cross as owned `RVec<u8>`
+(ownership transfers, deterministic drop); errors cross as `RResult<T, u32>` the
+host maps back to its own enum; channels stay host-side; and an add-on library
+MUST match the host's **OS and CPU arch**.
 
 **Add-on directory (portable, user-controlled).** FeatherDesk is a **portable,
 drop-anywhere** deployment: keep the host binary and its add-ons together in any
@@ -191,108 +170,6 @@ no backends loaded.
 > only add-ons you trust in that folder, and, if you run the host elevated,
 > secure the folder's permissions yourself. The loader does **not** refuse a
 > world-writable directory.
-
-### Add-on ABI registry (single source of truth in `featherdesk-abi`)
-
-Every value the host and an add-on must agree on at the `dlopen` boundary — the
-**kind** discriminants, the **codec** ids, the **error** codes, the ABI version —
-is defined **once**, as constants/enums in the **`featherdesk-abi`** crate
-(`#[derive(StableAbi)]`). Neither side hardcodes a literal; both `use
-featherdesk_abi::*`. This is the data-model that makes the jigsaw fit: a number
-means the same thing on both sides, or the load is rejected. The registry spaces
-are **append-only** — a retired id/code is never reused (same discipline as the
-wire `frame_type::` and `close::` spaces).
-
-**Two layers — do not conflate them:**
-
-- **Layer 1 — raw `cdylib` export (crosses `dlopen`).** Each add-on exports
-  exactly ONE symbol: the `abi_stable` root module `FeatherDeskAddon`. It carries
-  the ABI version, the capability descriptor, a `probe()`, and a `construct()`
-  returning the kind's `#[sabi_trait]` object. **Every type here is an
-  `abi_stable` type** (`RResult`, `RVec`, `RString`, `RStr`, sabi-trait objects) —
-  **never** `std::result::Result`, `Box<dyn _>`, or a host error enum, none of
-  which can cross `dlopen` safely.
-- **Layer 2 — host-side registry adapter.** The loader wraps each loaded root
-  module in a `CaptureAddon` / `EncoderAddon` / `InputAddon` / `AudioAddon`
-  adapter (see [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md)),
-  translating Layer-1 abi types into the host's ergonomic `Result<_, HostError>`
-  + `Box<dyn HostTrait>`. Per-OS add-on impl specs describe the concrete backend;
-  the host only ever talks to it through these adapters. (Where an impl spec shows
-  a `probe()`/`new()` snippet, that is the Layer-2 adapter shape: `probe(&self) ->
-  Result<ProbeResult, PipelineError>` and a typed `new(&self, …)`.)
-
-**Root module surface (Layer 1) — every add-on exports this and nothing else:**
-
-```rust
-// crate: featherdesk-abi   (compiled into the host AND every add-on)
-pub const ABI_VERSION: u32 = 1;     // bumped on ANY breaking change to this crate
-
-#[repr(C)] #[derive(StableAbi)]
-pub struct CapabilityDescriptor {
-    pub kind: AddonKind,        // what this add-on is (table below)
-    pub id: RString,            // add-on id, e.g. "kms_egl" (== filename + config-section suffix)
-    pub codecs: RVec<CodecId>,  // codecs it can emit/consume (encoders + audio); empty otherwise
-    pub os: Os, pub arch: Arch, // must equal the host's, else the load is rejected
-    pub abi_version: u32,       // == ABI_VERSION it was built against
-}
-
-#[sabi_trait]
-pub trait FeatherDeskAddon {
-    fn descriptor(&self) -> CapabilityDescriptor;
-    fn probe(&self) -> RResult<ProbeResult, u32>;          // u32 = AbiErr code (table below)
-    fn construct(&self, cfg: RAddonConfig) -> RResult<AddonObject, u32>; // sabi object for `kind`
-}
-```
-
-**AddonKind registry** (stable ids; the descriptor's `kind` is one of these):
-
-| Kind | Id | Layer-1 sabi object | Layer-2 host trait | Host trait the backend implements |
-|------|----|---------------------|--------------------|-----------------------------------|
-| `Capture`        | `0x01` | `CapturerBox`         | `CaptureAddon` | `capture::Capturer` (+ optional `SurfaceCapturer`) |
-| `SoftwareEncode` | `0x02` | `EncoderBox`          | `EncoderAddon` (`kind()=="sw"`) | `encode::Encoder` |
-| `HardwareEncode` | `0x03` | `HwEncoderBox`        | `EncoderAddon` (`kind()=="hw"`) | `hwencode::HardwareEncoder` |
-| `AudioCapture`   | `0x04` | `AudioCapturerBox`    | `AudioAddon` (`kind()=="capture"`) | `audio::AudioCapturer` |
-| `AudioCodec`     | `0x05` | `AudioEncoderBox`     | `AudioAddon` (`kind()=="codec"`) | `audio::AudioEncoder` |
-| `InputKeyMouse`  | `0x06` | `InjectorBox`         | `InputAddon` | `input::KeyMouseInjector` |
-| `InputTouch`     | `0x07` | `InjectorBox`         | `InputAddon` | `input::TouchInjector` |
-| `InputGamepad`   | `0x08` | `InjectorBox`         | `InputAddon` | `input::GamepadInjector` |
-| `Network`        | `0x09` | `ProviderBox`         | `network::Provider` | (v2; **reserved**, see [`./v2/MODULE_NETWORK.md`](./v2/MODULE_NETWORK.md)) |
-
-`Injector` is the umbrella MODULE_INPUT uses for the three `Input*` kinds. The old
-loose phrasing "kind = capture/encode/hwencode/audio/input" is **superseded by this
-table** — `encode`→`SoftwareEncode`, `hwencode`→`HardwareEncode`, and `audio`/`input`
-split into the sub-kinds above so one descriptor unambiguously names one trait.
-
-**CodecId registry** (an add-on's codec ↔ its wire frame type):
-
-| CodecId | Id | Media | Wire `frame_type` | Notes |
-|---------|----|-------|-------------------|-------|
-| `H264`     | `0x01` | video | `VIDEO_H264` (1) | universal default |
-| `Hevc`     | `0x02` | video | `VIDEO_HEVC` (7) | HW only; HDR |
-| `Av1`      | `0x03` | video | — (none yet)     | descriptor accepted but **load-rejected** (no wire type assigned) |
-| `Opus`     | `0x10` | audio | `AUDIO_OPUS` (8) | default audio codec |
-| `PcmS16le` | `0x11` | audio | `AUDIO_PCM` (4)  | built-in fallback (no codec add-on) |
-
-A descriptor naming a `CodecId` that has no wire `frame_type` (e.g. `Av1` today) is
-skipped with a warning — matches the load-failure taxonomy above.
-
-**AbiErr registry** — the `u32` carried by every `RResult<_, u32>` across the
-boundary. The host maps each code back to the matching host enum
-(`CaptureError` / `StreamError` / `AudioError` / `InputError` / `PipelineError`),
-so the pipeline's normal `match`/`?` works:
-
-| AbiErr | Code | Maps to host variant | Meaning |
-|--------|------|----------------------|---------|
-| `Generic`            | `1` | `*::Backend` / `*::Other` | unspecified failure (detail logged, not on the wire) |
-| `FallbackToSoftware` | `2` | `StreamError::FallbackToSoftware` | HW path unusable → degrade to SW for the session |
-| `ChromaUnsupported`  | `3` | `StreamError::ChromaUnsupported`  | encoder can't emit the requested chroma |
-| `HdrUnsupported`     | `4` | `StreamError::HdrUnsupported`     | encoder can't emit 10-bit / HEVC-Main10 |
-| `RequiresRestart`    | `5` | `StreamError::RequiresRestart`    | param change needs teardown + rebuild |
-| `DeviceLost`         | `6` | `CaptureError::DeviceLost` / `AudioError::DeviceLost` | capture/audio device vanished |
-| `Unsupported`        | `7` | `*::Unsupported` | requested config not supported by this backend |
-| `NotAvailable`       | `8` | (probe negative) | prerequisite missing — returned by `probe()` |
-
-(Code `0` is reserved; success is `ROk`, never an error code.)
 
 ### Why zero-by-default
 
@@ -356,8 +233,8 @@ fallback", which existed only to escape the two-runtime problem Rust doesn't hav
 
 ## Module Map (Core Modules)
 
-The system is decomposed into 18 module specs — 15 numbered core modules plus three
-cross-cutting/support specs (Auth, Stream Params, Audio). Each module has its own spec
+The system is decomposed into 19 module specs — 15 numbered core modules plus four
+cross-cutting/support specs (ABI, Auth, Stream Params, Audio). Each module has its own spec
 sheet with complete interface contracts, internal architecture, and refactoring directives.
 
 | # | Module | Spec File | Responsibility |
@@ -380,6 +257,7 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 16 | **Auth** *(support)* | [`./core/MODULE_AUTH.md`](./core/MODULE_AUTH.md) | Authentication modes, session tokens, in-band resume credentials, role gating |
 | 17 | **Stream Params** *(support)* | [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md) | Dynamic stream parameters, adaptive bitrate, chroma negotiation (shared `featherdesk-stream`) |
 | 18 | **Audio** *(deferred)* | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | Host→client system audio: Opus/PCM, stereo / 5.1 / 7.1, audio-master A/V sync. **Design locked; impl deferred.** |
+| 19 | **ABI** *(support)* | [`./core/MODULE_ABI.md`](./core/MODULE_ABI.md) | The add-on ABI contract (`featherdesk-abi`): root-module surface + capability-descriptor registries (`AddonKind` / `CodecId` / `AbiErr`) — the single source of truth the host and every add-on compile against |
 
 > **Encoder, capture, and input implementations are not core modules.**
 > Every encoder (OpenH264 (FFI), x264 subprocess, VideoToolbox, libva, NVENC, AMF,
@@ -1143,6 +1021,35 @@ featherdesk/                         # Cargo workspace
 > - `server` and `pipeline` are **not** separate crates. They are modules inside
 >   the `featherdesk-host` binary (`src/server/`, `src/pipeline/`) — see
 >   MODULE_SERVER R-SRV-07. Module specs use them as headings, not crate names.
+
+### Crate ↔ spec map
+
+Module specs are grouped **by concern** (`core/ media/ interaction/ client/ v2/`);
+crates are organized **by compilation unit**. They are ~1:1 — this table is the
+authoritative crossover (the three non-1:1 cases are called out). When code lands,
+each crate gets a 3-line `README` that **links** to its spec here — never a copy.
+
+| Crate | Authoritative spec(s) | Note |
+|-------|------------------------|------|
+| `featherdesk-abi` | [`./core/MODULE_ABI.md`](./core/MODULE_ABI.md) | ABI contract + registries (built into host **and** every add-on) |
+| `featherdesk-stream` | [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md) | `Params`, `EncodedFrame`, `StreamError` (shared leaf) |
+| `featherdesk-protocol` | [`./core/MODULE_PROTOCOL.md`](./core/MODULE_PROTOCOL.md) | |
+| `featherdesk-transport` | [`./core/MODULE_TRANSPORT.md`](./core/MODULE_TRANSPORT.md) | |
+| `featherdesk-config` | [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md) | |
+| `featherdesk-auth` | [`./core/MODULE_AUTH.md`](./core/MODULE_AUTH.md) | |
+| `featherdesk-capture` | [`./media/MODULE_CAPTURE.md`](./media/MODULE_CAPTURE.md) | `Capturer` + `SurfaceCapturer` traits |
+| `featherdesk-encode` | [`./media/MODULE_ENCODE.md`](./media/MODULE_ENCODE.md) | SW `Encoder` trait + libyuv converter |
+| `featherdesk-hwencode` | [`./media/MODULE_HARDWARE_ENCODE.md`](./media/MODULE_HARDWARE_ENCODE.md) | `HardwareEncoder` trait |
+| `featherdesk-audio` | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | impl deferred |
+| `featherdesk-input` | [`./interaction/MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) **+** [`./interaction/MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md) | **non-1:1:** gamepad is part of the input crate, not its own crate |
+| `featherdesk-clipboard` | [`./interaction/MODULE_CLIPBOARD.md`](./interaction/MODULE_CLIPBOARD.md) | core (compiled-in, not an add-on) |
+| `featherdesk-filetransfer` | [`./interaction/MODULE_FILETRANSFER.md`](./interaction/MODULE_FILETRANSFER.md) | core |
+| `featherdesk-network` | [`./v2/MODULE_NETWORK.md`](./v2/MODULE_NETWORK.md) | v2; mechanism not chosen |
+| `featherdesk-host` (binary) | [`./core/MODULE_SERVER.md`](./core/MODULE_SERVER.md) + [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md) + embedded [`./client/MODULE_WEB_CLIENT.md`](./client/MODULE_WEB_CLIENT.md) | **non-1:1:** `server` and `pipeline` are modules inside the host binary, not crates |
+| add-on `cdylib`s | [`./addons/`](./addons/)`{os}/{kind}/*.md` | one spec per backend; each implements an `AddonKind` from MODULE_ABI |
+
+> The native client ([`./client/MODULE_NATIVE_CLIENT.md`](./client/MODULE_NATIVE_CLIENT.md))
+> is a **v2 product**, not a crate in the v1 workspace.
 
 ---
 
