@@ -4,7 +4,7 @@
 
 **Name:** FeatherDesk (binary: `featherdesk`)
 **Type:** Low-latency remote desktop streaming server (Linux primary, Windows + macOS planned)
-**Language:** Go 1.26+ with CGo
+**Language:** Rust (edition 2021), async via Tokio; FFI to platform + vendor C/C++/ObjC SDKs
 **Deployment:** Single host binary with embedded web client + optional add-on shared libraries (capture / encode / input / audio), loaded at runtime
 **Target:** Parsec/Sunshine-level latency on LAN
 
@@ -16,6 +16,73 @@
 - Bandwidth: 5-15 Mbps/viewer
 - Memory: <50MB RSS
 - Concurrent viewers: up to 25 (1 controller + 24 passive)
+
+---
+
+## Implementation Language & Conventions (Rust)
+
+FeatherDesk is implemented in **Rust** (edition 2021). Rust was chosen over Go
+specifically because the **add-on model is the core of the architecture**, and a
+Go host cannot cleanly `dlopen` Go add-ons (two Go runtimes + GC in one process,
+no Go values across the boundary). Rust has **no runtime and no GC**, so a
+runtime-loaded add-on behaves like a normal native library — validated by a
+working spike (host scans a dir, loads a `cdylib`, frame buffers + error codes
+cross the boundary deterministically). The same spike confirmed the QUIC/
+WebTransport stack and C-SDK FFI build and run.
+
+These conventions are global; every module spec below assumes them.
+
+| Concern | Choice |
+|---------|--------|
+| Edition / toolchain | Rust edition 2021, stable toolchain |
+| Async runtime | **Tokio** (multi-threaded). Server, transport, frame loop, audio loop are async tasks. |
+| Errors | `Result<T, E>` with `thiserror`-derived enums per crate. **Across the add-on ABI**, errors cross as a stable `u32` code (`RResult<_, u32>`) the host maps back to its own error enum. |
+| Logging / tracing | **`tracing`** + `tracing-subscriber` (text in a TTY, JSON otherwise; level/output from `[log]`). Replaces the old `slog` logger. |
+| Concurrency primitives | `tokio::sync::mpsc` (frame-out queue, `paramCh`, audio chunks), `tokio::sync::watch`, `Arc<Mutex<…>>` / `Arc<RwLock<…>>` for shared state. No global mutable state. |
+| Buffers | `bytes::Bytes` / `BytesMut` internally (cheap clones, zero-copy slicing). Across the ABI: `abi_stable::std_types::RVec<u8>` (ownership transfers, deterministic drop). |
+| Wire (de)serialization | Frame headers / binary records: manual `bytes`-based encode/decode. JSON control messages: **`serde` + `serde_json`**. |
+| Add-on ABI | **`abi_stable`** — stable-ABI `cdylib`s, `#[sabi_trait]` objects, layout+version checked on load. (See "Pluggable Architecture".) |
+| Platform / vendor FFI | Windows: **`windows`** (windows-rs). macOS: **`objc2`** + ScreenCaptureKit/VideoToolbox bindings. Linux: **`nix`**, `drm`/`gbm`/EGL via `bindgen`/raw FFI. Vendor SDKs (NVENC, VA-API, AMF) via `bindgen` or a `cc`-built shim. |
+| Optional in-host features | Cargo **features** (rare — almost everything pluggable is an add-on `cdylib`, not a feature). |
+| No `init()` registries | Rust has no package `init()`. The add-on registry is populated by the loader scanning the add-ons directory at startup. |
+
+**Crate layout (Cargo workspace).** Public contracts are library crates; the
+host is a binary crate; each add-on is its own `cdylib` crate. See
+"File Structure" below for the full tree. Naming: workspace crates are
+`featherdesk-<name>`; add-on crates build to `featherdesk-addon-<id>.{so,dylib,dll}`.
+
+---
+
+## Technology Choices & Risks
+
+Each choice below was validated against the current Rust ecosystem and prior art —
+chiefly **RustDesk** (117k★, 67% Rust, production remote desktop) and **Sunshine**
+(38.7k★, the game-streaming gold standard). Where we diverge from them, it is
+deliberate and noted.
+
+| Area | Choice | Rationale / evidence |
+|------|--------|----------------------|
+| Language | **Rust 2021** | RustDesk proves Rust is production-viable for this domain; no-runtime/no-GC is what makes the dlopen add-on model work (Go can't) |
+| Async | **Tokio** | quinn + wtransport require it; de-facto standard |
+| QUIC | **quinn** | 5.1k★, de-facto Rust QUIC, tokio, rustls+ring, datagrams, cross-platform |
+| WebTransport | **wtransport** | Only real Rust WebTransport server. ⚠️ **pre-1.0 + draft spec** (see Risks). Kept as the deliberate novel differentiator. |
+| Plugin ABI | **abi_stable** | Spike-validated on Rust 1.96. Chosen over **stabby** because stabby has a documented Rust ≥1.78 trait-object regression (leaked global O(n) vtable set) — bad for a trait-object-heavy plugin app |
+| Errors | `thiserror` + `Result`; `u32` code across the ABI | de-facto; the code↔enum mapping fixes what Go's `errors.Is` broke |
+| Logging | `tracing` | de-facto for async Rust |
+| Serialization | fixed-binary (media frame header + input records, hot path); `serde_json` (browser control plane); **protobuf/`prost` reserved for the v2 native-client protocol** (roadmap) | protobuf hurts the 60 fps fixed header and adds a JS dep to the v1 browser; it pays off in v2-native |
+| Color convert | **libyuv** via FFI | exactly what RustDesk uses |
+| Audio codec | **opus** | exactly what RustDesk uses |
+| Clipboard (core) | **`arboard`** (MIT/Apache) | single cross-platform crate (Win/macOS/Linux X11+Wayland). **Avoids RustDesk's `libs/clipboard`, which is AGPL** and would force the whole host to AGPL |
+| Input — kb/mouse **default** | **`enigo`** (all OS) | cross-platform user-space injection (SendInput / XTEST·libei / CGEvent). Matches **Sunshine's anti-cheat-safe default**; `enigo`'s macOS path *is* CGEvent |
+| Input — kb/mouse **add-ons** | **Interception** (Windows, kernel — fast; ⚠️ anti-cheat risk, opt-in), **uinput** (Linux, kernel — Wayland + gaming-grade) | power-user paths that beat the default but carry tradeoffs (Interception ↔ anti-cheat; both need the kernel layer) |
+| Input — touch / gamepad | add-ons: `win_touch` (touch), `vigem`/`gcvirtual`/`uinput-ff` (gamepad) | `enigo` does not cover touch or gamepad |
+| Capture | **stays zero-by-default add-ons** (KMS+EGL, NvFBC, SCK, DXGI DD) | **Sunshine uses the same backends** — `scrap` was evaluated and rejected (X11-only on Linux, deprecated CGDisplayStream on macOS). DXGI DD **measured on our hardware: ~7 ms p50 acquire, ~2.4× better than GDI** |
+| HW encode | per-vendor FFI add-ons (NVENC/AMF/QSV/MF/VAAPI/VideoToolbox) | matches Sunshine's encoder matrix; bindings exist (`cros-libva`, etc.) |
+
+**Risks (tracked):**
+1. **WebTransport / wtransport maturity** — pre-1.0 on a still-draft spec. *Top external risk.* Mitigation: it sits behind the `featherdesk-transport` crate (one insulation point), the browser floor is already modern-only, and `quinn` underneath is solid.
+2. **Browser WebTransport + WebCodecs is novel** — no prior-art Rust project does it (RustDesk uses Flutter + its own protocol; Sunshine uses Moonlight clients). The risk lives on the *browser* side, not the Rust server. De-risk with the end-to-end vertical slice.
+3. **Interception add-on anti-cheat risk** — documented; it is an opt-in add-on, never the default.
 
 ---
 
@@ -34,89 +101,84 @@ installs with GPL x264, NVIDIA-only servers, AMD workstations, headless Windows
 VMs) by loading a different set of libraries — no `#ifdef` spaghetti, no
 per-deployment rebuild of the host.
 
-### Add-on loading model (v1: dlopen)
+### Add-on loading model
 
-- Each add-on is built **standalone** as a C-ABI shared library
-  (`.so` / `.dylib` / `.dll`) via `go build -buildmode=c-shared`. The add-on's
-  own native dependencies (CGo, vendor SDKs) are linked into **that library**,
-  never into the host.
-- Every add-on library exports one C entry point — `FeatherDeskAddonOpen` —
-  returning **(1)** an `ABIVersion`, **(2)** a capability descriptor
-  (kind = capture / encode / hwencode / audio / input; codec(s); platform), and
-  **(3)** a vtable of function pointers implementing the add-on's interface. The
-  host adapts that vtable back into the Go interface (`Capturer`, `Encoder`,
-  `HardwareEncoder`, …) the pipeline consumes.
-- At startup the host **scans the add-ons directory**, `dlopen`s each library,
-  checks `ABIVersion` (by default a mismatch is skipped with a warning, not a
-crash; `[addons] abi_strict = true` makes a mismatch abort startup instead), and
-  registers its capability descriptor. There is **no build-tag `init()` registry
-  and no stub files** — an absent add-on is simply a library that isn't in the
-  directory.
+- Each add-on is built **standalone** as a Rust `cdylib`
+  (`.so` / `.dylib` / `.dll`) — `cargo build -p featherdesk-addon-<id>`. The
+  add-on's own native dependencies (FFI to vendor SDKs) are linked into **that
+  library**, never into the host.
+- Every add-on uses `abi_stable` to export one **root module** (the entry point,
+  conceptually `FeatherDeskAddonOpen`) exposing **(1)** the ABI version
+  (`abi_stable` checks this *and* a structural layout hash automatically),
+  **(2)** a capability descriptor (kind = capture / encode / hwencode / audio /
+  input; codec(s); os+arch), and **(3)** the add-on's `#[sabi_trait]` object
+  (`Capturer`, `Encoder`, `HardwareEncoder`, `AudioCapturer`, `Injector`).
+- At startup the host **scans the add-ons directory**, loads each library
+  (`dlopen` / `LoadLibraryW` under the hood, via `abi_stable`'s loader), verifies
+  the ABI version + layout (by default a mismatch is skipped with a warning;
+  `[addons] abi_strict = true` aborts startup instead), and registers its
+  capability descriptor. There is **no `init()` registry and no stub files** —
+  an absent add-on is simply a library that isn't in the directory.
 - **Filename convention:** `featherdesk-addon-<id>.{so,dylib,dll}`, where `<id>`
   (`kms_egl`, `openh264`, `nvenc`, …) is the **add-on ID** — it names the library
   and its `[addon_module_<id>]` config section.
 - **Hot-swap = drop a library + restart.** v1 resolves the add-on set once at
   startup; live reload without restart is out of scope for v1.
 
-### Add-on ABI contract
+### Add-on ABI contract (Rust + `abi_stable`)
 
-The loader and every add-on share a **flat C ABI** defined in `pkg/addon`
-(a Go package + generated C header). The contract is deliberately narrow because
-of one hard constraint:
+Because the host and add-ons are **all Rust with no runtime/GC**, a
+runtime-loaded add-on is just a native library — there is **no two-runtime
+problem** (the reason Go was rejected). The loader and every add-on share the
+stable ABI defined in the **`featherdesk-abi`** crate, built on
+[`abi_stable`](https://crates.io/crates/abi_stable). **This was validated by a
+working spike**: a host scanned a directory, loaded a separately-compiled
+`cdylib`, and frame buffers + an error code crossed the boundary correctly with
+deterministic cleanup.
 
-> **Two-runtime constraint (the key v1 risk).** A `-buildmode=c-shared` Go
-> library carries its **own** Go runtime (GC, scheduler, signal handlers).
-> `dlopen`-ing it into a host that is itself a Go program means **two Go runtimes
-> in one process**, and **Go pointers, slices, channels, closures, and
-> `error` sentinel values MUST NOT cross the boundary** (cgo pointer rules +
-> distinct per-library sentinel addresses). If this proves unworkable in
-> practice, that is exactly the trigger for the **v2 fallback** below. v1 ships
-> behind this risk on purpose.
-
-Therefore everything crossing the boundary is plain C:
-
-- **Entry point:** `FeatherDeskAddonOpen` returns `ABIVersion` (a single
-  `uint32`; the host accepts the add-on iff `addon.ABIVersion == host.ABIVersion`
-  — **exact match, no forward/backward compat in v1**), a **capability
-  descriptor** (kind = capture / encode / hwencode / audio / input; codec id(s);
-  os+arch), and a **vtable** of C function pointers.
-- **Buffers** cross as `(ptr, len, cap)` triples with explicit ownership: the
-  caller allocates, or the callee returns a borrowed pointer plus a `release`
-  function pointer. No `[]byte` from a Go `sync.Pool` and no Go-closure
-  `Release` crosses the line; the **host** wraps the C buffer/`release` into the
-  Go `Capturer`/`Encoder` interfaces it hands the pipeline.
-- **Errors** cross as a stable `int` code enum (e.g. `ABI_ERR_FALLBACK_TO_SOFTWARE`,
-  `ABI_ERR_CHROMA_UNSUPPORTED`, `ABI_ERR_REQUIRES_RESTART`); the **host loader
-  translates each code back into the canonical `stream.Err*` sentinel** so
-  `errors.Is` in the pipeline works.
-- **Channels** never cross: an `AudioCapturer.Chunks()` channel is produced
-  **host-side** by a goroutine that pumps a C `next_chunk` vtable call.
+- **Entry point:** the add-on's `abi_stable` root module. `abi_stable` verifies
+  the ABI version **and** a structural layout hash of every type crossing the
+  boundary on load — a mismatch is rejected, not miscompiled. The host accepts an
+  add-on iff its `abi_stable` version + layout are compatible.
+- **Rich types cross safely** (no flat-C marshaling needed): `RVec<u8>` for
+  buffers, `RString`, `RResult<T, u32>`, and `#[sabi_trait]` objects. An
+  `RVec<u8>` returned by the add-on **transfers ownership to the host**; it
+  carries the add-on's deallocator, so dropping it on the host side is
+  deterministic — **no GC, no use-after-free.**
+- **Errors** cross as `RResult<T, u32>` where the `u32` is a stable error-code
+  enum (`AbiErr::FallbackToSoftware = 2`, `ChromaUnsupported = 3`, …); the host
+  **maps the code back into its own `StreamError`/`CaptureError` enum** so the
+  pipeline's normal `match`/`?` works. (In Go this mapping silently failed
+  because sentinel error *values* differ per copy; in Rust it is explicit.)
+- **Channels** are produced **host-side**: an audio add-on exposes a
+  `next_chunk()` trait method and the host's audio task pumps it into a
+  `tokio::sync::mpsc` channel — the channel never crosses the boundary.
 
 **Load-failure taxonomy** (default = skip the library with a WARN; `[addons]
 abi_strict = true` aborts startup for any of these):
 
 | Failure | Default behavior |
 |---------|------------------|
-| `dlopen`/`LoadLibraryW` fails (corrupt, wrong **os/arch**, missing transitive dep) | skip + warn |
-| no `FeatherDeskAddonOpen` export (stray `.so` in dir) | skip + warn |
-| `FeatherDeskAddonOpen` returns error / null | skip + warn |
-| `ABIVersion` mismatch | skip + warn |
+| library fails to load (corrupt, wrong **os/arch**, missing transitive dep) | skip + warn |
+| not an add-on (no `abi_stable` root module — stray library in dir) | skip + warn |
+| root-module constructor returns an error | skip + warn |
+| ABI version / layout mismatch (`abi_stable`) | skip + warn |
 | capability descriptor names an unknown kind, or a codec with no wire type (e.g. AV1) | skip + warn |
 | add-ons dir does not exist | treated as empty + warn |
 
 An add-on library MUST match the host's **OS *and* CPU arch** (an x86_64 `.dylib`
-will not load into an arm64 host); CGo add-ons are therefore built natively per
-target, not cross-composed.
+will not load into an arm64 host); add-ons are built natively per target, not
+cross-composed.
 
-**Security — add-on directory trust.** `dlopen` executes native code from a
-directory at startup, and the host often runs elevated (KMS+EGL needs
-root/`CAP_SYS_ADMIN`; Interception/SendSAS needs SYSTEM). The add-ons directory
-and every library in it **MUST be owned by, and writable only by, the host's
-privilege level**; the loader verifies this on startup (as MODULE_AUTH already
-does for the TLS key) and refuses (or warns) on a world-writable dir. The default
-dir is therefore an admin-owned location (`/usr/lib/featherdesk/addons`,
-`%PROGRAMDATA%\FeatherDesk\addons`), **not** a user-writable `$XDG_DATA_HOME`
-path, to avoid a local privilege-escalation vector.
+**Security — add-on directory trust.** Loading a library executes native code at
+startup, and the host often runs elevated (KMS+EGL needs root/`CAP_SYS_ADMIN`;
+Interception/SendSAS needs SYSTEM). The add-ons directory and every library in it
+**MUST be owned by, and writable only by, the host's privilege level**; the
+loader verifies this on startup (as MODULE_AUTH does for the TLS key) and refuses
+(or warns) on a world-writable dir. The default dir is therefore an admin-owned
+location (`/usr/lib/featherdesk/addons`, `%PROGRAMDATA%\FeatherDesk\addons`),
+**not** a user-writable `$XDG_DATA_HOME` path, to avoid a local
+privilege-escalation vector.
 
 ### Why zero-by-default
 
@@ -142,9 +204,9 @@ Each add-on is built once, then dropped into the add-ons directory. Examples
 | Apple Silicon Mac | `sck`, `vt_hw` |
 
 Build one add-on with, e.g.,
-`go build -buildmode=c-shared -o featherdesk-addon-kms_egl.so ./internal/capture/kms`.
-See each platform's `encoders/README.md` and `capture/README.md` for recommended
-combinations.
+`cargo build --release -p featherdesk-addon-kms_egl` (its crate is a `cdylib`,
+producing `featherdesk-addon-kms_egl.so`). See each platform's
+`encoders/README.md` and `capture/README.md` for recommended combinations.
 
 ### Runtime probe and selection
 
@@ -158,15 +220,16 @@ When multiple add-ons are loaded, the pipeline picks at runtime based on:
 Per-add-on tuning lives in `[addon_module_<id>]` TOML sections, not
 in code. See [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md).
 
-### v2 fallback
+### Future: optional process isolation
 
-If runtime `dlopen` loading proves problematic in v1 — most likely because of
-the **two-runtime constraint** above — v2 may switch to statically-composed
-**edition binaries** (build-tag composition) or **subprocess sidecars** (which
-sidestep the shared-process Go-runtime issue entirely). The add-on **interface
-contracts are identical** under all three mechanisms — only how the host obtains
-the implementation changes — so this decision does not affect any add-on's spec
-beyond its build/packaging step.
+The Rust + `abi_stable` in-process loading model is the proven default and has no
+runtime-conflict risk. If a future deployment wants hard fault/security isolation
+between the host and an add-on (e.g. a crashy vendor driver), the add-on can be
+run as a **subprocess sidecar** instead, talking to the host over a local socket
+with shared memory for the frame path. The add-on **trait contracts are
+identical** either way — only how the host obtains the implementation changes —
+so this is a packaging choice, not a spec change. (This replaces the Go-era "v2
+fallback", which existed only to escape the two-runtime problem Rust doesn't have.)
 
 ---
 
@@ -187,18 +250,18 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 | 7 | **Web Client** | [`./client/MODULE_WEB_CLIENT.md`](./client/MODULE_WEB_CLIENT.md) | Browser-based viewer (WebCodecs) — v1 |
 | 8 | **Pipeline** | [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md) | Orchestrator: probe + select loaded add-ons, lifecycle, pacing, frame drops, wiring |
 | 9 | **Config** | [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md) | TOML config schema, parsing, validation, hot reload |
-| 10 | **Input** | [`./interaction/MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract (injection impls are add-ons per OS) |
+| 10 | **Input** | [`./interaction/MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) | Binary input wire decode + dispatcher + HID-usage contract. **kb/mouse default = `enigo` (in core, all OS)**; kernel injectors (Interception/uinput), touch (win_touch), and gamepad (vigem/gcvirtual) are add-ons |
 | 11 | **Clipboard** | [`./interaction/MODULE_CLIPBOARD.md`](./interaction/MODULE_CLIPBOARD.md) | Bidirectional text + rich-HTML clipboard sync (core; per-OS clipboard access) |
 | 12 | **File Transfer** | [`./interaction/MODULE_FILETRANSFER.md`](./interaction/MODULE_FILETRANSFER.md) | Drag-drop transfer to a fixed folder carried as QUIC bidirectional streams on the main WebTransport session (core) |
 | 13 | **Gamepad** | [`./interaction/MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md) | Browser Gamepad-API redirection contract + rumble (virtual-controller injection is per-OS add-ons; casual-gaming-grade only) |
 | 14 | **Network** | [`./v2/MODULE_NETWORK.md`](./v2/MODULE_NETWORK.md) | v2 connectivity (NAT traversal / relay / signaling for the native client). Requirements + listener-provider contract documented; **mechanism not chosen** (tsnet vs pion vs other — evaluated at v2 start). |
 | 15 | **Native Client** | [`./client/MODULE_NATIVE_CLIENT.md`](./client/MODULE_NATIVE_CLIENT.md) | v2 native desktop client plan — same QUIC protocol, full-HID gamepad, reliable 4:4:4, sub-ms input. **Split final; impl deferred.** |
 | 16 | **Auth** *(support)* | [`./core/MODULE_AUTH.md`](./core/MODULE_AUTH.md) | Authentication modes, session tokens, in-band resume credentials, role gating |
-| 17 | **Stream Params** *(support)* | [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md) | Dynamic stream parameters, adaptive bitrate, chroma negotiation (shared `pkg/stream`) |
+| 17 | **Stream Params** *(support)* | [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md) | Dynamic stream parameters, adaptive bitrate, chroma negotiation (shared `featherdesk-stream`) |
 | 18 | **Audio** *(deferred)* | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | Host→client system audio: Opus/PCM, stereo / 5.1 / 7.1, audio-master A/V sync. **Design locked; impl deferred.** |
 
 > **Encoder, capture, and input implementations are not core modules.**
-> Every encoder (OpenH264 CGo, x264 subprocess, VideoToolbox, libva, NVENC, AMF,
+> Every encoder (OpenH264 (FFI), x264 subprocess, VideoToolbox, libva, NVENC, AMF,
 > QSV, MediaFoundation HW), every capture backend (KMS+EGL, NvFBC, SCK, DXGI DD),
 > and every input injector (interception, uinput, cgevent, win_touch, vigem,
 > gcvirtual) is an add-on shared library under
@@ -208,17 +271,18 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 
 > **Clipboard + File Transfer are core (not add-ons).** Their OS surface is small
 > (clipboard APIs, file I/O) and they are baseline remote-desktop expectations,
-> so they live in core with per-OS files behind build constraints.
+> so they live in core with per-OS modules behind `cfg(target_os)`.
 
 > **Removed from the module map:**
-> - **Logger** — replaced by stdlib `log/slog`. No dedicated module spec needed.
->   Server/Pipeline take a `*slog.Logger` directly. Behavior (text vs JSON,
->   level, output) is set via the `[log]` config section.
+> - **Logger** — replaced by the `tracing` crate. No dedicated module spec
+>   needed. Modules emit `tracing` events/spans; `tracing-subscriber` is
+>   initialized once in the host binary. Behavior (text vs JSON, level, output)
+>   is set via the `[log]` config section.
 
 > **Deferred to future versions:**
 > - **Native client (v2)** — the v1=browser / v2=native split is **final**; the
->   native client speaks the identical wire protocol (via `quic-go` directly) and
->   adds full-HID gamepad, reliable 4:4:4, and sub-ms input. Design plan in
+>   native client speaks the identical wire protocol (via `quinn`/`wtransport`
+>   directly) and adds full-HID gamepad, reliable 4:4:4, and sub-ms input. Design plan in
 >   `MODULE_NATIVE_CLIENT.md`; implementation deferred to v2. Connectivity
 >   (Tailscale `tsnet` vs alternatives) is the one open item there.
 > - **Audio** — **design LOCKED** (host→client system audio, pluggable per-OS
@@ -300,7 +364,7 @@ for the full rationale.
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 CGo | SW | BSD-2 (Cisco) | [`linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](./addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
+| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](./addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | Any CPU (x86_64, ARM64) | ✅ Working |
 | x264 subprocess | SW | GPL-2 (isolated) | [`linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](./addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
 | libva direct | HW | MIT | [`linux/encoders/HW/LIBVA_LINUX_SPEC.md`](./addons/linux/encoders/HW/LIBVA_LINUX_SPEC.md) | Intel + AMD + NVIDIA (via wrapper) | 📋 Specced |
 | NVENC direct | HW | NVIDIA SDK | [`linux/encoders/HW/NVENC_LINUX_SPEC.md`](./addons/linux/encoders/HW/NVENC_LINUX_SPEC.md) | NVIDIA Kepler+ | 📋 Specced |
@@ -331,7 +395,7 @@ for the full rationale.
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 CGo | SW | BSD-2 (Cisco) | [`macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](./addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
+| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](./addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | Any CPU; cross-platform | 📋 Specced |
 | x264 subprocess | SW | GPL-2 (isolated) | [`macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](./addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | Any CPU; needs ffmpeg | 📋 Specced |
 | VideoToolbox SW | SW | Apple system | [`macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](./addons/macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | Any Mac (macOS 12.3+) | 📋 Specced |
 | VideoToolbox HW | HW | Apple system | [`macos/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](./addons/macos/encoders/HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md) | All Macs 2011+ (HW H.264), Skylake+/Apple Silicon (HW HEVC). No AV1 HW encode on any current Apple Silicon. | 📋 Specced |
@@ -369,7 +433,7 @@ for the full rationale, recommended combinations, and headless install flow.
 
 | Add-on | Path | License | Spec | Hardware | Status |
 |--------|------|---------|------|---------|--------|
-| OpenH264 CGo | SW | BSD-2 (Cisco) | [`windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | ✅ Benchmarked |
+| OpenH264 (FFI) | SW | BSD-2 (Cisco) | [`windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) | Any CPU | ✅ Benchmarked |
 | x264 subprocess | SW | GPL-2 (isolated) | [`windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](./addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) | Any CPU; needs ffmpeg | ✅ Benchmarked |
 | MediaFoundation HW | HW | Microsoft system | [`windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/MEDIAFOUNDATION_HW_WINDOWS_SPEC.md) | All vendors (cross-vendor via MFT routing) | ✅ Benchmarked |
 | NVENC | HW | NVIDIA SDK | [`windows/encoders/HW/NVENC_WINDOWS_SPEC.md`](./addons/windows/encoders/HW/NVENC_WINDOWS_SPEC.md) | NVIDIA Kepler+ | ✅ Benchmarked |
@@ -431,12 +495,12 @@ When adding a new vendor-specific encoder:
 ┌─────────────────┐      ┌──────────────┐ ┌───────────┐ ┌───────────┐  ┌────────────┐
 │  CAPTURE MODULE │      │   ENCODE     │ │   AUDIO   │ │  SERVER   │  │   INPUT    │
 │                 │      │  (Software)  │ │   MODULE  │ │  MODULE   │  │   MODULE   │
-│ NextFrame()     │─────▶│ Convert()    │ │           │ │           │  │            │
-│ -> *Frame       │ RGBA │ Encode()     │ │ Chunks()  │ │ HTTP/3+WT │  │ uinput     │
-│   (borrowed)    │      │ -> []byte AU │ │ ->[]byte  │ │ Broadcast │  │ injection  │
+│ next_frame()    │─────▶│ convert()    │ │           │ │           │  │            │
+│ -> Frame        │ RGBA │ encode()     │ │ next_chunk│ │ HTTP/3+WT │  │ uinput     │
+│   (owned)       │      │ -> AnxB AU   │ │ -> RVec   │ │ Broadcast │  │ injection  │
 │                 │      └──────┬───────┘ └─────┬─────┘ └─────┬─────┘  └────────────┘
-│ NextSurface()   │──┐         │                │             │
-│ -> *FBInfo      │  │  AnxB   │                │ PCM         │
+│ next_surface()  │──┐         │                │             │
+│ -> FbInfo       │  │  AnxB   │                │ PCM         │
 └─────────────────┘  │         │                │             │
                      │         ▼                ▼             │
                      │  ┌──────────────────────────────┐      │
@@ -465,18 +529,18 @@ When adding a new vendor-specific encoder:
 
 ```
 PATH B — Hardware (zero-copy, GPU-resident)  [preferred]:
-    capturer.NextSurface() → FBInfo{fd/IOSurface/D3DTexture, timestamp}
-    → hwEncoder.EncodeSurface(fbInfo) → EncodedFrame (GPU→CPU: ~30KB compressed only)
+    capturer.next_surface() → FbInfo{ DmaBuf/IoSurface/D3D11Texture, timestamp }
+    → hw_encoder.encode_surface(fb_info) → EncodedUnit (GPU→CPU: ~30KB compressed only)
     Use when: HW encoder available AND capturer implements SurfaceCapturer
-    cursorMode = "separate" (client-side cursor)
+    cursor_mode = "separate" (client-side cursor)
 
-         │  on ErrFallbackToSoftware (DMA-BUF import unsupported, GPU reset, etc.)
+         │  on StreamError::FallbackToSoftware (DMA-BUF import unsupported, GPU reset, etc.)
          ▼
 PATH A — Software (CPU round-trip)  [fallback / [encode] force_addon = "openh264" or "x264"]:
-    capturer.NextFrame() → BGRA []byte (GPU→CPU: ~24MB at 1440p)
-    → converter.Convert() → I420 (CPU, SIMD libyuv ARGBToI420)
-    → encoder.Encode() → []byte Annex B AU + keyframe bool (CPU; OpenH264 CGo or x264 subprocess — VP8/libavcodec/in-process-x264 rejected)
-    cursorMode = "embedded" (server-side blend) OR "separate"
+    capturer.next_frame() → BGRA RVec<u8> (GPU→CPU: ~24MB at 1440p)
+    → converter.convert() → I420 (CPU, SIMD libyuv ARGBToI420)
+    → encoder.encode() → Annex B AU + keyframe bool (CPU; OpenH264 (FFI) or x264 subprocess — VP8/libavcodec/in-process-x264 rejected)
+    cursor_mode = "embedded" (server-side blend) OR "separate"
 ```
 
 **Decision (confirmed):** the legacy ffmpeg-`h264_vaapi` subprocess path (which still did a CPU round-trip via `glReadPixels`→libyuv→stdin→`hwupload`) is REMOVED. Hardware = zero-copy `hwencode` module only; software = in-process OpenH264 (VP8/libvpx/libavcodec rejected). There is no third tier and no ffmpeg dependency anywhere.
@@ -487,59 +551,69 @@ PATH A — Software (CPU round-trip)  [fallback / [encode] force_addon = "openh2
 
 ### Contract 1: Capture -> Encode
 
-```go
-// Capture produces raw pixel frames (BGRA on macOS/Windows, RGBA on Linux GL)
-type Capturer interface {
-    NextFrame() (*Frame, error)
-    Close() error
+```rust
+// Capture produces raw pixel frames (BGRA on macOS/Windows, RGBA on Linux GL).
+// Cleanup is RAII (Drop) — no Close().
+pub trait Capturer {
+    /// Ok(Some(frame)) = a new frame; Ok(None) = no new frame (pacing / static
+    /// screen); Err = failure. Across the add-on ABI `frame.data` is an owned
+    /// RVec<u8> whose ownership transfers to the host (deterministic drop).
+    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError>;
 }
 
-type Frame struct {
-    Data      []byte       // Pixel buffer (Stride * Height bytes)
-    Stride    int          // Bytes per row; MAY exceed Width*4 (padded readback)
-    PixelFmt  PixelFormat  // PixelBGRA (macOS/Windows) or PixelRGBA (Linux GL)
-    Width     int          // pixels
-    Height    int          // pixels
-    Timestamp uint64       // CLOCK_MONOTONIC nanoseconds
+pub struct Frame {
+    pub data: RVec<u8>,       // Pixel buffer (stride * height bytes), owned
+    pub stride: u32,          // Bytes per row; MAY exceed width*4 (padded readback)
+    pub pixel_fmt: PixelFormat, // Bgra (macOS/Windows) or Rgba (Linux GL)
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,    // CLOCK_MONOTONIC nanoseconds
 }
 
-type PixelFormat uint8
-const (
-    PixelBGRA PixelFormat = iota  // BGRA in memory = libyuv ARGB → use ARGBToI420
-    PixelRGBA                     // RGBA in memory = libyuv ABGR → use ABGRToI420
-)
+#[repr(u8)]
+pub enum PixelFormat {
+    Bgra = 0,  // BGRA in memory = libyuv ARGB → ARGBToI420
+    Rgba = 1,  // RGBA in memory = libyuv ABGR → ABGRToI420
+}
 ```
 
-**Data Flow:** `capturer.NextFrame()` -> `converter.Convert(frame)` -> `encoder.Encode(i420Frame)`
-- Converter selects `libyuv.ARGBToI420` (BGRA) or `libyuv.ABGRToI420` (RGBA) based on `frame.PixelFmt`.
+**Data Flow:** `capturer.next_frame()` -> `converter.convert(&frame)` -> `encoder.encode(&i420)`
+- Converter selects `libyuv ARGBToI420` (BGRA) or `ABGRToI420` (RGBA) based on `frame.pixel_fmt`.
 
 **Contract Rules:**
-- `Frame.Data` is BORROWED — only valid until the next `NextFrame()` call. Caller must copy before calling again.
-- Dimensions must remain stable across frames (no mid-stream resize without signaling)
-- Timestamp must be monotonically increasing (sourced from `CLOCK_MONOTONIC`)
-- `NextFrame()` may return `nil, nil` to indicate "no new frame available" (frame pacing / static screen optimization)
+- `Frame.data` ownership **transfers** to the caller (owned `RVec<u8>`); no manual copy-before-next-call footgun (the Go "borrowed slice" hazard is gone). For the CPU path the add-on copies its readback into the returned buffer; the HW path uses `SurfaceCapturer` (no copy).
+- `stride` MAY exceed `width*4` (padded GPU readback, e.g. DXGI) — consumers MUST honor it.
+- Dimensions must remain stable across frames (no mid-stream resize without signaling).
+- `timestamp_ns` must be monotonically increasing (sourced from `CLOCK_MONOTONIC`).
+- `Ok(None)` indicates "no new frame available" (frame pacing / static-screen optimization).
 
 ---
 
 ### Contract 2: Encode -> Server
 
-```go
+```rust
 // Encode produces ONE contiguous Annex B access unit + a keyframe flag.
-type Encoder interface {
-    Encode(frame *I420Frame) (data []byte, keyframe bool, err error)
-    ForceKeyframe()
-    Close() error
+// Cleanup is RAII (Drop) — no Close().
+pub trait Encoder {
+    /// Ok(Some(unit)) = an access unit; Ok(None) = frame skipped; Err = failure.
+    fn encode(&mut self, frame: &I420Frame) -> Result<Option<EncodedUnit>, StreamError>;
+    fn force_keyframe(&mut self);
+}
+
+pub struct EncodedUnit {
+    pub data: RVec<u8>,  // ONE contiguous Annex B access unit (owned)
+    pub keyframe: bool,
 }
 ```
 
-**Data Flow:** `encoder.Encode(frame)` returns `(data, keyframe)` -> pipeline wraps as `EncodedFrame{Data, Keyframe, …}` -> `server.Broadcast(codecType, EncodedFrame)`
+**Data Flow:** `encoder.encode(&frame)` returns `Some(EncodedUnit{data, keyframe})` -> pipeline wraps as `EncodedFrame{ data, keyframe, … }` -> `server.broadcast(codec_type, encoded)`
 
 **Contract Rules:**
-- `nil, false, nil` return means the frame was skipped (no error, no output).
-- First frame after `ForceKeyframe()` MUST be a keyframe (H.264: SPS+PPS+IDR; HEVC: VPS+SPS+PPS+IDR).
-- `data` is **ONE complete access unit**, contiguous Annex B (start codes retained), **NOT** split per-NAL. The old `[][]byte` per-NAL contract is rejected.
+- `Ok(None)` means the frame was skipped (no error, no output).
+- First frame after `force_keyframe()` MUST be a keyframe (H.264: SPS+PPS+IDR; HEVC: VPS+SPS+PPS+IDR).
+- `data` is **ONE complete access unit**, contiguous Annex B (start codes retained), **NOT** split per-NAL. The old per-NAL `Vec<Vec<u8>>` contract is rejected.
 - `keyframe` is set BY THE ENCODER (it knows when it emitted an IDR/IRAP); the server never re-scans NALs.
-- `data` is **borrowed from a `sync.Pool`** — it must NOT be retained past the next `Encode()` call. `server.Broadcast` copies it into the per-session frame-granular out-queue before the loop calls `Encode()` again.
+- `data` ownership **transfers** (owned `RVec<u8>`). `&mut self` means `encode` and reconfigure can never alias (borrow-checker enforced, replacing the Go M-6 mutex discipline). `force_keyframe` is signalled to the frame loop via an `AtomicBool`/channel the loop checks before the next `encode` — it does not mutate encoder state concurrently.
 
 ---
 
@@ -616,140 +690,124 @@ input dims must all agree (no hidden scaling); the pipeline calls
 
 ### Contract 5: Audio -> Server  🔒 DESIGN LOCKED · ⏸️ IMPL DEFERRED (see MODULE_AUDIO)
 
-```go
-// Audio: a per-OS capture add-on delivers PCM chunks; an AudioEncoder (Opus or
-// PCM passthrough) turns them into wire payloads. host→client only. No subprocess.
-type AudioCapturer interface {
-    Chunks() <-chan PCMChunk
-    Format() Format          // canonical 48k/stereo (add-on resamples to this)
-    Close() error
+```rust
+// Audio: a per-OS capture add-on delivers PCM chunks; an encoder (Opus or PCM
+// passthrough) turns them into wire payloads. host→client only. No subprocess.
+// The channel does NOT cross the ABI: the host's audio task pumps next_chunk()
+// into a tokio::sync::mpsc channel.
+pub trait AudioCapturer {
+    fn next_chunk(&mut self) -> Result<Option<PcmChunk>, AudioError>;
+    fn format(&self) -> Format;   // canonical 48k/stereo (add-on resamples to this)
 }
 
-type PCMChunk struct {
-    Data      []byte // FrameSamples*Channels*2, S16LE interleaved (3840 B @ 20 ms)
-    Timestamp uint64 // CLOCK_MONOTONIC ns, sampled AT CAPTURE in the add-on read loop
+pub struct PcmChunk {
+    pub data: RVec<u8>,    // frame_samples*channels*2, S16LE interleaved (3840 B @ 20 ms)
+    pub timestamp_ns: u64, // CLOCK_MONOTONIC ns, sampled AT CAPTURE in the add-on read loop
 }
 ```
 
 **Contract Rules:**
-- `Timestamp` MUST be sampled at capture time (in the capture add-on's read loop), NOT when the pipeline reads it from the channel — stamping late breaks A/V sync. Buffers are small (~60-80 ms capture, ~40 ms client) for realtime.
-- `Timestamp` uses the SAME `CLOCK_MONOTONIC` epoch as video frames. **Audio is the master clock**; video presentation slaves to the audio playout time (see MODULE_AUDIO / MODULE_PROTOCOL "A/V Synchronization").
-- The encoder output is borrowed from a `sync.Pool` (copy before reuse); audio is a **media** datagram type (carries the FrameHeader), single-datagram for Opus.
+- `timestamp_ns` MUST be sampled at capture time (in the capture add-on's read loop), NOT when the host reads it from the channel — stamping late breaks A/V sync. Buffers are small (~60-80 ms capture, ~40 ms client) for realtime.
+- `timestamp_ns` uses the SAME `CLOCK_MONOTONIC` epoch as video frames. **Audio is the master clock**; video presentation slaves to the audio playout time (see MODULE_AUDIO / MODULE_PROTOCOL "A/V Synchronization").
+- Encoder output ownership transfers (owned `RVec<u8>`); audio is a **media** datagram type (carries the FrameHeader), single-datagram for Opus.
 
 ---
 
 ### Contract 6: Capture -> Hardware Encode (Zero-Copy Path)
 
-```go
+```rust
 // SurfaceCapturer is the cross-platform zero-copy contract. Capture add-ons
 // that can produce GPU surfaces (KMS+EGL DMA-BUF, NvFBC CUDA buffer, SCK
-// IOSurface, DXGI DD ID3D11Texture2D) implement this in addition to Capturer.
-//
-// The HW encoder add-on reads the populated per-OS field of FBInfo to
-// determine which platform-specific import path to take.
-type SurfaceCapturer interface {
-    Capturer
-
-    // NextSurface returns a GPU-resident surface handle. Ownership passes to the
-    // HW encoder: EncodeSurface calls fb.Release() exactly once on every path
-    // (M-1). The caller releases it ONLY if it is never handed to an encoder.
-    NextSurface() (*FBInfo, error)
+// IOSurface, DXGI DD ID3D11Texture2D) implement it in addition to Capturer.
+pub trait SurfaceCapturer: Capturer {
+    /// A GPU-resident surface handle. Ownership MOVES to the caller, then into
+    /// the HW encoder. Because FbInfo is passed BY VALUE into encode_surface and
+    /// FbInfo's Drop releases the resource, it is released exactly once on every
+    /// path automatically — the Go "call Release() on every path (M-1)" discipline
+    /// and the TD-01 DMA-BUF fd leak class are eliminated by ownership.
+    fn next_surface(&mut self) -> Result<Option<FbInfo>, CaptureError>;
 }
 
-// FBInfo is the platform-specific surface handle. Only the field for the
-// current OS is populated. HW encoder add-ons read the appropriate field.
-type FBInfo struct {
-    // Generic fields (always set)
-    Width, Height int
-    Timestamp     uint64       // CLOCK_MONOTONIC ns, stamped at capture
-    Release       func()       // Platform-specific cleanup (close DMA-BUF fd, release IOSurface, etc.)
-
-    // Linux fields (set when platform == "linux")
-    DMAFD    int    // File descriptor (caller transfers ownership)
-    Stride   int
-    Format   uint32 // DRM fourcc (e.g., DRM_FORMAT_XRGB8888)
-    Modifier uint64 // Tiling/compression modifier
-
-    // macOS field (set when platform == "darwin")
-    IOSurface uintptr // CVPixelBufferRef (CMSampleBuffer-backed)
-
-    // Windows field (set when platform == "windows")
-    D3DTexture uintptr // ID3D11Texture2D*
+// Platform-specific surface handle as a tagged enum (not a struct of nullable
+// fields). Drop releases the underlying resource exactly once (RAII replaces the
+// manual `Release func()`).
+pub struct FbInfo {
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,        // CLOCK_MONOTONIC ns, stamped at capture
+    pub handle: SurfaceHandle,
 }
 
-// HardwareEncoder is the contract every HW encoder add-on satisfies.
-// See specs/media/MODULE_HARDWARE_ENCODE.md for the full contract.
-type HardwareEncoder interface {
-    // EncodeSurface takes a GPU-resident surface handle and returns ONE
-    // contiguous Annex B access unit (EncodedFrame.Keyframe set by the encoder).
-    // The encoder calls handle.Release() exactly once on EVERY return path
-    // (success, error, fallback). Returns ErrFallbackToSoftware if the handle
-    // cannot be imported (still releasing it).
-    EncodeSurface(handle *FBInfo) (*EncodedFrame, error)
+pub enum SurfaceHandle {
+    // Linux: DMA-BUF. `OwnedFd` closes the fd on Drop (no manual close).
+    DmaBuf { fd: std::os::fd::OwnedFd, stride: u32, fourcc: u32, modifier: u64 },
+    // macOS: CVPixelBuffer-backed IOSurface (retained; released on Drop).
+    IoSurface(objc2_io_surface::IOSurface),
+    // Windows: ID3D11Texture2D (COM ref released on Drop via windows-rs).
+    D3D11Texture(windows::Win32::Graphics::Direct3D11::ID3D11Texture2D),
+}
 
-    // ForceKeyframe requests that the next encoded frame be an IDR.
-    ForceKeyframe()
-
-    // Codec returns the WebCodecs codec string for the Config handshake
-    // (e.g. "avc1.42E01F" for H.264 Constrained Baseline 3.1).
-    Codec() string
-
-    // Close releases all encoder resources.
-    Close() error
+// Every HW encoder add-on implements this. See MODULE_HARDWARE_ENCODE.md.
+pub trait HardwareEncoder {
+    /// CONSUMES the surface (moved in → dropped here → released exactly once on
+    /// success AND error). Returns one contiguous Annex B access unit, or
+    /// StreamError::FallbackToSoftware if the surface cannot be imported.
+    fn encode_surface(&mut self, surface: FbInfo) -> Result<EncodedUnit, StreamError>;
+    fn force_keyframe(&mut self);
+    /// WebCodecs codec string for the config handshake (e.g. "avc1.42E01F").
+    fn codec(&self) -> &str;
 }
 ```
 
-**Data Flow:** `capturer.NextSurface()` -> `hwEncoder.EncodeSurface(handle)` (which calls `handle.Release()` internally, exactly once) -> `server.Broadcast(codecType, *encodedFrame)`
+**Data Flow:** `capturer.next_surface()` -> `hw_encoder.encode_surface(surface)` (surface moved in, released on drop) -> `server.broadcast(codec_type, encoded)`
 
 **Contract Rules:**
-- `FBInfo` ownership is transferred from the capture add-on to the HW encoder add-on. The HW encoder calls `handle.Release()` **exactly once on every path** (success/error/fallback); the capturer and pipeline never release it (single-owner rule, M-1).
-- If hardware encode returns `ErrFallbackToSoftware`, pipeline degrades permanently to software path for the rest of the session.
-- Codec advertisement: the HW encoder advertises its codec via `Codec()`; the pipeline matches against browser handshake preferences.
+- `FbInfo` ownership transfers capture add-on → HW encoder add-on by value. It is released **exactly once on every path** by `Drop` — the capturer and pipeline never release it (single-owner rule, M-1, now compiler-guaranteed).
+- If `encode_surface` returns `StreamError::FallbackToSoftware`, the pipeline degrades permanently to the software path for the rest of the session.
+- Codec advertisement: the HW encoder advertises its codec via `codec()`; the pipeline matches against browser handshake preferences.
 
 ---
 
 ### Contract 7: Pipeline -> Server (Encoded Frame)
 
-```go
+```rust
 // The pipeline pairs encoder output with the frame's metadata before broadcasting.
-// EncodedFrame lives in pkg/stream/ -- shared by SW and HW paths.
-type EncodedFrame struct {
-    Data      []byte // Contiguous Annex B bitstream (start codes retained).
-                     // NOT split into per-NAL slices -- avoids decompose/recompose
-                     // copy overhead. The server prepends the 22-byte FrameHeader
-                     // and copies Data into the per-session frame-granular
-                     // out-queue (the pump fragments it into datagrams later).
-    Width     uint16
-    Height    uint16
-    Timestamp uint64 // CLOCK_MONOTONIC ns, carried through from capture
-    Keyframe  bool   // true if this access unit is a keyframe
-    CodecType uint8  // FrameTypeVideoH264 or FrameTypeVideoHEVC
+// EncodedFrame lives in the featherdesk-stream crate — shared by SW and HW paths.
+pub struct EncodedFrame {
+    pub data: RVec<u8>,    // Contiguous Annex B (start codes retained), owned. NOT
+                           // split per-NAL. The server prepends the 22-byte
+                           // FrameHeader and moves `data` into the per-session
+                           // frame-granular out-queue (a task fragments it later).
+    pub width: u16,
+    pub height: u16,
+    pub timestamp_ns: u64, // CLOCK_MONOTONIC ns, carried through from capture
+    pub keyframe: bool,    // true if this access unit is a keyframe
+    pub codec_type: u8,    // FrameType::VideoH264 or VideoHevc
 }
 
-type Server interface {
-    // Broadcast assembles one access unit and fans it out to per-session queues.
-    // codecType is FrameTypeVideoH264 or FrameTypeVideoHEVC.
-    // The server assigns the video Sequence and uses f.Keyframe (encoder-set)
+// The server is a concrete type the pipeline holds via a handle/Arc.
+impl Server {
+    // Assembles one access unit and fans it out to per-session queues.
+    // The server assigns the video Sequence and uses f.keyframe (encoder-set)
     // for IDR caching + the bootstrap stream.
-    Broadcast(codecType uint8, f EncodedFrame)
-    // Already-encoded audio (Opus packet or raw PCM). codecType = AudioOpus(8) |
-    // AudioPCM(4); server assigns the independent audio Sequence + FrameHeader.
-    BroadcastAudio(codecType uint8, payload []byte, captureTs uint64)
-    // ...
+    pub async fn broadcast(&self, codec_type: u8, f: EncodedFrame) { /* … */ }
+    // Already-encoded audio (Opus packet or raw PCM). codec_type = AudioOpus(8)
+    // | AudioPcm(4); server assigns the independent audio Sequence + FrameHeader.
+    pub async fn broadcast_audio(&self, codec_type: u8, payload: RVec<u8>, capture_ts_ns: u64) { /* … */ }
 }
 ```
 
 **Contract Rules:**
-- The pipeline carries `Width/Height/Timestamp` from the capture step through encode to here (they are NOT recomputed).
+- The pipeline carries `width/height/timestamp_ns` from the capture step through encode to here (they are NOT recomputed).
 - The server owns the per-type sequence counters; the pipeline never sets them.
-- `f.Keyframe` (set by the encoder) lets the server cache the keyframe access unit (SPS+PPS+IDR / VPS+SPS+PPS+IDR) for the bootstrap stream. The server does **not** re-parse NALs (M-2).
+- `f.keyframe` (set by the encoder) lets the server cache the keyframe access unit (SPS+PPS+IDR / VPS+SPS+PPS+IDR) for the bootstrap stream. The server does **not** re-parse NALs (M-2).
 
 ---
 
 ## Module Dependency Graph
 
 ```
-                 pkg/stream (shared types: Params, EncodedFrame, error sentinels)
+                 featherdesk-stream (shared types: Params, EncodedFrame, StreamError)
                     │
     ┌───────────────┼───────────────────────────────────┬──────────┐
     │               │               │           │       │          │
@@ -786,11 +844,11 @@ type Server interface {
 > - No cycles. `stream` is the shared leaf. `pipeline` is the sole orchestrator.
 > - Audio not shown — deferred from the core dependency graph (Webcam was removed entirely).
 > - No `ffmpeg`, no `libavcodec`, no `libvpx` -- all rejected.
-> - No custom `logger` module -- every module takes `*slog.Logger` directly.
+> - No custom `logger` module -- every module uses the `tracing` crate directly.
 
 **Key Properties:**
-- Each domain module is a leaf or near-leaf (depends only on stdlib + system libs via CGo)
-- Modules NEVER import each other (zero import cycles)
+- Each crate is a leaf or near-leaf (depends only on std + system libs via FFI)
+- Crates NEVER cyclically depend on each other (Cargo forbids cycles anyway)
 - Only `pipeline` imports all modules — it's the sole wiring point
 - `protocol` is shared between `server` and `client` (pure data, no logic deps)
 - `hwencode` and `encode` are sibling modules, not parent-child (both define separate interfaces; add-ons implement one)
@@ -824,20 +882,25 @@ The orchestrator is now a proper module (`MODULE_PIPELINE.md`) — not inline in
 - Never panic in hot path
 
 ### Buffer Ownership Model
-- **Capture (CPU):** Returned `Frame.Data` is BORROWED — valid only until the next `NextFrame()` call. Caller must copy if retaining.
-- **Capture (surface):** `NextSurface()` returns an `*FBInfo` whose `Release()` is called **exactly once** by the HW encoder's `EncodeSurface` on every path (success/error/fallback). The capturer and pipeline never release it (single-owner rule, M-1).
-- **Convert:** Returned `*I420Frame` is BORROWED — valid only until the next `Convert()` call. Zero-alloc steady state.
-- **Encode:** Returned `data []byte` is ONE contiguous Annex B access unit, BORROWED from a `sync.Pool` — must NOT be held past the next `Encode()` call. The encoder also returns a `keyframe bool`. (The old "`[][]byte` NALs, freshly allocated, safe to hold" contract is rejected.)
-- **Broadcast:** Server assembles header+payload into one `[]byte` access unit and copies it into the per-session **frame-granular** out-queue; the per-session pump fragments it into datagrams at send time.
+
+Rust's ownership/`Drop` make this model compiler-enforced rather than
+discipline-by-comment (the Go footguns here — borrowed slices held too long,
+`Release()` missed on an error path — become impossible to write).
+
+- **Capture (CPU):** `next_frame()` returns an **owned** `Frame { data: RVec<u8> }`; ownership transfers to the caller, dropped deterministically. (No "borrowed, copy before next call" hazard.) `stride` may exceed `width*4`.
+- **Capture (surface):** `next_surface()` returns an **owned** `FbInfo`; the HW encoder's `encode_surface(surface: FbInfo)` takes it **by value**, so `Drop` releases it **exactly once on every path** (success/error/fallback). The capturer and pipeline never release it (single-owner rule, M-1, compiler-guaranteed).
+- **Convert:** `convert(&frame)` writes into a reused `I420Frame` the converter owns and lends as `&I420Frame` for the duration of the encode call (zero-alloc steady state; the borrow checker forbids retaining it past the next `convert`).
+- **Encode:** `encode()` returns `Some(EncodedUnit { data: RVec<u8>, keyframe })` — ONE contiguous Annex B access unit, **owned** (the old per-NAL `Vec<Vec<u8>>` contract is rejected).
+- **Broadcast:** Server assembles header+payload into one buffer and **moves** it into the per-session **frame-granular** out-queue (`tokio::sync::mpsc`); the per-session task fragments it into datagrams at send time.
 
 **Rule:** Any function that returns borrowed data must document it in the interface comment. The caller must never store borrowed slices beyond the next call boundary.
 
 ### Concurrency Model
-- Capture loop: single goroutine, `runtime.LockOSThread()` (X11/EGL requirement)
-- Encode: synchronous call within capture goroutine (frame drops preferred over pipeline latency)
-- Server broadcast: fan-out via per-session frame-granular out-queues (drop-oldest); a per-session pump fragments + sends datagrams
-- Audio: separate goroutine with channel delivery
-- Input: synchronous handler in server's read goroutine
+- Capture loop: a dedicated OS thread (`std::thread`, not a Tokio worker) because EGL/X11/D3D contexts are thread-affine; it hands frames to the async world via a channel
+- Encode: synchronous call on the capture thread (frame drops preferred over pipeline latency)
+- Server broadcast: fan-out via per-session frame-granular out-queues (drop-oldest `tokio::sync::mpsc`); a per-session async task fragments + sends datagrams
+- Audio: separate task; capture add-on pumped into a `tokio::sync::mpsc` channel
+- Input: handled in the session's control/input task (async read loop)
 
 ### Frame Drop Strategy
 - The system prioritizes realtime delivery over frame completeness
@@ -893,13 +956,13 @@ The pipeline owns this orchestration; no module drives it alone.
 
 ## Refactoring Principles
 
-1. **Interface-First:** Every module exposes a Go interface. Implementations are private.
-2. **Zero Import Cycles:** Modules never import each other (only the orchestrator imports all).
-3. **Testable in Isolation:** Each module has unit tests that run without hardware.
+1. **Trait-First:** Every module exposes a Rust trait. Implementations are private to their crate.
+2. **Zero Cyclic Deps:** Crates never cyclically depend (only the host crate depends on all; Cargo forbids cycles anyway).
+3. **Testable in Isolation:** Each crate has unit tests that run without hardware.
 4. **Swappable (restart-scoped in v1):** Changing a capture or encoder add-on is a config change (`[capture] force_addon`, `[encode] force_addon`) or swapping the add-on library in the add-ons directory, **then a restart** — never a code change in the pipeline. (v1 resolves the add-on set once at startup; live reload is out of scope.)
-5. **Error Propagation:** All errors flow up to the orchestrator with context (`fmt.Errorf("capture: %w", err)`).
-6. **No Global State:** No package-level mutable variables except the add-on registry, which the dlopen loader populates at startup from the add-ons directory.
-7. **Explicit Lifecycle:** Every module has `New()` (create), optional `Start()` (begin work), and `Close()` (cleanup).
+5. **Error Propagation:** All errors flow up to the orchestrator with context (`thiserror` enums + `?`; `.context(...)` via `anyhow` in the host binary only).
+6. **No Global State:** No global mutable statics except the add-on registry, which the loader populates at startup from the add-ons directory.
+7. **Explicit Lifecycle:** Every module type has a constructor (`new`/`builder`), optional `start()` (begin work), and `Drop` (cleanup) — RAII; no manual `Close()` needed.
 8. **Buffer Contracts:** Document whether returned slices are owned or borrowed.
 
 ---
@@ -907,92 +970,42 @@ The pipeline owns this orchestration; no module drives it alone.
 ## File Structure (Post-Refactor Target)
 
 ```
-featherdesk/
-├── cmd/
-│   └── server/
-│       ├── main.go              # config.Load() → pipeline.New() → pipeline.Start()
-│       └── client/              # Embedded web client (//go:embed all:client)
-│           ├── index.html
-│           └── compositor.js    # Single bundle today; future modular split deferred
-├── pkg/                         # Public interfaces (importable by future native clients)
-│   ├── capture/
-│   │   └── capture.go          # Capturer + zero-copy surface handle abstraction
-│   │                           #   (DMA-BUF / IOSurface / D3D11 texture)
-│   ├── encode/
-│   │   └── encode.go           # Encoder interface + I420Frame + EncoderConfig
-│   ├── hwencode/
-│   │   └── hwencode.go         # HardwareEncoder interface + per-OS surface types
-│   ├── stream/
-│   │   └── stream.go           # Params, EncodedFrame, error sentinels (shared leaf)
-│   ├── input/
-│   │   ├── input.go            # KeyMouseInjector/TouchInjector + Event + Dispatcher
-│   │   └── hid.go              # Shared HID-usage tables (neutral keycode contract)
-│   ├── protocol/
-│   │   └── protocol.go         # Wire types + marshal/unmarshal (v1, 22-byte header)
-│   ├── addon/
-│   │   ├── abi.go              # C-ABI contract: FeatherDeskAddonOpen sig, ABIVersion,
-│   │   │                       #   capability descriptor + vtable structs, error-code enum
-│   │   └── featherdesk_addon.h # Generated C header every add-on builds against
-│   └── config/
-│       └── config.go           # TOML schema types + Load + Watch
-├── internal/                    # Private implementations
-│   ├── addon/
-│   │   ├── loader_unix.go      # dlopen scan + ABI check + vtable→Go-interface adapters
-│   │   └── loader_windows.go   # LoadLibraryW equivalent
-│   ├── capture/
-│   │   ├── kms/                # KMS+DRM+EGL Linux capture add-on (add-on ID: kms_egl)
-│   │   ├── nvfbc/              # NvFBC Linux capture add-on (add-on ID: nvfbc)
-│   │   ├── sck/                # ScreenCaptureKit macOS capture add-on (add-on ID: sck)
-│   │   └── cursor/             # Cursor compositing (software) + cursor protocol (hardware)
-│   ├── encode/
-│   │   ├── openh264/           # OpenH264 SW encoder add-on (add-on ID: openh264)
-│   │   ├── libva/              # libva Linux HW add-on (add-on ID: libva)
-│   │   ├── nvenc/              # NVENC HW add-on (add-on ID: nvenc)
-│   │   ├── amf/                # AMD AMF HW add-on (add-on ID: amf)
-│   │   ├── qsv/                # Intel oneVPL HW add-on, Windows (add-on ID: qsv)
-│   │   ├── vt/                 # VideoToolbox macOS SW+HW add-on (add-on IDs: vt_sw, vt_hw)
-│   │   ├── mf/                 # MediaFoundation Windows HW add-on (add-on ID: mf_hw)
-│   │   └── convert/            # libyuv color conversion (used by every SW encoder add-on)
-│   ├── input/                 # Input injection add-ons (zero-by-default → view-only)
-│   │   ├── interception/      # Windows filter driver + SendSAS (add-on ID: interception)
-│   │   ├── wintouch/          # Windows Touch Injection (add-on ID: win_touch)
-│   │   ├── vigem/             # Windows ViGEmBus gamepad (add-on ID: vigem)
-│   │   ├── uinput/            # Linux /dev/uinput (kbd/mouse + gamepad) (add-on ID: uinput)
-│   │   ├── cgevent/           # macOS CGEventPost (add-on ID: cgevent)
-│   │   └── gcvirtual/         # macOS GCVirtualController gamepad (add-on ID: gcvirtual)
-│   ├── clipboard/             # CORE clipboard sync (per-OS files behind build constraints)
-│   │   ├── clipboard.go        # Monitor interface, Content, sanitization
-│   │   ├── clipboard_windows.go # AddClipboardFormatListener + CF_HTML
-│   │   ├── clipboard_linux.go   # XFixes / wlr-data-control
-│   │   └── clipboard_darwin.go  # NSPasteboard changeCount polling
-│   ├── filetransfer/          # CORE file transfer (carried on the main WebTransport session)
-│   │   ├── service.go          # Transfer service, windowed flow control, SHA-256
-│   │   └── sandbox.go          # Fixed-folder path-traversal guard
-│   ├── transport/             # HTTP/3 + WebTransport server (QUIC) — quic-go + webtransport-go
-│   │   └── transport.go        # Transport interface impl, session accept loop
-│   ├── server/
-│   │   ├── server.go           # Per-session orchestration (consumes transport.Session)
-│   │   ├── session.go          # Per-session goroutines (control, input, datagram pump, stream acceptor)
-│   │   ├── auth.go             # First-frame auth on the control stream
-│   │   └── metrics.go          # Prometheus /metrics handler (separate port)
-│   ├── config/
-│   │   ├── load.go             # TOML parse + validate
-│   │   └── watch.go            # SIGHUP / Service Control hot reload
-│   └── pipeline/
-│       ├── pipeline.go         # Pipeline struct, Start(), shutdown
-│       ├── frameloop.go        # Main frame loop, pacing, drop logic
-│       ├── probe.go            # Add-on probe + selection (capture/encode/input)
-│       └── stats.go            # Rolling-window statistics + Prometheus metric registration
-│
-│  (audio/ subdir deferred — added when the audio module is un-paused)
-├── specs/                       # This spec directory
-├── go.mod
-├── go.sum
-└── Makefile                     # Per-platform targets: builds each add-on as a c-shared library
+featherdesk/                         # Cargo workspace
+├── Cargo.toml                       # [workspace] members + shared dep versions
+├── crates/                          # Library crates = the public contracts
+│   ├── featherdesk-abi/             # Stable add-on ABI (abi_stable): root module + capability
+│   │                                #   descriptor + #[sabi_trait] Capturer/Encoder/HardwareEncoder/
+│   │                                #   AudioCapturer/Injector + AbiErr code enum. Built by host AND add-ons.
+│   ├── featherdesk-stream/          # Params, EncodedFrame, StreamError (shared leaf)
+│   ├── featherdesk-protocol/        # Wire types + encode/decode (v1, 22-byte header); serde for JSON control
+│   ├── featherdesk-capture/         # Capturer + SurfaceCapturer traits, Frame, FBInfo (surface handle)
+│   ├── featherdesk-encode/          # Encoder trait, I420Frame, EncoderConfig, color convert (libyuv FFI)
+│   ├── featherdesk-hwencode/        # HardwareEncoder trait + per-OS surface types
+│   ├── featherdesk-input/           # Injector traits + Event + Dispatcher + HID tables
+│   ├── featherdesk-config/          # TOML schema (serde) + load + Validate + Watch
+│   ├── featherdesk-transport/       # HTTP/3 + WebTransport (quinn + wtransport)
+│   ├── featherdesk-clipboard/       # CORE clipboard (cfg(target_os): windows/linux/macos modules)
+│   ├── featherdesk-filetransfer/    # CORE file transfer (windowed flow control, SHA-256, sandbox)
+│   └── featherdesk-host/            # The BINARY crate
+│       └── src/
+│           ├── main.rs              # config::load() → Pipeline::new() → pipeline.start() (#[tokio::main])
+│           ├── pipeline/            # frame loop, pacing, drop logic, probe + selection, stats
+│           ├── server/             # per-session tasks, broadcast fan-out, auth-on-control-stream, metrics
+│           ├── addon/              # abi_stable loader (scan dir, load cdylibs, ABI check) + registry
+│           ├── cursor/             # cursor compositing (SW) + cursor-update protocol (HW path)
+│           └── client/             # embedded web client (rust-embed): index.html, compositor.js
+└── addons/                          # Each add-on = its own cdylib crate → featherdesk-addon-<id>.{so,dylib,dll}
+    ├── capture/{kms_egl, nvfbc}(Linux)  {sck}(macOS)  {dxgi_dd}(Windows)
+    ├── encode/{openh264, x264}  {libva, amf_rocm}(Linux)  {nvenc}  {qsv, mf_hw, amf}(Windows)  {vt}(macOS: vt_sw|vt_hw)
+    ├── audio/{pipewire}(Linux)  {wasapi}(Windows)  {sck_audio}(macOS)  {opus}(codec, all)
+    └── input/{uinput}(Linux)  {interception, vigem, win_touch}(Windows)  {cgevent, gcvirtual}(macOS)
 ```
 
-> `internal/logger/` is **gone** — replaced by stdlib `log/slog`. Every module
-> that needs a logger takes `*slog.Logger` in its constructor.
+> The old Go `internal/logger/` is **gone** — replaced by the `tracing` crate.
+> Every crate emits `tracing` events; `tracing-subscriber` is initialized once in
+> `featherdesk-host`. Add-on `cdylib` crates depend only on `featherdesk-abi`
+> (+ their native FFI), never on the host. Per-OS code uses `#[cfg(target_os =
+> "…")]`, not Go build tags.
 
 ---
 
