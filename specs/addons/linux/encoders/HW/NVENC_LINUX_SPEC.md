@@ -34,7 +34,7 @@ surface this control.
 |-----------|---------|-------|
 | NVIDIA Video Codec SDK headers | NVIDIA Software License (free use) | Cannot redistribute headers separately; users install SDK |
 | `libnvidia-encode` (driver-shipped) | proprietary NVIDIA | Ships with the NVIDIA driver |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 No royalties. No GPL/LGPL contamination. The NVIDIA SDK license is "free to use, can't
 redistribute the SDK as a standalone package." This matches the pattern of every
@@ -68,10 +68,10 @@ the cap rarely matters.
 ### Shared library build
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-nvenc.so ./internal/encode/nvenc
+cargo build --release -p featherdesk-addon-nvenc   # cdylib → featherdesk-addon-nvenc.so
 ```
 
-The `nvenc` add-on shared library is built from the `internal/encode/nvenc/` package.
+The `nvenc` add-on cdylib is built from the `internal/encode/nvenc/` crate.
 The NVIDIA SDK dependency is linked into that library only — the host binary never
 links it.
 
@@ -81,17 +81,24 @@ Users installing this binary need:
 - NVIDIA proprietary driver 470+ (libnvidia-encode.so ships with it)
 - NVIDIA Video Codec SDK 12+ headers at build time only (not at runtime)
 
-### CGo configuration
+### FFI configuration
 
-```go
-/*
-#cgo CFLAGS: -I/usr/local/cuda/include -I${SRCDIR}/sdk
-#cgo LDFLAGS: -L/usr/lib/x86_64-linux-gnu -lnvidia-encode -lcuda -ldl
+The bindings are generated with `bindgen` in `build.rs`, which adds the CUDA +
+SDK include paths, links the driver libraries, and wraps the headers:
 
-#include <cuda.h>
-#include <nvEncodeAPI.h>
-*/
-import "C"
+```rust
+// build.rs
+println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+println!("cargo:rustc-link-lib=nvidia-encode");
+println!("cargo:rustc-link-lib=cuda");
+println!("cargo:rustc-link-lib=dl");
+
+bindgen::Builder::default()
+    .clang_args(["-I/usr/local/cuda/include", "-Isdk"])
+    .header_contents("wrapper.h", "
+        #include <cuda.h>
+        #include <nvEncodeAPI.h>")
+    .generate().unwrap();
 ```
 
 The SDK headers (`nvEncodeAPI.h`, `cuda.h`) are checked into the source tree under
@@ -100,7 +107,7 @@ inside an application source tree (this is what ffmpeg, Sunshine, OBS all do).
 
 ---
 
-## CGo Implementation Sketch
+## FFI Implementation Sketch
 
 ```c
 // Encode session setup (one-time at startup)
@@ -215,10 +222,10 @@ Documented in `MODULE_HARDWARE_ENCODE.md` as one of the supported zero-copy path
 
 ## Probe & Selection
 
-```go
-//go:build linux
+```rust
+// crate: featherdesk-addon-nvenc  (cfg(target_os = "linux"))
 
-func ProbeNVENC() (*NVENCCapabilities, error) {
+fn probe_nvenc() -> Result<NvencCapabilities, EncodeError> {
     // 1. dlopen libnvidia-encode.so
     // 2. NvEncodeAPICreateInstance
     // 3. Enumerate encode GUIDs (H.264, HEVC, AV1)
@@ -242,14 +249,14 @@ OpenH264?             → universal SW fallback
 
 ```
 internal/encode/nvenc/
-├── nvenc.go              // Encoder struct, NewNVENCEncoder
-├── nvenc_cgo_linux.go    // CGo binding, //go:build linux (built into the add-on shared library)
-├── probe.go              // ProbeNVENC()
-├── cuda_interop.go       // KMS DMA-BUF → CUDA array import
+├── nvenc.rs              // Encoder struct, NvencEncoder::new
+├── ffi.rs                // Rust FFI bindings, cfg(target_os = "linux") (built into the add-on cdylib)
+├── probe.rs              // probe_nvenc()
+├── cuda_interop.rs       // KMS DMA-BUF → CUDA array import
 ├── sdk/                  // NVIDIA SDK headers (redistributable per NVIDIA license)
 │   ├── nvEncodeAPI.h
 │   └── cuda.h
-└── nvenc_test.go         // Integration tests (//go:build integration)
+└── tests.rs              // Integration tests (cfg(feature = "integration"))
 ```
 
 ---
@@ -258,15 +265,15 @@ internal/encode/nvenc/
 
 | Test | Hardware |
 |------|---------|
-| `TestProbeNVENC` | NVIDIA GPU + driver |
-| `TestEncodeH264` | NVIDIA GPU |
-| `TestEncodeHEVC` | Maxwell 2+ |
-| `TestEncodeAV1` | Ada Lovelace+ |
-| `TestRefFrameInvalidation` | NVIDIA GPU + simulated packet loss |
-| `BenchmarkEncode1080p60` | NVIDIA GPU |
-| `BenchmarkEncode1440p60` | NVIDIA GPU |
+| `test_probe_nvenc` | NVIDIA GPU + driver |
+| `test_encode_h264` | NVIDIA GPU |
+| `test_encode_hevc` | Maxwell 2+ |
+| `test_encode_av1` | Ada Lovelace+ |
+| `test_ref_frame_invalidation` | NVIDIA GPU + simulated packet loss |
+| `bench_encode_1080p60` | NVIDIA GPU |
+| `bench_encode_1440p60` | NVIDIA GPU |
 
-All gated behind `//go:build integration`.
+All gated behind `cfg(feature = "integration")`.
 
 ---
 
@@ -306,7 +313,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). NVENC supports fully-hot reconfiguration via `nvEncReconfigureEncoder` for everything except resolution changes that cross the IDR boundary.
+This add-on implements `stream::ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). NVENC supports fully-hot reconfiguration via `nvEncReconfigureEncoder` for everything except resolution changes that cross the IDR boundary.
 
 | Param change | NVENC API | Hot? |
 |--------------|-----------|------|
@@ -315,7 +322,7 @@ This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../c
 | `QP` | `rcParams.constQP` (requires `rateControlMode == NV_ENC_PARAMS_RC_CONSTQP`) + `nvEncReconfigureEncoder` | yes |
 | `KeyframeInterval` | `rcParams.gopLength` + `nvEncReconfigureEncoder` | yes |
 | `Width`, `Height` | `nvEncReconfigureEncoder` with `forceIDR=1, resetEncoder=1` -- hot for downscale, requires re-init for upscale past initial `maxEncodeWidth/Height` | mostly |
-| `BitDepth=10` / `HDR=true` | Requires HEVC codec (`NV_ENC_CODEC_HEVC_GUID`) + `NV_ENC_PROFILE_HEVC_MAIN10_GUID`; pipeline negotiates codec at session start, NOT mid-stream -- returns `stream.ErrRequiresRestart` if toggled later | no |
+| `BitDepth=10` / `HDR=true` | Requires HEVC codec (`NV_ENC_CODEC_HEVC_GUID`) + `NV_ENC_PROFILE_HEVC_MAIN10_GUID`; pipeline negotiates codec at session start, NOT mid-stream -- returns `StreamError::RequiresRestart` if toggled later | no |
 | `NetworkRTTMs`, `PacketLossPct` | feeds `rcParams.lowDelayKeyFrameScale` + intra-refresh wave width | yes |
 
 **Sizing hint:** allocate `maxEncodeWidth/Height` to the largest display dimension at session creation to keep resolution-downscale hot.

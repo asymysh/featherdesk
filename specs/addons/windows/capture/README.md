@@ -28,10 +28,10 @@ The default Windows binary ships with no capture backend. Drop in the
 | Home / personal (fastest SW) | `dxgi_dd` | `nvenc,amf,x264` | `featherdesk-addon-{dxgi_dd,nvenc,amf,x264}.dll` |
 | Maximum flexibility | `dxgi_dd` | `mf_hw,nvenc,amf,qsv,openh264,x264` | drop in all; probe selects best at runtime |
 
-Build each add-on separately as a C-shared library and drop the resulting `.dll`
+Build each add-on separately as a cdylib and drop the resulting `.dll`
 into the add-ons directory, e.g.:
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-dxgi_dd.dll ./internal/capture/dxgi
+cargo build --release -p featherdesk-addon-dxgi_dd   # cdylib  featherdesk-addon-dxgi_dd.dll
 ```
 
 ---

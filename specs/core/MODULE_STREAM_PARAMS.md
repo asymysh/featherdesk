@@ -17,50 +17,53 @@ would require N implementations. Centralizing the contract means the
 
 ## The Contract
 
-```go
-package stream
+```rust
+// crate: featherdesk-stream
 
-// EncodedFrame is the pipeline-to-server handoff type. Shared by both
-// SW and HW encoder paths so the server is path-agnostic.
-type EncodedFrame struct {
-    Data      []byte // Contiguous Annex B bitstream (start codes retained).
-                     // NOT split per-NAL -- avoids decompose/recompose copy.
-                     // The server prepends the 22-byte header and sends
-                     // Data directly into the assembled access unit (then fragmented into datagrams).
-    Width     uint16
-    Height    uint16
-    Timestamp uint64 // CLOCK_MONOTONIC ns, carried through from capture
-    Keyframe  bool   // true if this access unit is a keyframe
-    CodecType uint8  // protocol.FrameTypeVideoH264 or FrameTypeVideoHEVC
+/// EncodedFrame is the pipeline-to-server handoff type. Shared by both
+/// SW and HW encoder paths so the server is path-agnostic.
+pub struct EncodedFrame {
+    pub data: bytes::Bytes, // Contiguous Annex B bitstream (start codes retained).
+                            // NOT split per-NAL — avoids decompose/recompose copy.
+                            // The server prepends the 22-byte header and sends
+                            // data directly into the assembled access unit (then fragmented into datagrams).
+                            // bytes::Bytes = cheap clones into every session's out-queue.
+    pub width: u16,
+    pub height: u16,
+    pub timestamp_ns: u64, // CLOCK_MONOTONIC ns, carried through from capture
+    pub keyframe: bool,    // true if this access unit is a keyframe
+    pub codec_type: u8,    // protocol::frame_type::VIDEO_H264 or VIDEO_HEVC
 }
 
-// Params is the cross-platform streaming contract.
-// Owned by the pipeline; translated by each capture + encoder add-on.
-type Params struct {
+/// Params is the cross-platform streaming contract.
+/// Owned by the pipeline; translated by each capture + encoder add-on.
+#[derive(Clone)]
+pub struct Params {
     // ── Resolution ──────────────────────────────────────────────
-    // Width and Height in pixels. Both 0 = use display native resolution.
+    // width and height in pixels. Both 0 = use display native resolution.
     // Changes here trigger re-init of capture (if resolution-fixed) and
-    // re-config of encoder via UpdateStreamParams.
-    Width, Height int
+    // re-config of encoder via update_stream_params.
+    pub width: u32,
+    pub height: u32,
 
     // ── Frame rate ──────────────────────────────────────────────
     // Target capture+encode rate. Capture paces below this if compositor
     // produces fewer frames; encoder treats as ceiling for rate control.
-    FPS int
+    pub fps: u32,
 
     // ── Quality (mutually exclusive) ────────────────────────────
-    // BitrateBps > 0 enables bandwidth-target mode (variable QP).
-    // BitrateBps = 0 falls back to constant-QP mode using QP.
-    BitrateBps int
-    QP         int // 0..51 for H.264, codec-dependent range otherwise
+    // bitrate_bps > 0 enables bandwidth-target mode (variable QP).
+    // bitrate_bps = 0 falls back to constant-QP mode using qp.
+    pub bitrate_bps: u32,
+    pub qp: u32, // 0..51 for H.264, codec-dependent range otherwise
 
     // ── Color / HDR ─────────────────────────────────────────────
-    // BitDepth = 8 or 10. 10-bit requires HDR=true or explicit override.
-    // HDR=true forces BitDepth=10, ColorSpace="bt2020", and switches
+    // bit_depth = 8 or 10. 10-bit requires hdr=true or explicit override.
+    // hdr=true forces bit_depth=10, color_space="bt2020", and switches
     // codec selection from H.264 → HEVC Main10 (no H.264 HDR profile).
-    BitDepth   int
-    HDR        bool
-    ColorSpace string // "bt709" (SDR) | "bt2020" (HDR)
+    pub bit_depth: u32,
+    pub hdr: bool,
+    pub color_space: String, // "bt709" (SDR) | "bt2020" (HDR)
 
     // Chroma subsampling. "420" (default, universally decodable) | "422" | "444".
     // 4:2:2/4:4:4 sharpen text/fine detail (the remote-desktop use case) but need
@@ -68,19 +71,19 @@ type Params struct {
     // they are CAPABILITY-NEGOTIATED with a transparent fall-back to "420" (see
     // "Chroma Subsampling" below). Reliable on the native client; best-effort in
     // the browser.
-    ChromaSubsampling string
+    pub chroma_subsampling: String,
 
     // ── Keyframe behavior ───────────────────────────────────────
     // 0 = on-demand only (current default — client requests {"type":"keyframe"}
     //     on the control stream)
     // >0 = periodic IDR every N frames (only useful for stateless clients)
-    KeyframeInterval int
+    pub keyframe_interval: u32,
 
     // ── Adaptive signals (pipeline measures, feeds back) ────────
     // These are READ-ONLY from add-ons' perspective — set by pipeline
     // based on network telemetry. Add-ons use them only as hints.
-    NetworkRTTMs       int     // From QUIC SmoothedRTT + app ping/pong
-    PacketLossPct      float64 // Smoothed; from server datagram-drop rate + client stats
+    pub network_rtt_ms: u32,  // From QUIC smoothed_rtt + app ping/pong
+    pub packet_loss_pct: f64, // Smoothed; from server datagram-drop rate + client stats
 }
 ```
 
@@ -91,78 +94,78 @@ type Params struct {
 Add-ons implement these in addition to their base contract to support runtime
 parameter changes:
 
-```go
-package stream
+```rust
+// crate: featherdesk-stream
 
-// Error sentinels — defined in the stream package to avoid import cycles
-// between encode, hwencode, and capture packages.
-var (
-    // ErrRequiresRestart is returned by UpdateStreamParams when the requested
-    // change cannot be applied mid-stream (pipeline tears down + recreates).
-    ErrRequiresRestart = errors.New("stream: parameter change requires add-on restart")
+// Error sentinels — defined in the stream crate (one thiserror-derived enum) to
+// avoid the cross-crate cycle between encode, hwencode, and capture. Across the
+// add-on ABI these cross as a stable u32 code the host maps back into StreamError
+// (see CENTRAL "Add-on ABI contract").
+#[derive(Debug, thiserror::Error)]
+pub enum StreamError {
+    /// Returned by update_stream_params when the requested change cannot be
+    /// applied mid-stream (pipeline tears down + recreates).
+    #[error("stream: parameter change requires add-on restart")]
+    RequiresRestart,
 
-    // ErrHDRUnsupported is returned by UpdateStreamParams when an encoder
-    // cannot produce HDR output (8-bit only). The pipeline switches to an
-    // HEVC-Main10-capable encoder IF one is loaded; if NONE is available
-    // (terminal case), the pipeline rejects the HDR request, sends the client
-    // {"type":"hdr_unavailable"} on the control stream, and stays SDR.
-    ErrHDRUnsupported = errors.New("stream: encoder does not support HDR/10-bit")
+    /// Returned by update_stream_params when an encoder cannot produce HDR
+    /// output (8-bit only). The pipeline switches to an HEVC-Main10-capable
+    /// encoder IF one is loaded; if NONE is available (terminal case), the
+    /// pipeline rejects the HDR request, sends the client {"type":"hdr_unavailable"}
+    /// on the control stream, and stays SDR.
+    #[error("stream: encoder does not support HDR/10-bit")]
+    HdrUnsupported,
 
-    // ErrChromaUnsupported is returned by an encoder that cannot produce the
-    // requested 4:2:2/4:4:4 subsampling (e.g. OpenH264 is 4:2:0-only). The
-    // pipeline falls back to "420". A CLIENT that cannot DECODE the advertised
-    // chroma replies {"type":"chroma_unsupported"} and the server likewise
-    // downgrades to "420" + new config + keyframe (see "Chroma Subsampling").
-    ErrChromaUnsupported = errors.New("stream: encoder does not support requested chroma subsampling")
+    /// Returned by an encoder that cannot produce the requested 4:2:2/4:4:4
+    /// subsampling (e.g. OpenH264 is 4:2:0-only). The pipeline falls back to
+    /// "420". A CLIENT that cannot DECODE the advertised chroma replies
+    /// {"type":"chroma_unsupported"} and the server likewise downgrades to
+    /// "420" + new config + keyframe (see "Chroma Subsampling").
+    #[error("stream: encoder does not support requested chroma subsampling")]
+    ChromaUnsupported,
 
-    // ErrFallbackToSoftware is returned by EncodeSurface (HW encoder) or
-    // NextSurface (capturer) when the GPU path fails (surface import error,
-    // driver constraint, GPU reset). Pipeline catches this once per session
-    // and degrades permanently to SW path.
-    ErrFallbackToSoftware = errors.New("stream: hardware path unavailable, fall back to software")
-)
+    /// Returned by encode_surface (HW encoder) or next_surface (capturer) when
+    /// the GPU path fails (surface import error, driver constraint, GPU reset).
+    /// Pipeline catches this once per session and degrades permanently to SW path.
+    #[error("stream: hardware path unavailable, fall back to software")]
+    FallbackToSoftware,
+}
 
-// Manager coordinates dynamic parameter changes across the pipeline.
-// The server feeds client-driven changes (resize, set_bitrate, set_fps) and
-// bandwidth-adaptation signals into the Manager, which clamps/applies hysteresis
-// and computes the effective Params. It does NOT call UpdateStreamParams itself
-// — it hands the effective Params to the pipeline's paramCh so the change is
-// applied ON THE FRAME-LOOP GOROUTINE (M-6: Encode and UpdateStreamParams are
-// never concurrent). See MODULE_PIPELINE "applyParams".
-type Manager interface {
-    // Apply clamps + records the requested params and enqueues the effective
-    // result for the frame loop. Returns the effective params (which may differ
-    // from requested due to clamping/hysteresis).
-    Apply(requested Params) (effective Params, err error)
+/// Manager coordinates dynamic parameter changes across the pipeline.
+/// The server feeds client-driven changes (resize, set_bitrate, set_fps) and
+/// bandwidth-adaptation signals into the Manager, which clamps/applies hysteresis
+/// and computes the effective Params. It does NOT call update_stream_params itself
+/// — it hands the effective Params to the pipeline's param_ch so the change is
+/// applied ON THE FRAME-LOOP THREAD (M-6: encode and update_stream_params are
+/// never concurrent). See MODULE_PIPELINE "apply_params".
+pub trait Manager {
+    /// Clamps + records the requested params and enqueues the effective result
+    /// for the frame loop. Returns the effective params (which may differ from
+    /// requested due to clamping/hysteresis).
+    fn apply(&mut self, requested: Params) -> Result<Params, StreamError>;
 
-    // Current returns the active parameters.
-    Current() Params
+    /// Returns the active parameters.
+    fn current(&self) -> Params;
 }
 ```
 
-The `Configurable*` interfaces live in their respective packages but import
-`stream.Params` and return `stream.ErrRequiresRestart` / `stream.ErrHDRUnsupported`:
+The `Configurable*` traits live in their respective crates but import
+`stream::Params` and return `StreamError::RequiresRestart` / `StreamError::HdrUnsupported`:
 
-```go
-package encode  // SW encoder add-ons
-
-type ConfigurableEncoder interface {
-    Encoder
-    UpdateStreamParams(p stream.Params) error
+```rust
+// crate: featherdesk-encode (SW encoder add-ons)
+pub trait ConfigurableEncoder: Encoder {
+    fn update_stream_params(&mut self, p: stream::Params) -> Result<(), stream::StreamError>;
 }
 
-package hwencode  // HW encoder add-ons
-
-type ConfigurableHardwareEncoder interface {
-    HardwareEncoder
-    UpdateStreamParams(p stream.Params) error
+// crate: featherdesk-hwencode (HW encoder add-ons)
+pub trait ConfigurableHardwareEncoder: HardwareEncoder {
+    fn update_stream_params(&mut self, p: stream::Params) -> Result<(), stream::StreamError>;
 }
 
-package capture  // Capture add-ons
-
-type ConfigurableCapturer interface {
-    Capturer
-    UpdateStreamParams(p stream.Params) error
+// crate: featherdesk-capture (Capture add-ons)
+pub trait ConfigurableCapturer: Capturer {
+    fn update_stream_params(&mut self, p: stream::Params) -> Result<(), stream::StreamError>;
 }
 ```
 
@@ -174,11 +177,11 @@ parameters change.
 
 ## Per-Add-On Translation Table
 
-Each add-on translates `stream.Params` to its native concepts:
+Each add-on translates `stream::Params` to its native concepts:
 
 ### Encoders
 
-| `stream.Params` field | OpenH264 | x264 (subprocess) | NVENC | AMF | MF HW | VT HW |
+| `stream::Params` field | OpenH264 | x264 (subprocess) | NVENC | AMF | MF HW | VT HW |
 |----------------------|----------|-------------------|-------|-----|-------|-------|
 | `Width`, `Height` | `SetOption(SVC_ENCODE_PARAM_EXT)` — requires re-init | Restart ffmpeg with new `-s WxH` | `nvEncReconfigureEncoder` (hot if within initial `maxEncodeWidth/Height`) | `Terminate` + `ReInit` (cold -- AMF does NOT support hot resolution change) | `IMFTransform` teardown + reinit | `VTCompressionSessionInvalidate` + recreate |
 | `FPS` | `SetOption(FRAMERATE)` (hot) | Restart with new `-r` | `nvEncReconfigureEncoder` (hot) | `SetProperty(FRAMERATE)` (hot) | `MF_MT_FRAME_RATE` (requires reinit) | `kVTCompressionPropertyKey_ExpectedFrameRate` (hot) |
@@ -190,7 +193,7 @@ Each add-on translates `stream.Params` to its native concepts:
 
 ### Capturers
 
-| `stream.Params` field | KMS+EGL | NvFBC | SCK (macOS) | DXGI DD |
+| `stream::Params` field | KMS+EGL | NvFBC | SCK (macOS) | DXGI DD |
 |----------------------|---------|-------|-------------|---------|
 | `Width`, `Height` | Native capture; the **encoder** scales (SW: libyuv `I420Scale`; HW: in-encoder) | Native capture; encoder scales | Native capture; encoder scales (SCK *can* also scale via `SCStreamConfiguration.{width,height}`, but default is encoder-scale to keep the invariant) | Native capture; encoder scales |
 | `FPS` | Pipeline pacing (capture is event-driven) | Pipeline pacing | `SCStreamConfiguration.minimumFrameInterval` (hot) | `IDXGIOutputDuplication::AcquireNextFrame` timeout |
@@ -223,10 +226,10 @@ profile is in the WebCodecs spec).
      stream and the session STAYS SDR (H.264, bt709). The pipeline does not
      half-switch capture to 10-bit. This is the only graceful failure mode.
 4. Configure capture add-on:
-   - UpdateStreamParams() with BitDepth=10, HDR=true, ColorSpace="bt2020"
+   - update_stream_params() with bit_depth=10, hdr=true, color_space="bt2020"
    - Capture re-initializes with 10-bit pixel format
 5. Configure encoder add-on:
-   - UpdateStreamParams() — encoder switches to HEVC Main10 profile
+   - update_stream_params() — encoder switches to HEVC Main10 profile
    - The ENCODER ADD-ON owns SEI insertion: it emits the HDR10 mastering-display
      + content-light-level SEI NALs inside each keyframe access unit
      (VPS + SPS + PPS + prefix-SEI + IDR). The pipeline/server never synthesize
@@ -287,7 +290,7 @@ The chroma is encoded in the **profile** of the WebCodecs codec string the
 ```
 1. Pipeline wants ChromaSubsampling = "444".
 2. ENCODER gate: the active encoder advertises its max chroma. If it can't do 444,
-   it returns stream.ErrChromaUnsupported → pipeline downgrades to the encoder's
+   it returns StreamError::ChromaUnsupported → pipeline downgrades to the encoder's
    best (e.g. 420 for OpenH264; 422 if that's the ceiling).
 3. CLIENT gate: the server advertises the resulting codec string in `config`. The
    client runs VideoDecoder.isConfigSupported({codec}); if it can't decode it, the
@@ -329,8 +332,8 @@ the policy; add-ons translate.
    │                                     ├──── paramCh ────────────────>│
    │                                     │                              │ effective Params{W:1920,H:1080}
    │                                     │                              │ applyParams() on the FRAME LOOP:
-   │                                     │                              │   → capture.UpdateStreamParams
-   │                                     │                              │   → encoder.UpdateStreamParams
+   │                                     │                              │   → capture.update_stream_params
+   │                                     │                              │   → encoder.update_stream_params
    │                                     │                              │     (or restart if required)
    │                                     │                              │ ForceKeyframe (new dims invalidate
    │                                     │                              │  reference frames)
@@ -367,9 +370,9 @@ the policy; add-ons translate.
 
 The **server** monitors network telemetry (QUIC `SmoothedRTT` + app ping/pong for
 RTT; the server's own datagram-drop rate + client stats messages for loss) — these
-signals are server-internal — and feeds them into `stream.Manager` every 100ms. The
-Manager applies the adaptation policy below and hands the effective `stream.Params`
-to the pipeline's `paramCh`; the pipeline's frame loop is the sole mutator (M-6).
+signals are server-internal — and feeds them into `stream::Manager` every 100ms. The
+Manager applies the adaptation policy below and hands the effective `stream::Params`
+to the pipeline's `param_ch`; the pipeline's frame loop is the sole mutator (M-6).
 The pipeline does **not** measure telemetry itself:
 
 ```
@@ -393,7 +396,7 @@ update params.NetworkRTTMs, params.PacketLossPct
    ↓
 if new_bitrate != current:
    effective.BitrateBps = new_bitrate
-   send effective Params to pipeline.paramCh   // applied on the frame loop (M-6)
+   send effective Params to pipeline.param_ch  // applied on the frame loop (M-6)
    (no config message — a bitrate change is transparent to the client decoder)
 ```
 
@@ -422,23 +425,23 @@ adapts only bitrate.
 
 ## Capability Probing
 
-Add-ons advertise which `stream.Params` fields they can change without restart:
+Add-ons advertise which `stream::Params` fields they can change without restart:
 
-```go
-type StreamParamsCapability struct {
-    HotChangeable map[string]bool // e.g. {"BitrateBps": true, "Width": false}
-    MinValues     map[string]any
-    MaxValues     map[string]any
+```rust
+pub struct StreamParamsCapability {
+    pub hot_changeable: HashMap<String, bool>,          // e.g. {"bitrate_bps": true, "width": false}
+    pub min_values: HashMap<String, serde_json::Value>,
+    pub max_values: HashMap<String, serde_json::Value>,
 }
 
 // Optional add-on method
-type StreamParamsCapable interface {
-    StreamParamsCapability() StreamParamsCapability
+pub trait StreamParamsCapable {
+    fn stream_params_capability(&self) -> StreamParamsCapability;
 }
 ```
 
 The pipeline uses this at startup to decide:
-- Which fields trigger `UpdateStreamParams()` vs full add-on restart
+- Which fields trigger `update_stream_params()` vs full add-on restart
 - Validation bounds for incoming client requests (clamp to add-on's MinValues / MaxValues)
 
 Add-ons that don't implement `StreamParamsCapable` are treated as fully
@@ -448,7 +451,7 @@ immutable: every parameter change requires restart.
 
 ## What Stays in `[addon_module_*]` TOML Sections
 
-`stream.Params` fields **leave** `[encode]` and `[capture]` sections. The
+`stream::Params` fields **leave** `[encode]` and `[capture]` sections. The
 add-on-specific TOML sections keep only **static, startup-read tuning** that
 doesn't fit the dynamic Params model:
 
@@ -466,7 +469,7 @@ doesn't fit the dynamic Params model:
 | kms_egl | `drm_card`, `cursor_plane` |
 
 The TOML `[stream]` section provides **initial defaults**; runtime
-`stream.Params` may diverge based on client requests and adaptive policy.
+`stream::Params` may diverge based on client requests and adaptive policy.
 
 ---
 
@@ -474,9 +477,9 @@ The TOML `[stream]` section provides **initial defaults**; runtime
 
 📋 **Specced.** Implementation requires:
 
-1. `pkg/stream/params.go` — `stream.Params` struct + `ConfigurableEncoder` /
+1. `featherdesk-stream` crate (`params.rs`) — `stream::Params` struct + `ConfigurableEncoder` /
    `ConfigurableHardwareEncoder` / `ConfigurableCapturer` interfaces
 2. Pipeline updates — telemetry loop, adaptation policy, resize message handler
-3. Per-add-on `UpdateStreamParams` implementations
+3. Per-add-on `update_stream_params` implementations
 4. Protocol additions — `{"type":"resize"}` control-stream JSON message handler
 5. HDR pipeline — encoder switching logic when `Params.HDR` flips

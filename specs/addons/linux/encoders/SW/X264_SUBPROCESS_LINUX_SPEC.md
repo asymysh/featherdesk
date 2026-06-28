@@ -19,14 +19,14 @@ binary never links libx264.
 |-----------|---------|-------|
 | libx264 | GPL-2.0+ | Encoder library |
 | ffmpeg (as subprocess) | GPL-2.0+ | Used as the subprocess wrapper; already links libx264 |
-| Our Go bridge code | Proprietary | Spawns subprocess, pipes frames, reads NALs |
+| Our Rust bridge code | Proprietary | Spawns subprocess, pipes frames, reads NALs |
 
 **GPL isolation:** The main `featherdesk` binary is proprietary. The x264
 subprocess is a separate program (ffmpeg) distributed under GPL. This is the
 same pattern used by VLC, commercial streaming products, and any proprietary
 app that shells out to ffmpeg.
 
-**What we publish:** The Go bridge code that spawns the subprocess is trivial
+**What we publish:** The Rust bridge code that spawns the subprocess is trivial
 and proprietary. ffmpeg is distributed separately under its own GPL license.
 Users install ffmpeg independently or we bundle it as a separate binary.
 
@@ -63,9 +63,9 @@ subprocess code runs identically on Linux. Linux native benchmarks pending.
 |--------|-------|
 | ffmpeg subprocess startup | ~50ms (one-time, amortized) |
 | Per-frame pipe I/O (I420 1080p = 3.1MB) | <1ms |
-| Total subprocess overhead vs hypothetical CGo direct | ~1-2ms |
+| Total subprocess overhead vs hypothetical Rust FFI direct | ~1-2ms |
 
-The subprocess model adds ~1-2ms over what a hypothetical direct CGo binding
+The subprocess model adds ~1-2ms over what a hypothetical direct Rust FFI binding
 would achieve. At 3.3ms total, this is still faster than OpenH264's 7.4ms
 in-process.
 
@@ -105,13 +105,13 @@ ffmpeg -hide_banner -loglevel error \
   -f h264 pipe:1
 ```
 
-Parameters controlled by the Go bridge via config:
+Parameters controlled by the Rust bridge via config:
 
 | Parameter | Config key | Default |
 |-----------|-----------|---------|
 | Preset | `encode.x264_preset` | `ultrafast` |
 | CRF | `encode.qp` | 26 |
-| Threads | auto (runtime.NumCPU) | all cores |
+| Threads | auto (`std::thread::available_parallelism()`) | all cores |
 | Tune | hardcoded | `zerolatency` (mandatory for streaming) |
 
 ---
@@ -121,11 +121,11 @@ Parameters controlled by the Go bridge via config:
 ### Shared library build
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-x264.so ./internal/encode/x264
+cargo build --release -p featherdesk-addon-x264   # cdylib → featherdesk-addon-x264.so
 ```
 
-The `x264` add-on shared library contains the Go bridge code that spawns the subprocess.
-The x264 bridge is pure Go (os/exec + io.Pipe); only a thin cgo shim that exports the C-ABI `FeatherDeskAddonOpen` entry point is compiled for the c-shared build.
+The `x264` add-on cdylib contains the Rust bridge code that spawns the subprocess.
+The x264 bridge is pure Rust (`std::process` + pipes); it exports the add-on's `abi_stable` root module as its entry point — no C SDK is linked into the library.
 
 ### Runtime dependency
 
@@ -140,7 +140,7 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 |--------|-----|
 | User installs ffmpeg | `apt install ffmpeg` (Debian/Ubuntu) / `dnf install ffmpeg` (Fedora) |
 | Bundle ffmpeg binary | Ship `ffmpeg` alongside `featherdesk` in the installer |
-| Docker | `FROM golang:1.26 AS build` + `apt install ffmpeg` in runtime stage |
+| Docker | `FROM rust:1.83 AS build` + `apt install ffmpeg` in runtime stage |
 
 ---
 
@@ -148,9 +148,9 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 
 ```
 internal/encode/x264/
-├── x264.go              // Go bridge: subprocess management, pipe I/O
-├── nal_split.go         // H.264 NAL unit splitting from pipe stream
-└── x264_test.go         // Integration test (requires ffmpeg)
+├── x264.rs              // Rust bridge: subprocess management, pipe I/O
+├── nal_split.rs         // H.264 NAL unit splitting from pipe stream
+└── tests.rs             // Integration test (requires ffmpeg)
 ```
 
 ---
@@ -161,7 +161,7 @@ internal/encode/x264/
 - Entropy: CAVLC (ultrafast) or CABAC (superfast+)
 - Slices: auto (x264 decides based on thread count)
 - B-frames: 0 (zerolatency tune)
-- IDR: on-demand via `ForceKeyframe()` → kill + restart ffmpeg, or `-x264opts keyint=N`
+- IDR: on-demand via `force_keyframe()` → kill + restart ffmpeg, or `-x264opts keyint=N`
 - NAL format: Annex B (start codes retained) — matches our wire protocol
 
 ---
@@ -186,7 +186,7 @@ Use OpenH264 instead when:
 | Encoder | 1080p ms | License | Ship? |
 |---------|---------|---------|-------|
 | **x264 ultrafast 12T** | **3.3ms** | GPL | ✅ subprocess |
-| OpenH264 4T | 7.4ms | BSD | ✅ CGo direct |
+| OpenH264 4T | 7.4ms | BSD | ✅ Rust FFI direct |
 | VP9 speed8 4T | 9.0ms | BSD | ⚠️ marginal |
 | x265 ultrafast 4T | 9.8ms | GPL | ❌ slower than OpenH264 |
 | SVT-AV1 p12 12T | 13.2ms | BSD | ❌ too slow |
@@ -216,11 +216,11 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). The x264 subprocess bridge does **not** support hot reconfiguration -- ALL parameter changes restart the ffmpeg child process.
+This add-on implements `stream::ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). The x264 subprocess bridge does **not** support hot reconfiguration -- ALL parameter changes restart the ffmpeg child process.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|
-| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | `UpdateStreamParams` returns `stream.ErrRequiresRestart` -- pipeline tears down + respawns ffmpeg with new `-s WxH -r FPS -crf QP -g KI` (CRF mode) or `-s WxH -r FPS -b:v B -g KI` (bitrate mode). `-crf` and `-b:v` are mutually exclusive. | no |
-| `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` -- H.264 HDR profile not in WebCodecs spec | n/a |
+| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | `update_stream_params` returns `StreamError::RequiresRestart` -- pipeline tears down + respawns ffmpeg with new `-s WxH -r FPS -crf QP -g KI` (CRF mode) or `-s WxH -r FPS -b:v B -g KI` (bitrate mode). `-crf` and `-b:v` are mutually exclusive. | no |
+| `BitDepth=10` / `HDR=true` | rejected with `StreamError::HdrUnsupported` -- H.264 HDR profile not in WebCodecs spec | n/a |
 
 **Restart semantics:** the bridge forces an IDR on the first frame from the new ffmpeg instance so the client decoder picks up the new SPS/PPS cleanly.

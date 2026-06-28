@@ -7,6 +7,14 @@
 > chosen** — it will be evaluated and locked when v2 implementation begins.
 > Nothing in v1 depends on this module.
 
+> **Roadmap — v2 typed control messages (protobuf/`prost`).** Where the v2 native
+> client needs typed/versioned control messages (signaling payloads, capability
+> exchange, the auth-key / invite material), the plan is to adopt **protobuf
+> (`prost`)** rather than the v1 browser's JSON. v1 stays **JSON + fixed-binary
+> media** (the browser has no protobuf runtime); protobuf is reserved for v2,
+> where there is no browser-JS constraint. This is a roadmap indicator, not a
+> change to v1.
+
 ---
 
 ## What the native client needs (requirements)
@@ -28,29 +36,30 @@
 The server doesn't know or care *how* it got a connection — it asks for a
 listener and gets one:
 
-```go
-package network
+```rust
+// crate: featherdesk-network
 
 // Listener abstracts the network surface. The default is a plain UDP listener
-// (net.ListenPacket); a connectivity add-on provides an overlay-backed one.
-type Listener interface {
-    // Accept blocks until a new peer connects. Returns a net.PacketConn (or
-    // equivalent) that the transport module wraps as a QUIC connection.
-    Accept(ctx context.Context) (net.PacketConn, net.Addr, error)
-    Addr() net.Addr
-    Close() error
+// (tokio::net::UdpSocket); a connectivity add-on provides an overlay-backed one.
+// Cleanup is RAII (Drop) — no Close().
+#[async_trait::async_trait]
+pub trait Listener: Send + Sync {
+    /// Accept blocks until a new peer connects. Returns a datagram socket (or
+    /// equivalent) that the transport module wraps as a quinn endpoint.
+    async fn accept(&self) -> Result<(Box<dyn quinn::AsyncUdpSocket>, SocketAddr), NetworkError>;
+    fn addr(&self) -> SocketAddr;
 }
 
 // Provider is the factory the pipeline calls at startup. Add-on shared libraries
 // register themselves; the pipeline picks the loaded one (or plain UDP).
-type Provider interface {
-    // Listen returns a Listener. For plain UDP this is trivial; for an overlay
-    // this may involve joining a tailnet / registering with a signaling server.
-    Listen(cfg Config) (Listener, error)
+pub trait Provider: Send + Sync {
+    /// Listen returns a Listener. For plain UDP this is trivial; for an overlay
+    /// this may involve joining a tailnet / registering with a signaling server.
+    fn listen(&self, cfg: Config) -> Result<Box<dyn Listener>, NetworkError>;
 }
 
 // Config carries [network] TOML fields + the sharing-key material.
-type Config struct {
+pub struct Config {
     // ... TBD per mechanism
 }
 ```
@@ -81,17 +90,17 @@ pattern as capture/encode/input/audio:
 | Binary size | ~15 MB added |
 | Trade-off | Heavier dep; the client effectively "joins a VPN" (may spook enterprise users); Headscale is community-maintained |
 
-### Option B: pion (ICE/STUN/TURN) + quic-go
+### Option B: pion (ICE/STUN/TURN) + quinn
 
 | Aspect | Detail |
 |---|---|
 | What it is | Use pion's ICE agent for NAT traversal; once a direct UDP path is punched, run QUIC on it |
 | Coordination | A minimal custom signaling server (WebSocket or HTTP) you operate — exchanges SDP/candidates |
-| Relay | TURN server (self-operated; pion includes a Go TURN server) |
+| Relay | TURN server (self-operated; pion includes a TURN server) |
 | NAT success rate | ~70–80% direct (standard ICE) |
 | CGNAT-both-sides | ❌ direct fails → falls back to TURN relay (adds latency, costs relay bandwidth) |
 | UX | Invite code: host registers with signaling server → generates a code → client pastes → signaling exchanges candidates → connection |
-| Self-hostable | ✅ (signaling + TURN are small Go binaries) |
+| Self-hostable | ✅ (signaling + TURN are small self-contained binaries) |
 | Binary size | ~5 MB added |
 | Trade-off | Lower direct-connection rate through hard NAT; you operate signaling + TURN; more code to maintain |
 
@@ -99,7 +108,7 @@ pattern as capture/encode/input/audio:
 
 | Aspect | Detail |
 |---|---|
-| What it is | A bare rendezvous server + simultaneous-open UDP hole-punching directly with quic-go |
+| What it is | A bare rendezvous server + simultaneous-open UDP hole-punching directly with quinn |
 | Coordination | Custom rendezvous (tiny HTTP/WS server) |
 | Relay | None built-in (you'd add a TURN-like relay separately if needed) |
 | NAT success rate | Variable — works for EIM/EIF NAT, fails for symmetric |

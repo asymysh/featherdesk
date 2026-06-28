@@ -22,6 +22,11 @@ The wire format of the messages themselves (frame headers, input records,
 clipboard payloads) lives in [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md). The
 transport is the envelope; the protocol is the contents.
 
+> **Implementation note.** WebTransport is provided by the **`wtransport`** crate
+> (built on **`quinn`**); it is **pre-1.0 and tracks a still-draft spec** (maturity
+> risk), and that risk is **isolated behind the `featherdesk-transport` crate** —
+> the single insulation point (see CENTRAL "Risks").
+
 ---
 
 ## Why WebTransport (QUIC), not WebSocket
@@ -53,90 +58,101 @@ not FeatherDesk's.
 
 ## Public Interface
 
-```go
-package transport
+```rust
+// crate: featherdesk-transport
 
-// Transport is the QUIC/WebTransport server abstraction. The pipeline owns
-// one Transport instance; it accepts connections, multiplexes streams +
-// datagrams, and surfaces them to the server module.
-type Transport interface {
-    // Start binds the QUIC listener and serves WebTransport sessions until
-    // ctx is cancelled. Blocks. TLS is mandatory; cert source is per
-    // server.tls config (MODULE_SERVER).
-    Start(ctx context.Context) error
+/// Transport is the QUIC/WebTransport server abstraction. The pipeline owns
+/// one Transport instance; it accepts connections, multiplexes streams +
+/// datagrams, and surfaces them to the server module.
+#[async_trait::async_trait]
+pub trait Transport: Send + Sync {
+    /// Binds the QUIC listener and serves WebTransport sessions until `cancel`
+    /// fires. Blocks (awaits). TLS is mandatory; cert source is per
+    /// server.tls config (MODULE_SERVER).
+    async fn start(&self, cancel: CancellationToken) -> Result<(), TransportError>;
 
-    // SessionsChan yields newly-accepted WebTransport sessions. The server
-    // module reads from it and drives per-session auth + dispatch.
-    SessionsChan() <-chan Session
+    /// Yields newly-accepted WebTransport sessions. The server module reads from
+    /// the receiver and drives per-session auth + dispatch.
+    fn sessions(&mut self) -> tokio::sync::mpsc::Receiver<Box<dyn Session>>;
 
-    Close() error
+    // No close(): the listener is torn down by dropping the Transport (RAII) or
+    // by cancelling `cancel`. Cleanup is deterministic on Drop.
 }
 
-// Session is one accepted WebTransport session = one client connection.
-// Wraps the underlying webtransport-go session with FeatherDesk semantics.
-type Session interface {
-    // Context returns a context cancelled when the session closes.
-    Context() context.Context
+/// Session is one accepted WebTransport session = one client connection.
+/// Wraps the underlying `wtransport` session with FeatherDesk semantics.
+#[async_trait::async_trait]
+pub trait Session: Send + Sync {
+    /// A CancellationToken that fires when the session closes.
+    fn cancelled(&self) -> CancellationToken;
 
-    // RemoteAddr returns the client's network address (for logging only).
-    RemoteAddr() net.Addr
+    /// The client's network address (for logging only).
+    fn remote_addr(&self) -> std::net::SocketAddr;
 
-    // AcceptStream blocks until the client opens a new bidirectional stream.
-    // The FIRST byte of every such stream is a StreamType tag (StreamControl /
-    // StreamInput / StreamClipboard / StreamFile); the server reads it to
-    // dispatch the stream. Streams are identified by tag, NOT by accept order.
-    // See "Stream Identification" below.
-    AcceptStream(ctx context.Context) (Stream, error)
+    /// Blocks until the client opens a new bidirectional stream. The FIRST byte
+    /// of every such stream is a StreamType tag (stream_type::CONTROL / INPUT /
+    /// CLIPBOARD / FILE); the server reads it to dispatch the stream. Streams
+    /// are identified by tag, NOT by accept order. See "Stream Identification".
+    async fn accept_stream(&self, cancel: CancellationToken) -> Result<Box<dyn Stream>, TransportError>;
 
-    // OpenStream opens a server-initiated bidirectional stream (unused in v1).
-    OpenStream(ctx context.Context) (Stream, error)
+    /// Opens a server-initiated bidirectional stream (unused in v1).
+    async fn open_stream(&self, cancel: CancellationToken) -> Result<Box<dyn Stream>, TransportError>;
 
-    // OpenUniStream opens a server-initiated unidirectional stream. Used for the
-    // bootstrap stream: the server writes StreamBootstrap (0x10) then the seed
-    // IDR. See "Connection Lifecycle" and MODULE_PROTOCOL "Fast-Join".
-    OpenUniStream(ctx context.Context) (UniStream, error)
+    /// Opens a server-initiated unidirectional stream. Used for the bootstrap
+    /// stream: the server writes stream_type::BOOTSTRAP (0x10) then the seed
+    /// IDR. See "Connection Lifecycle" and MODULE_PROTOCOL "Fast-Join".
+    async fn open_uni_stream(&self, cancel: CancellationToken) -> Result<Box<dyn UniStream>, TransportError>;
 
-    // ReadDatagram blocks for the next inbound datagram. Returns at most one
-    // datagram per call. Sized up to ~1200 bytes (the QUIC datagram MTU).
-    ReadDatagram(ctx context.Context) ([]byte, error)
+    /// Blocks for the next inbound datagram. Returns at most one datagram per
+    /// call. Sized up to ~1200 bytes (the QUIC datagram MTU).
+    async fn read_datagram(&self, cancel: CancellationToken) -> Result<bytes::Bytes, TransportError>;
 
-    // SendDatagram queues ONE datagram for delivery. Fire-and-forget per
-    // datagram; delivery is best-effort. Datagrams larger than the negotiated
-    // MTU (typically 1200 bytes) MUST be fragmented by the caller. The caller's
-    // send path must be frame-granular (enqueue whole access units, fragment at
-    // send) — never a small fixed channel of individual fragments. See
-    // "Datagram Fragmentation" below.
-    SendDatagram(payload []byte) error
+    /// Queues ONE datagram for delivery. Fire-and-forget per datagram; delivery
+    /// is best-effort. Datagrams larger than the negotiated MTU (typically 1200
+    /// bytes) MUST be fragmented by the caller. The caller's send path must be
+    /// frame-granular (enqueue whole access units, fragment at send) — never a
+    /// small fixed channel of individual fragments. See "Datagram Fragmentation".
+    fn send_datagram(&self, payload: bytes::Bytes) -> Result<(), TransportError>;
 
-    // CloseWithError gracefully closes the session with an application code.
-    // Standard codes are defined in MODULE_PROTOCOL.
-    CloseWithError(code uint32, reason string) error
+    /// Gracefully closes the session with an application code. Standard codes
+    /// are defined in MODULE_PROTOCOL.
+    fn close_with_error(&self, code: u32, reason: &str) -> Result<(), TransportError>;
 }
 
-type Stream interface {
-    io.ReadWriteCloser
-    StreamID() uint64
-    // CancelRead / CancelWrite abort one direction with a reset code.
-    CancelRead(code uint32)
-    CancelWrite(code uint32)
+/// Bidirectional QUIC stream. AsyncRead+AsyncWrite; closing is RAII (drop, or
+/// AsyncWriteExt::shutdown for a graceful FIN) — there is no explicit Close().
+pub trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {
+    fn stream_id(&self) -> u64;
+    /// Abort the read direction with a reset code.
+    fn cancel_read(&self, code: u32);
+    /// Abort the write direction with a reset code.
+    fn cancel_write(&self, code: u32);
 }
 
-type UniStream interface {
-    io.WriteCloser
-    StreamID() uint64
-    CancelWrite(code uint32)
+/// Unidirectional (write-only) QUIC stream. Closing is RAII (drop / shutdown).
+pub trait UniStream: tokio::io::AsyncWrite + Send + Unpin {
+    fn stream_id(&self) -> u64;
+    fn cancel_write(&self, code: u32);
 }
 
-// Config sources the [server] + [server.tls] + [transport] sections.
-type Config struct {
-    Bind       string         // "0.0.0.0:30084" — UDP listen address
-    TLS        TLSConfig      // certificate sources (same as MODULE_SERVER)
-    MaxClients int            // max concurrent sessions (default 25)
-    Logger     *slog.Logger
+/// Config sources the [server] + [server.tls] + [transport] sections.
+pub struct Config {
+    pub bind: String,      // "0.0.0.0:30084" — UDP listen address
+    pub tls: TlsConfig,    // certificate sources (same as MODULE_SERVER)
+    pub max_clients: u32,  // max concurrent sessions (default 25)
+    // Logging is via the `tracing` crate (replaces the old *slog.Logger field).
 }
 
-// New returns a Transport backed by quic-go + webtransport-go.
-func New(cfg Config) (Transport, error)
+/// One thiserror-derived error enum for the crate.
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("transport closed")] Closed,
+    #[error("tls: {0}")] Tls(String),
+    #[error("io: {0}")] Io(#[from] std::io::Error),
+}
+
+/// Returns a Transport backed by quinn + wtransport.
+pub fn new(cfg: Config) -> Result<impl Transport, TransportError> { /* … */ }
 ```
 
 ---
@@ -204,23 +220,23 @@ transfer) at unpredictable times. Dispatching by accept-order is therefore a
 bug. Instead, **every stream is self-identifying**: the opener writes a 1-byte
 `StreamType` tag as the very first byte, before any framed payload.
 
-```go
+```rust
 // First byte of every stream. Client-opened on bidi streams; server-opened
-// on the bootstrap uni stream. Defined in pkg/protocol, shared with the client.
-const (
-    StreamControl   uint8 = 0x00 // bidi, client-opened, exactly one per session
-    StreamInput     uint8 = 0x01 // bidi, client-opened, controller role only
-    StreamClipboard uint8 = 0x02 // bidi, client-opened, on demand
-    StreamFile      uint8 = 0x03 // bidi, client-opened, one per transfer
-    StreamBootstrap uint8 = 0x10 // uni,  server-opened, one per join/resume
-)
+// on the bootstrap uni stream. Defined in featherdesk-protocol, shared with the client.
+pub mod stream_type {
+    pub const CONTROL: u8 = 0x00;   // bidi, client-opened, exactly one per session
+    pub const INPUT: u8 = 0x01;     // bidi, client-opened, controller role only
+    pub const CLIPBOARD: u8 = 0x02; // bidi, client-opened, on demand
+    pub const FILE: u8 = 0x03;      // bidi, client-opened, one per transfer
+    pub const BOOTSTRAP: u8 = 0x10; // uni,  server-opened, one per join/resume
+}
 ```
 
 The server's accept loop reads the first byte of each accepted bidi stream and
 dispatches: `0x00` → control handler, `0x01` → input handler, `0x02` → clipboard
 handler, `0x03` → a new file-transfer handler. An unknown tag, a **second**
 `0x00`, or an `0x01`/`0x02` from a `view`-role client is a protocol error
-(`CloseProtocolError`). The browser client reads the first byte of each incoming
+(`close::PROTOCOL_ERROR`). The browser client reads the first byte of each incoming
 **uni** stream identically and routes `0x10` to its bootstrap reader.
 
 ---
@@ -245,13 +261,13 @@ handler, `0x03` → a new file-transfer handler. An unknown tag, a **second**
      - Valid       → reply {"type":"auth_ok","session":{…}}, then send the
                      {"type":"config",…} line, then open the bootstrap uni
                      stream (tag 0x10) and write the seed IDR.
-     - Invalid     → CloseWithError(4401, "auth failed")
+     - Invalid     → close_with_error(close::AUTH_FAILED, "auth failed")
      - Auth deadline fired (no 0x00 control stream + valid auth within 5 s)
-                   → CloseWithError(4408, "auth timeout")
+                   → close_with_error(close::AUTH_TIMEOUT, "auth timeout")
 9. Server: accepts additional client streams (input 0x01, clipboard 0x02, file
    0x03) as they arrive, dispatching by tag.
 10. Steady state: media on datagrams, control + input on streams, all multiplexed
-11. Either side closes → CloseWithError or graceful close → Transport surfaces
+11. Either side closes → close_with_error or graceful close → Transport surfaces
     the close event to the server module → session resources released
 ```
 
@@ -319,44 +335,46 @@ boundary, with no retransmit cost.
 > drop fragments *mid-frame*, corrupting **every** frame under load instead of
 > cleanly dropping whole stale frames. Instead the per-session out-queue holds
 > **assembled access units** (cap ~8 frames, drop-oldest); a single pump
-> goroutine pulls one frame, fragments it, and calls `SendDatagram` per fragment
+> task pulls one frame, fragments it, and calls `send_datagram` per fragment
 > back-to-back. Loss is then naturally whole-frame (recovered by the reassembly
 > deadline), never mid-frame. This queue is owned by the server module
-> ([`MODULE_SERVER.md`](./MODULE_SERVER.md)); `Transport.SendDatagram` itself is
+> ([`MODULE_SERVER.md`](./MODULE_SERVER.md)); `Transport::send_datagram` itself is
 > fire-and-forget per datagram.
 
 ---
 
 ## Server-Side Implementation
 
-Built on `github.com/quic-go/quic-go` + `github.com/quic-go/webtransport-go`.
-Both are production-ready (`quic-go` is the reference Go QUIC implementation;
-`webtransport-go` is its WebTransport extension by the same team).
+Built on **`quinn`** + **`wtransport`**. Both are production-grade for QUIC
+(`quinn` is the de-facto Rust QUIC implementation; `wtransport` is the WebTransport
+server on top of it — pre-1.0, see the maturity note in the Overview).
 
 Single UDP socket, single TLS certificate (same source as the previous WSS
 config), single HTTP/3 server. The `/auth` HTTP endpoint runs on the same
 HTTP/3 server. The `/wt` path is the WebTransport upgrade target. The embedded
 client (HTML + JS) is served from `/`.
 
-```go
-// internal/transport/wt/wt.go
-import (
-    "github.com/quic-go/quic-go/http3"
-    "github.com/quic-go/webtransport-go"
-)
+```rust
+// crate: featherdesk-transport (src/wt.rs)
+use wtransport::{Endpoint, ServerConfig};
 
-// Single HTTP/3 server handles /, /auth, /wt on the same UDP port.
-h3 := &http3.Server{
-    Addr:      cfg.Bind,
-    Handler:   mux,           // mux carries /, /auth, /wt routes
-    TLSConfig: cfg.TLS.HTTP3Config(),
+// A single endpoint (HTTP/3 over quinn) handles /, /auth, /wt on the same UDP
+// port; an h3 layer serves the / and /auth routes, wtransport runs the /wt
+// WebTransport upgrade.
+let endpoint = Endpoint::server(
+    ServerConfig::builder()
+        .with_bind_address(cfg.bind.parse()?)
+        .with_certificate(cfg.tls.into_rustls()?)   // same PEM source as MODULE_SERVER
+        .build(),
+)?;
+
+// Accept loop: each incoming session is surfaced to the server module.
+while let Some(incoming) = endpoint.accept().await {
+    let session = incoming.await?;          // WebTransport upgrade (validates :path = /wt)
+    if sessions_tx.send(new_session(session)).await.is_err() {
+        break; // server module dropped the receiver
+    }
 }
-wt := &webtransport.Server{ H3: h3 }
-mux.Handle("/wt", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-    sess, err := wt.Upgrade(w, r)
-    if err != nil { … return }
-    t.sessions <- newSession(sess)
-}))
 ```
 
 **No separate TCP listener.** HTTP/3 replaces the previous HTTPS/TCP listener
@@ -413,7 +431,7 @@ adaptive bitrate.
 
 ## Native Client (v2)
 
-Reserved for v2. A native client uses `quic-go` directly (no HTTP/3 / no
+Reserved for v2. A native client uses `quinn` directly (no HTTP/3 / no
 WebTransport — they're browser conveniences) for a leaner stack and sub-ms
 input latency. The wire protocol (frame format, channel model) is **identical**
 to the browser path; only the transport library differs. See the v2 entry in
@@ -426,29 +444,29 @@ flow that ships with the native client.
 ## Application-Layer Error Codes
 
 The close codes are defined **once**, in [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md)
-(`pkg/protocol`). The transport module references `protocol.Close*` — it does
-**not** redefine them, so the two can never drift:
+(`featherdesk-protocol`). The transport crate references `protocol::close::*` — it
+does **not** redefine them, so the two can never drift:
 
-```go
-import "…/pkg/protocol"
+```rust
+use featherdesk_protocol::close;
 
 // Used directly, e.g.:
-sess.CloseWithError(protocol.CloseAuthTimeout, "auth timeout")
+sess.close_with_error(close::AUTH_TIMEOUT, "auth timeout");
 ```
 
 | Code | Value | Meaning |
 |---|---|---|
-| `CloseNormal` | 0 | Graceful close |
-| `CloseProtocolError` | 4400 | Malformed message / bad StreamType tag / duplicate control stream |
-| `CloseAuthFailed` | 4401 | Bad credentials, expired token, **or expired resume token** |
-| `CloseAuthTimeout` | 4408 | Control stream not opened + authed within 5 s |
-| `CloseControllerTakeover` | 4410 | Controller slot seized |
-| `CloseServerShutdown` | 4503 | Server going away |
+| `close::NORMAL` | 0 | Graceful close |
+| `close::PROTOCOL_ERROR` | 4400 | Malformed message / bad StreamType tag / duplicate control stream |
+| `close::AUTH_FAILED` | 4401 | Bad credentials, expired token, **or expired resume token** |
+| `close::AUTH_TIMEOUT` | 4408 | Control stream not opened + authed within 5 s |
+| `close::CONTROLLER_TAKEOVER` | 4410 | Controller slot seized |
+| `close::SERVER_SHUTDOWN` | 4503 | Server going away |
 
 There is no separate "resume expired" code — an expired resume token is just
-`CloseAuthFailed (4401)`, and the client falls back to a fresh `POST /auth`.
+`close::AUTH_FAILED (4401)`, and the client falls back to a fresh `POST /auth`.
 
-Stream resets reuse the same code space; a stream `CancelRead(code)` with one
+Stream resets reuse the same code space; a stream `cancel_read(code)` with one
 of these means "this stream is unusable for the given reason."
 
 ---
@@ -482,7 +500,7 @@ fragment_reassembly_ms   = 17      # drop deadline at 60 fps; use 34 at 30 fps
 datagram_send_queue_frames = 8     # per-session out-queue depth in WHOLE frames
                                    # (drop-oldest). Frame-granular, never fragment-
                                    # granular — see "Datagram Fragmentation".
-auth_deadline            = "5s"    # close unauthed sessions (CloseAuthTimeout 4408)
+auth_deadline            = "5s"    # close unauthed sessions (close::AUTH_TIMEOUT 4408)
 ```
 
 > `max_streams_bidi` must comfortably exceed the steady-state stream count
@@ -530,7 +548,7 @@ realistic network conditions.
 ## Status
 
 📋 **Specced — not yet built.** This module replaces the previous WebSocket
-transport entirely. Implementation order: probe `quic-go` cert flow against
+transport entirely. Implementation order: probe `quinn` cert flow against
 self-signed local dev → wire `/wt` upgrade → control-stream auth handshake →
 datagram fragmentation + reassembly on a mock video stream → integrate with
 the existing pipeline.

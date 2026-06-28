@@ -2,12 +2,20 @@
 
 ## Purpose
 
-The `interception` add-on is the Windows keyboard+mouse injection backend for the
-core Input module (see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)).
-It implements `input.KeyMouseInjector`.
+The `interception` add-on is an **opt-in, power-user override** of the default
+Windows keyboard+mouse injector for the core Input module (see
+[`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)). It
+implements the `input::KeyMouseInjector` trait.
 
-It uses the **Interception** filter driver (oblitum/Interception) rather than
-`SendInput`, because a kernel-level filter driver:
+> **The default kb/mouse injector is NOT this add-on.** Core ships an in-process
+> injector built on the `enigo` crate, whose Windows backend is `SendInput`. It
+> is the default because `SendInput` is **anti-cheat-safe** (the same approach
+> Sunshine uses), and a stock Windows build is therefore fully controllable
+> (not view-only) with no input add-on at all. Install `interception` only when
+> you specifically need what `SendInput` cannot do.
+
+It uses the **Interception** filter driver (oblitum/Interception) instead of the
+default `SendInput` path, because a kernel-level filter driver:
 
 - **Injects below UIPI.** `SendInput` silently fails (returns 0, no useful
   `GetLastError`) when the target foreground app runs at a higher integrity
@@ -18,6 +26,16 @@ It uses the **Interception** filter driver (oblitum/Interception) rather than
 - **Looks like real hardware.** DirectInput/RawInput games that ignore
   injected `SendInput` events read the Interception-injected stream as genuine
   device input (scan codes, not virtual keys).
+- **Reaches the secure desktop.** Combined with `SendSAS` (below), it can drive
+  Ctrl+Alt+Del / the Secure Attention Sequence — something `SendInput` cannot.
+
+> ⚠️ **Anti-cheat risk — read before enabling.** Interception is a **kernel
+> input filter driver**. Anti-cheat systems (Riot Vanguard, EAC, BattlEye) can
+> detect, flag, or **ban** machines running kernel input drivers. This is
+> precisely why it is **not** the default — the in-core `enigo`/`SendInput` path
+> is anti-cheat-safe and covers the common case. Enable `interception` only on
+> machines where you accept that risk (e.g. a dedicated remote workstation, not
+> a competitive-gaming account).
 
 Ctrl+Alt+Del (the Secure Attention Sequence) is handled **out-of-band** via
 `SendSAS` — see below — because no filter driver can synthesize SAS.
@@ -29,7 +47,7 @@ Ctrl+Alt+Del (the Secure Attention Sequence) is handled **out-of-band** via
 | Component | License | Notes |
 |-----------|---------|-------|
 | Interception driver + DLL | **LGPL-2.1** | oblitum/Interception |
-| Our CGo binding | MIT | |
+| Our Rust FFI binding | MIT | |
 
 > **LGPL compliance:** the Interception library is consumed as a **dynamically
 > linked DLL** (`interception.dll`) + signed driver. The proprietary FeatherDesk
@@ -44,34 +62,33 @@ Ctrl+Alt+Del (the Secure Attention Sequence) is handled **out-of-band** via
 The Interception driver sits in the device stack above `kbdclass`/`mouclass`.
 User-mode code talks to it through `interception.dll`:
 
-```c
-#include "interception.h"
-
-InterceptionContext ctx = interception_create_context();
+```rust
+// Raw FFI bindings to interception.dll (an `interception-sys`-style module).
+let ctx: InterceptionContext = unsafe { interception_create_context() };
 
 // Interception exposes 10 keyboard slots (ids 1..10) + 10 mouse slots (11..20).
 // INTERCEPTION_KEYBOARD(0) resolves to slot 1; the slot need not be bound to
 // any real device — injection works either way. The add-on always uses slot 1.
-InterceptionDevice kbd   = INTERCEPTION_KEYBOARD(0);
-InterceptionDevice mouse = INTERCEPTION_MOUSE(0);
+let kbd:   InterceptionDevice = interception_keyboard(0);
+let mouse: InterceptionDevice = interception_mouse(0);
 
 // Key injection (scan code, set 1):
-InterceptionKeyStroke ks;
-ks.code  = scanCode;                       // from HID-usage → scancode map
-ks.state = down ? INTERCEPTION_KEY_DOWN : INTERCEPTION_KEY_UP;
-if (extended) ks.state |= INTERCEPTION_KEY_E0;   // arrows, R-Ctrl/Alt, Ins/Del, etc.
-interception_send(ctx, kbd, (InterceptionStroke*)&ks, 1);
+let mut ks = InterceptionKeyStroke::default();
+ks.code  = scan_code;                       // from HID-usage → scancode map
+ks.state = if down { INTERCEPTION_KEY_DOWN } else { INTERCEPTION_KEY_UP };
+if extended { ks.state |= INTERCEPTION_KEY_E0; }   // arrows, R-Ctrl/Alt, Ins/Del, etc.
+unsafe { interception_send(ctx, kbd, &ks as *const _ as *const InterceptionStroke, 1); }
 
 // Relative mouse move:
-InterceptionMouseStroke ms = {0};
+let mut ms = InterceptionMouseStroke::default();
 ms.flags = INTERCEPTION_MOUSE_MOVE_RELATIVE;   // deltas
 ms.x = dx; ms.y = dy;
-interception_send(ctx, mouse, (InterceptionStroke*)&ms, 1);
+unsafe { interception_send(ctx, mouse, &ms as *const _ as *const InterceptionStroke, 1); }
 
 // Absolute mouse move (pointer-lock OFF): use MOVE_ABSOLUTE with 0..65535 range.
 // Guard against degenerate dims to avoid divide-by-zero during a Resize race.
-if (width  > 1) ms.x = (int)((int64_t)x * 65535 / (width  - 1));
-if (height > 1) ms.y = (int)((int64_t)y * 65535 / (height - 1));
+if width  > 1 { ms.x = (x as i64 * 65535 / (width  as i64 - 1)) as i32; }
+if height > 1 { ms.y = (y as i64 * 65535 / (height as i64 - 1)) as i32; }
 ms.flags = INTERCEPTION_MOUSE_MOVE_ABSOLUTE;
 
 // Buttons (W3C index → Interception state bitmask):
@@ -81,14 +98,14 @@ ms.flags = INTERCEPTION_MOUSE_MOVE_ABSOLUTE;
 //   3 (back)    → INTERCEPTION_MOUSE_BUTTON_4_DOWN      (0x40) / _UP (0x80)
 //   4 (forward) → INTERCEPTION_MOUSE_BUTTON_5_DOWN     (0x100) / _UP (0x200)
 ms.flags = 0;
-ms.state = stateBitFor(button, down);
+ms.state = state_bit_for(button, down);
 
 // Wheel (multiples of 120 = one detent):
-//   IMPORTANT: NEGATE Dx/Dy from the wire — the wire is W3C (positive = down/right),
+//   IMPORTANT: NEGATE dx/dy from the wire — the wire is W3C (positive = down/right),
 //   Interception's rolling is hardware-style (positive = up/left). See MODULE_INPUT
 //   "Wire sign convention" note.
 ms.state   = INTERCEPTION_MOUSE_WHEEL;   // or _HWHEEL for horizontal
-ms.rolling = -wireDy;                    // for vertical; -wireDx for horizontal
+ms.rolling = -wire_dy;                   // for vertical; -wire_dx for horizontal
 ```
 
 ### HID-usage → scan code
@@ -106,24 +123,30 @@ keys) set `INTERCEPTION_KEY_E0`.
 The Interception driver **cannot** generate SAS — Windows intercepts the real
 hardware Ctrl+Alt+Del in `winlogon`/`csrss` before any filter driver, and refuses
 software-synthesized SAS for security. The add-on implements the optional
-`input.SecureAttention` capability; the core dispatcher detects the CAD chord
+`input::SecureAttention` capability; the core dispatcher detects the CAD chord
 (see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)
 "Ctrl+Alt+Del Chord Detection") and calls `SendSAS()`:
 
-```c
+```rust
 // sas.dll — requires SoftwareSASGeneration policy enabled AND the caller
 // running as a SYSTEM service (session 0) or with SeTcbPrivilege.
-typedef VOID (WINAPI *SendSAS_t)(BOOL AsUser);
-SendSAS_t pSendSAS = (SendSAS_t)GetProcAddress(LoadLibrary(L"sas.dll"), "SendSAS");
-pSendSAS(FALSE);  // AsUser=FALSE → from a service
+// SendSAS is resolved dynamically from sas.dll via the `windows` crate loader.
+use windows::core::s;
+use windows::Win32::Foundation::BOOL;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+
+type SendSasFn = unsafe extern "system" fn(as_user: BOOL);
+let module = unsafe { LoadLibraryA(s!("sas.dll"))? };
+let send_sas: SendSasFn = unsafe { std::mem::transmute(GetProcAddress(module, s!("SendSAS"))) };
+unsafe { send_sas(BOOL(0)); } // AsUser=FALSE → from a service
 ```
 
-Implementation in Go satisfies the capability:
+Implementation in Rust satisfies the capability:
 
-```go
-// SendSAS implements input.SecureAttention on the interception injector.
-// Returns input.ErrSASUnavailable if the policy or privilege blocks it.
-func (i *injector) SendSAS() error
+```rust
+/// Implements the `input::SecureAttention` capability on the interception injector.
+/// Returns `input::Error::SasUnavailable` if the policy or privilege blocks it.
+fn send_sas(&self) -> Result<(), input::Error>;
 ```
 
 **Requirements:**
@@ -136,7 +159,7 @@ func (i *injector) SendSAS() error
   NOT enable services and is treated as disabled by this add-on. The installer
   sets the value to **3** if it is currently 0 or 2.
 - If `SendSAS` cannot run (policy / privilege), the function returns
-  `input.ErrSASUnavailable`; the dispatcher logs a one-time warning and drops
+  `input::Error::SasUnavailable`; the dispatcher logs a one-time warning and drops
   the chord. The constituent Ctrl/Alt keys are never injected as a fallback.
 
 The chord detection algorithm is platform-neutral and lives in the core
@@ -148,14 +171,14 @@ the `SecureAttention` implementation is Windows-specific.
 ## Held-input release (no stuck keys)
 
 The authoritative owner of "release everything still held" is the core
-`Dispatcher.ReleaseAll` (see [`MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)),
+`Dispatcher::release_all` (see [`MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)),
 which the server calls on controller disconnect/takeover. This add-on cooperates:
 
 - It injects exactly the key-down/button-down events it is told to, so the
   Dispatcher's pressed-set is accurate.
-- Its `Close()` **defensively** sends a `KEY_UP` for any key and a button-up for
+- Its `Drop` impl **defensively** sends a `KEY_UP` for any key and a button-up for
   any mouse button it still believes is down (a belt-and-suspenders guard in case
-  Close is reached without a prior `ReleaseAll`), so a mid-keypress disconnect
+  drop is reached without a prior `release_all`), so a mid-keypress disconnect
   never leaves Shift/Ctrl/a game-movement key latched at the OS class-driver
   level. Relative-mode pointer state needs no release (it carries no held state).
 
@@ -164,18 +187,27 @@ which the server calls on controller disconnect/takeover. This add-on cooperates
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-interception.dll ./internal/input/interception
+cargo build --release -p featherdesk-addon-interception   # cdylib  featherdesk-addon-interception.dll
 ```
 
-CGo config:
+FFI link config (in `build.rs`, plus the `extern` block):
 
-```go
-/*
-#cgo CFLAGS:  -I${SRCDIR}/vendor/interception
-#cgo LDFLAGS: -L${SRCDIR}/vendor/interception -linterception
-#include "interception.h"
-*/
-import "C"
+```rust
+// build.rs — dynamic link against interception.dll's import library:
+//   println!("cargo:rustc-link-search=native=vendor/interception");
+//   println!("cargo:rustc-link-lib=dylib=interception");
+
+#[link(name = "interception")]
+extern "C" {
+    fn interception_create_context() -> InterceptionContext;
+    fn interception_destroy_context(ctx: InterceptionContext);
+    fn interception_send(
+        ctx: InterceptionContext,
+        device: InterceptionDevice,
+        stroke: *const InterceptionStroke,
+        nstroke: u32,
+    ) -> i32;
+}
 ```
 
 ### Installation (driver)
@@ -194,21 +226,21 @@ The Interception **driver** is a kernel driver and must be installed once
 
 ## Constructor & Probe
 
-```go
-// internal/input/interception/interception_windows.go  (built into the add-on's shared library)
+```rust
+// crate: featherdesk-addon-interception (the add-on's cdylib)
 
-// Probe returns true if interception.dll loads AND the driver is present.
-// Side-effect-free: if a context is allocated to test connectivity, it is
-// destroyed before returning.
-func Probe() bool
+/// `probe` returns true if interception.dll loads AND the driver is present.
+/// Side-effect-free: if a context is allocated to test connectivity, it is
+/// destroyed before returning.
+pub fn probe() -> bool;
 
-// New creates the injector. Fails if the driver is not installed.
-func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
+/// Create the injector. Fails if the driver is not installed.
+pub fn new(cfg: input::InjectorConfig) -> Result<Box<dyn input::KeyMouseInjector>, input::Error>;
 ```
 
-`Probe` checks `interception_create_context()` returns non-null (driver present),
+`probe` checks `interception_create_context()` returns non-null (driver present),
 then **immediately calls `interception_destroy_context`** to avoid leaking a
-driver handle on repeated probes. If the driver is missing, `New` returns an
+driver handle on repeated probes. If the driver is missing, `new` returns an
 actionable error telling the operator to run the installer.
 
 ---
@@ -217,8 +249,8 @@ actionable error telling the operator to run the installer.
 
 | Failure | Behavior |
 |---------|----------|
-| Driver not installed | `New` returns error → pipeline starts view-only, logs install instructions |
-| `interception.dll` missing | `Probe` false → add-on not selected |
+| Driver not installed | `new` returns error → core falls back to the in-core `enigo`/`SendInput` injector, logs install instructions |
+| `interception.dll` missing | `probe` false → add-on not selected (in-core `enigo`/`SendInput` stays in use) |
 | `SendSAS` blocked by policy | Log warning once; drop Ctrl+Alt+Del chords |
 | Injection call fails mid-session | Log + continue (do not crash the stream); surface in metrics |
 | Not running as SYSTEM service | SAS unavailable; normal injection still works → warn at startup |
@@ -228,16 +260,17 @@ actionable error telling the operator to run the installer.
 ## File Structure
 
 ```
-internal/input/interception/
-├── interception_windows.go   // built into the add-on's shared library (KeyMouseInjector impl)
-├── sas_windows.go            // SendSAS wrapper
-├── scancode_map.go           // HID usage → Set 1 scan code (+E0)
-├── vendor/interception/      // interception.h + import lib (dynamic)
-└── interception_test.go
+addons/interception/
+├── src/
+│   ├── lib.rs            // KeyMouseInjector impl (cfg(windows))
+│   ├── sas.rs            // SendSAS wrapper
+│   └── scancode_map.rs   // HID usage → Set 1 scan code (+E0)
+├── vendor/interception/  // interception.h + import lib (dynamic)
+└── build.rs              // link config for interception.dll
 ```
 
-No `!interception` stub file is needed — the add-on is its own shared library; an
-absent add-on is simply a `.dll` that isn't in the add-ons directory.
+No conditional-compilation stub file is needed — the add-on is its own cdylib
+crate; an absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 

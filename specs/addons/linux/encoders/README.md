@@ -32,7 +32,7 @@ specs/addons/linux/encoders/
 Each add-on is a standalone shared library; drop in any combination you want.
 Build them one at a time, e.g.:
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-openh264.so ./internal/encode/openh264
+cargo build --release -p featherdesk-addon-openh264   # cdylib → featherdesk-addon-openh264.so
 ```
 
 ---
@@ -46,7 +46,7 @@ Both produce H.264 — same codec, different implementations, different licenses
 | License | BSD-2-Clause | GPL-2.0+ (isolated via ffmpeg subprocess) |
 | 1080p P50 @ 12T | 7.4ms | **3.3ms** (2.2× faster) |
 | 1440p P50 @ 12T | 13.4ms | **5.8ms** (2.3× faster) |
-| Integration | CGo in-process | ffmpeg subprocess + pipe |
+| Integration | Rust FFI in-process | ffmpeg subprocess + pipe |
 | Royalties | Cisco pays MPEG-LA | None — patent expired in most regions |
 | Deployment | Commercial-safe | Home / OSS / accept GPL on subprocess |
 
@@ -71,7 +71,7 @@ When multiple encoders are loaded, the pipeline probes in this order:
 2. AMF on ROCm available?                  → use AMF (AMD-specific tuning)
 3. VA-API (libva) available?               → use VA-API (default HW path)
 4. x264 available (ffmpeg in PATH)?        → use x264 subprocess (GPL builds only)
-5. OpenH264 CGo?                           → universal SW fallback
+5. OpenH264 (Rust FFI)?                     → universal SW fallback
 6. None?                                   → fatal: no encoder add-on installed
 ```
 

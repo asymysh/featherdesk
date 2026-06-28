@@ -98,13 +98,15 @@ or raw S16LE PCM (1.536 Mbps, no concealment) when the `opus` add-on isn't loade
 
 ---
 
-## Input Injection — One Per Platform
+## Input Injection — `enigo` Default + Optional Overrides
 
-| Platform | API | Notes |
-|----------|-----|-------|
-| **Linux** | uinput (kernel virtual device) | Requires `/dev/uinput` access |
-| **Windows** | Interception filter driver (+ `SendSAS` for Ctrl+Alt+Del) | Injects **below UIPI** (reaches elevated apps), unlike `SendInput`. Requires the Interception driver installed (LGPL, dynamically linked). |
-| **macOS** | `CGEvent` | Requires Accessibility permission |
+kb/mouse is injected by the in-core **`enigo`** default on every OS — anti-cheat-safe, like Sunshine. Optional add-ons **override/extend** it:
+
+| Platform | Default (in-core `enigo`) | Optional override / extension add-on |
+|----------|---------------------------|----------------------------------------|
+| **Linux** | XTEST / libei (X11 / Wayland) | **uinput** (kernel virtual device, gaming-grade + force-feedback; needs `/dev/uinput`) |
+| **Windows** | `SendInput` | **interception** (kernel filter driver + `SendSAS`, below UIPI / reaches elevated apps; ⚠️ anti-cheat risk) · `win_touch` (touch) · `vigem` (gamepad) |
+| **macOS** | `CGEvent` (needs Accessibility) | `gcvirtual` (gamepad) — no kb/mouse add-on (`enigo`'s CGEvent **is** the default) |
 
 ---
 
@@ -138,5 +140,5 @@ client). See [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md).
 | SW encode (BSD) | 📋 OpenH264 specced | ✅ OpenH264 specced & benchmarked | 📋 OpenH264 specced |
 | SW encode (GPL) | 📋 x264 subprocess specced | ✅ x264 specced & benchmarked | 📋 x264 specced |
 | Audio | ⏸️ design locked, impl deferred | ⏸️ design locked, impl deferred | ⏸️ design locked, impl deferred |
-| Input | 📋 uinput specced | 📋 interception / win_touch specced | 📋 cgevent specced |
+| Input | ✅ enigo default + 📋 uinput override | ✅ enigo default + 📋 interception/win_touch/vigem | ✅ enigo default + 📋 gcvirtual |
 | Browser client | ✅ built | shared | shared |

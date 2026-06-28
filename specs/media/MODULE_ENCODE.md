@@ -6,7 +6,7 @@ The Encode module defines the **abstract software encoder interface contract**
 that every SW encoder add-on implements. It owns no encoder implementation
 itself — concrete encoders live in their respective add-on specs:
 
-- `internal/encode/openh264/` — Cisco OpenH264 CGo (add-on ID `openh264`, BSD)
+- `internal/encode/openh264/` — Cisco OpenH264 via Rust FFI (add-on ID `openh264`, BSD)
 - `internal/encode/x264/` — x264 via ffmpeg subprocess (add-on ID `x264`, GPL-isolated)
 - `internal/encode/vt/` — VideoToolbox SW (add-on ID `vt_sw`, macOS-only)
 
@@ -23,97 +23,109 @@ implementations to evolve independently.
 
 ## Public Interface
 
-```go
-package encode
+```rust
+// crate: featherdesk-encode
 
 // Encoder is the contract every software encoder add-on must satisfy.
-type Encoder interface {
-    // Encode takes a YUV I420 frame and returns the encoded bitstream as
-    // contiguous Annex B bytes (start codes retained) plus a keyframe flag.
-    // The data is ONE complete access unit -- NO per-NAL splitting (the
-    // [][]byte per-NAL contract is rejected).
-    //
-    // keyframe is set by the encoder itself (it knows when it emitted an
-    // IDR/IRAP) — the server does NOT re-scan the bitstream. This flag becomes
-    // stream.EncodedFrame.Keyframe, driving the IDR cache + bootstrap stream.
-    //
-    // Returns nil, false, nil if the frame was intentionally skipped (rate
-    // control). The returned buffer is from a sync.Pool and must not be
-    // retained after the next Encode() call (the caller copies it into the
-    // broadcast access unit before re-calling).
-    Encode(frame *I420Frame) (data []byte, keyframe bool, err error)
+// Cleanup is RAII (Drop) — no Close() (Drop releases all encoder resources,
+// including subprocesses for out-of-process add-ons like x264).
+pub trait Encoder {
+    /// encode takes a YUV I420 frame and returns the encoded bitstream as one
+    /// contiguous Annex B access unit (start codes retained) plus a keyframe
+    /// flag, wrapped as an EncodedUnit. The data is ONE complete access unit --
+    /// NO per-NAL splitting (the Vec<Vec<u8>> per-NAL contract is rejected).
+    ///
+    /// keyframe is set by the encoder itself (it knows when it emitted an
+    /// IDR/IRAP) — the server does NOT re-scan the bitstream. This flag becomes
+    /// stream::EncodedFrame::keyframe, driving the IDR cache + bootstrap stream.
+    ///
+    /// Returns Ok(None) if the frame was intentionally skipped (rate control).
+    /// `unit.data` is an owned RVec<u8> whose ownership transfers to the caller
+    /// (deterministic drop across the add-on ABI).
+    fn encode(&mut self, frame: &I420Frame) -> Result<Option<EncodedUnit>, StreamError>;
 
-    // ForceKeyframe requests that the next encoded frame be an IDR. This is the
-    // ONLY method safe to call concurrently with Encode: implementations set an
-    // atomic flag that the frame loop reads at the next Encode. All other
-    // mutations go through UpdateStreamParams on the frame-loop goroutine.
-    ForceKeyframe()
+    /// force_keyframe requests that the next encoded frame be an IDR. This is the
+    /// ONLY method safe to call concurrently with encode: it is signalled to the
+    /// frame loop via an AtomicBool/channel that the loop checks before the next
+    /// encode. All other mutations go through update_stream_params on the
+    /// frame-loop task; `&mut self` means encode and reconfigure can never alias
+    /// (borrow-checker enforced).
+    fn force_keyframe(&mut self);
+}
 
-    // Close releases all encoder resources (including subprocesses for
-    // out-of-process add-ons like x264).
-    Close() error
+// EncodedUnit is ONE contiguous Annex B access unit + a keyframe flag (shared
+// with the HW path; the pipeline wraps it into stream::EncodedFrame).
+pub struct EncodedUnit {
+    pub data: RVec<u8>,  // ONE contiguous Annex B access unit (owned)
+    pub keyframe: bool,
 }
 
 // I420Frame holds planar YUV 4:2:0 data — the universal input format.
-type I420Frame struct {
-    Y      []byte // Luma plane (width * height bytes)
-    U      []byte // Chroma-U plane (width/2 * height/2 bytes)
-    V      []byte // Chroma-V plane (width/2 * height/2 bytes)
-    Width  int
-    Height int
+pub struct I420Frame {
+    pub y: Vec<u8>, // Luma plane (width * height bytes)
+    pub u: Vec<u8>, // Chroma-U plane (width/2 * height/2 bytes)
+    pub v: Vec<u8>, // Chroma-V plane (width/2 * height/2 bytes)
+    pub width: u32,
+    pub height: u32,
 }
 
 // EncoderConfig holds the encoder's INITIAL configuration. Once running,
 // dynamic parameters (width, height, fps, bitrate, qp, HDR) flow through
-// the stream.Params contract and the ConfigurableEncoder interface (see
+// the stream::Params contract and the ConfigurableEncoder trait (see
 // MODULE_STREAM_PARAMS.md).
 //
 // Per-add-on STATIC tuning (preset, threads, profile) comes from the
 // [addon_module_<id>] TOML section. This struct holds only the initial
 // dynamic values needed for first-frame encoding.
-type EncoderConfig struct {
-    InitialParams stream.Params  // initial Width/Height/FPS/BitrateBps/QP/HDR/etc.
+pub struct EncoderConfig {
+    pub initial_params: stream::Params,  // initial width/height/fps/bitrate_bps/qp/HDR/etc.
 }
 
 // ConfigurableEncoder lets the pipeline change stream parameters at runtime
 // without restarting the encoder. Add-ons that don't implement this
-// interface are torn down + recreated whenever parameters change.
-type ConfigurableEncoder interface {
-    Encoder
-    // UpdateStreamParams applies new parameters to the running encoder.
-    // Called ONLY on the frame-loop goroutine, serialized with Encode via the
-    // pipeline's param-change channel (MODULE_PIPELINE) — so implementations
-    // need no locking between Encode and UpdateStreamParams. Returns
-    // stream.ErrRequiresRestart if the change cannot be applied mid-stream
-    // (caller tears down and recreates the encoder).
-    UpdateStreamParams(p stream.Params) error
+// trait are torn down + recreated whenever parameters change.
+pub trait ConfigurableEncoder: Encoder {
+    /// update_stream_params applies new parameters to the running encoder.
+    /// Called ONLY on the frame-loop task, serialized with encode via the
+    /// pipeline's param-change channel (MODULE_PIPELINE) — so `&mut self` plus
+    /// single-task drive means no locking between encode and
+    /// update_stream_params. Returns StreamError::RequiresRestart if the change
+    /// cannot be applied mid-stream (caller tears down and recreates the
+    /// encoder).
+    fn update_stream_params(&mut self, p: stream::Params) -> Result<(), StreamError>;
 }
 
 // Converter handles pixel format -> I420 color space conversion.
 // Required by the software path because every SW encoder accepts I420.
 // HW encoders bypass this entirely (they consume GPU surface handles).
-type Converter struct {
-    // Not an interface — single implementation in internal/encode/convert/.
-    // Selects libyuv conversion function based on input pixel format:
-    //   PixelBGRA (macOS/Windows) → libyuv ARGBToI420
-    //   PixelRGBA (Linux GL)      → libyuv ABGRToI420
-}
+//
+// Not a trait — single implementation in internal/encode/convert/.
+// Selects the libyuv conversion function based on input pixel format:
+//   PixelFormat::Bgra (macOS/Windows) → libyuv ARGBToI420
+//   PixelFormat::Rgba (Linux GL)      → libyuv ABGRToI420
+// libyuv is reached via Rust FFI (bindgen).
+pub struct Converter { /* … */ }
 
-// Convert transforms pixel data to I420 based on the frame's PixelFmt.
-// Returned *I420Frame is reused on next call (zero-alloc steady state).
-func (c *Converter) Convert(f *capture.Frame) *I420Frame
-func (c *Converter) Close()
+impl Converter {
+    /// convert transforms pixel data to I420 based on the frame's pixel_fmt.
+    /// The returned I420Frame is reused on the next call (zero-alloc steady
+    /// state) — hence the borrow tied to `&mut self`.
+    pub fn convert(&mut self, f: &capture::Frame) -> &I420Frame { /* … */ }
+}
+// Drop on Converter releases its scratch buffers (RAII — no Close()).
 ```
 
 ### Bitstream Output Contract
 
-`Encode()` returns a **contiguous Annex B bitstream** (start codes `00 00 00 01`
-retained) and a `keyframe bool`. A keyframe access unit contains SPS + PPS + IDR
-(H.264) or VPS + SPS + PPS + IDR (HEVC, e.g. VideoToolbox SW on macOS 12+) in
-order. The output is NOT split per-NAL -- this avoids the decompose/recompose
-copy overhead. The server prepends the 22-byte `FrameHeader` and queues the
-bitstream as one whole access unit (the datagram pump fragments it later). The
-buffer is from a `sync.Pool` -- steady-state encoding is zero-alloc after warmup.
+`encode()` returns an `EncodedUnit` whose `data` is a **contiguous Annex B
+bitstream** (start codes `00 00 00 01` retained) plus a `keyframe: bool`. A
+keyframe access unit contains SPS + PPS + IDR (H.264) or VPS + SPS + PPS + IDR
+(HEVC, e.g. VideoToolbox SW on macOS 12+) in order. The output is NOT split
+per-NAL -- this avoids the decompose/recompose copy overhead. The server
+prepends the 22-byte `FrameHeader` and queues the bitstream as one whole access
+unit (the datagram pump fragments it later). `data` ownership transfers (owned
+`RVec<u8>`) -- steady-state encoding is zero-alloc after warmup (the add-on
+reuses internal scratch buffers).
 
 ---
 
@@ -141,8 +153,8 @@ or GPU surfaces (zero-copy HW path). For the SW path, BGRA must be converted
 to I420 via libyuv:
 
 ```
-BGRA []byte → libyuv ARGBToI420() → Y/U/V planes   (macOS, Windows)
-RGBA []byte → libyuv ABGRToI420() → Y/U/V planes   (Linux GL)
+BGRA &[u8] → libyuv ARGBToI420() → Y/U/V planes   (macOS, Windows)
+RGBA &[u8] → libyuv ABGRToI420() → Y/U/V planes   (Linux GL)
 ```
 
 - Links: `-lyuv`
@@ -151,7 +163,7 @@ RGBA []byte → libyuv ABGRToI420() → Y/U/V planes   (Linux GL)
 - Color matrix: BT.601 limited range
 - libyuv naming convention: names are by 32-bit register value (big-endian),
   NOT memory byte order. So BGRA-in-memory = libyuv "ARGB", RGBA-in-memory
-  = libyuv "ABGR". The Converter selects based on `Frame.PixelFmt`.
+  = libyuv "ABGR". The Converter selects based on `Frame.pixel_fmt`.
 
 The Converter is **shared across all SW encoder add-ons** — it lives in
 `internal/encode/convert/` and is built unconditionally when any SW encoder
@@ -159,13 +171,13 @@ add-on is loaded.
 
 ### Chroma subsampling (4:2:0 / 4:2:2 / 4:4:4)
 
-`I420` is 4:2:0 — the default. For `Params.ChromaSubsampling = "422"|"444"` the
+`I420` is 4:2:0 — the default. For `Params.chroma_subsampling = "422"|"444"` the
 path generalizes: the Converter emits **I422** (`*ToI422`) or **I444** (`*ToI444`)
-instead, and the input frame carries its subsampling (the `*I420Frame` type is the
-4:2:0 case of a `*YUVFrame{Subsampling}`). The SW encoder must accept the matching
+instead, and the input frame carries its subsampling (the `I420Frame` type is the
+4:2:0 case of a `YuvFrame { subsampling }`). The SW encoder must accept the matching
 format:
 
-- **OpenH264** is **4:2:0-only** → it returns `stream.ErrChromaUnsupported` for
+- **OpenH264** is **4:2:0-only** → it returns `StreamError::ChromaUnsupported` for
   422/444; the pipeline falls back to 4:2:0 (see MODULE_STREAM_PARAMS).
 - **x264** supports 4:2:0 / 4:2:2 / 4:4:4 (`-pix_fmt yuv420p|yuv422p|yuv444p` +
   the matching High profile).
@@ -181,12 +193,12 @@ capabilities; the pipeline never asks an encoder for a chroma it can't produce.
 
 Each SW encoder add-on owns its own spec. The Encode module spec is the
 interface contract above; the implementation details, performance numbers,
-licensing, add-on IDs, and CGo / subprocess details all live in the add-on
+licensing, add-on IDs, and FFI / subprocess details all live in the add-on
 specs.
 
 | Add-on | Add-on ID | License | Linux | macOS | Windows |
 |--------|-----------|---------|-------|-------|---------|
-| OpenH264 CGo | `openh264` | BSD-2 (Cisco) | [`specs/addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) |
+| OpenH264 (FFI) | `openh264` | BSD-2 (Cisco) | [`specs/addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md`](../addons/macos/encoders/SW/OPENH264_CGO_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/OPENH264_CGO_WINDOWS_SPEC.md) |
 | x264 subprocess | `x264` | GPL-2 (isolated) | [`specs/addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md`](../addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md) | [`specs/addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md`](../addons/macos/encoders/SW/X264_SUBPROCESS_MACOS_SPEC.md) | [`specs/addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md`](../addons/windows/encoders/SW/X264_SUBPROCESS_WINDOWS_SPEC.md) |
 | VideoToolbox SW | `vt_sw` | Apple system | — | [`specs/addons/macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md`](../addons/macos/encoders/SW/VIDEOTOOLBOX_SW_MACOS_SPEC.md) | — |
 
@@ -209,7 +221,7 @@ Encode module deliberately excludes:
   re-scans NALs. (The client independently inspects the first VCL NAL only to
   set the WebCodecs key/delta hint — see MODULE_PROTOCOL "Video Payload Framing".)
 - **No rate control switching.** Each add-on implements its own RC mode
-  selection from `EncoderConfig.InitialParams.BitrateBps` (0 = QP mode)
+  selection from `EncoderConfig.initial_params.bitrate_bps` (0 = QP mode)
   and its own TOML section.
 
 ---
@@ -218,11 +230,11 @@ Encode module deliberately excludes:
 
 | Add-on | Status |
 |--------|--------|
-| OpenH264 CGo | ✅ Working in current code; refactor moves to `internal/encode/openh264/` under add-on ID `openh264` |
+| OpenH264 (FFI) | ✅ Working in current code; refactor moves to `internal/encode/openh264/` under add-on ID `openh264` |
 | x264 subprocess | ✅ Benchmarked via ffmpeg pipe (3.3ms @ 1080p on Ryzen 9 5900X); implementation pending |
 | VideoToolbox SW | 📋 Specced; macOS native benchmarks pending |
 
-The old `internal/encode/{ffmpeg,vp8,vaapi}.go` files (FFmpeg subprocess
+The old `internal/encode/{ffmpeg,vp8,vaapi}.rs` files (FFmpeg subprocess
 encoder, libvpx VP8 via libavcodec, VA-API probe stub) are **rejected** and
 will be removed as part of the implementation refactor. They served the
 pre-pluggable architecture and are superseded by:

@@ -1,8 +1,8 @@
-# macOS Software Encoder Add-On: OpenH264 CGo (Cisco, BSD)
+# macOS Software Encoder Add-On: OpenH264 (Cisco, BSD)
 
 ## Purpose
 
-Cisco's OpenH264 H.264 software encoder via direct CGo binding. The
+Cisco's OpenH264 H.264 software encoder via a direct Rust FFI binding. The
 **BSD-licensed** software fallback for macOS deployments where GPL is not
 acceptable or where VideoToolbox is unavailable.
 
@@ -19,7 +19,7 @@ Linux/macOS/Windows is needed.
 |-----------|---------|-------|
 | libopenh264 | BSD-2-Clause | Cisco pays MPEG-LA royalties on behalf of all users |
 | Cisco prebuilt binary | BSD-2-Clause | Downloaded from `ciscobinary.openh264.org` |
-| Our CGo binding | MIT | In-process, no GPL contamination |
+| Our Rust FFI binding | MIT | In-process, no GPL contamination |
 
 **Key advantage over x264:** No GPL. The main binary stays fully proprietary.
 Cisco's royalty arrangement means no H.264 patent fees for the user.
@@ -55,10 +55,10 @@ M2 Pro = 12 cores), 4 threads is the practical ceiling.
 
 ## Build & Distribution
 
-### Shared library (c-shared)
+### Shared library (cdylib)
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-openh264.dylib ./internal/encode/openh264
+cargo build --release -p featherdesk-addon-openh264   # cdylib  featherdesk-addon-openh264.dylib
 ```
 
 ### Runtime dependency
@@ -69,15 +69,15 @@ curl -O http://ciscobinary.openh264.org/libopenh264-2.4.1-mac-arm64.dylib.bz2
 bunzip2 libopenh264-2.4.1-mac-arm64.dylib.bz2
 ```
 
-### CGo configuration
+### FFI / link configuration (Rust)
 
-```go
-/*
-#cgo CFLAGS: -I${SRCDIR}/vendor/openh264/include
-#cgo LDFLAGS: -L${SRCDIR}/vendor/openh264 -lopenh264
-#include <wels/codec_api.h>
-*/
-import "C"
+```rust
+// build.rs — point the linker at the vendored libopenh264:
+//   println!("cargo:rustc-link-search=native=vendor/openh264");
+//   println!("cargo:rustc-link-lib=dylib=openh264");
+// FFI declarations for <wels/codec_api.h> are generated with `bindgen`
+// (include path vendor/openh264/include); the Rust side calls the
+// `ISVCEncoder` vtable through an `extern "C"` block.
 ```
 
 ---
@@ -117,13 +117,13 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `UpdateStreamParams(p stream.Params)`.
+This add-on implements the `ConfigurableEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `update_stream_params(p: stream::Params)`.
 
 | Param change | OpenH264 API | Hot? |
 |--------------|--------------|------|
-| `FPS` | `ISVCEncoder::SetOption(ENCODER_OPTION_FRAME_RATE, &fps)` | yes |
-| `BitrateBps` | `ISVCEncoder::SetOption(ENCODER_OPTION_BITRATE, &b)` | yes |
-| `QP` | `ENCODER_OPTION_SVC_ENCODE_PARAM_EXT` | yes |
-| `KeyframeInterval` | `param.uiIntraPeriod` | yes |
-| `Width`, `Height` | teardown + `Initialize` (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` -- pipeline switches to `vt_hw` HEVC Main10 | n/a |
+| `fps` | `ISVCEncoder::SetOption(ENCODER_OPTION_FRAME_RATE, &fps)` | yes |
+| `bitrate_bps` | `ISVCEncoder::SetOption(ENCODER_OPTION_BITRATE, &b)` | yes |
+| `qp` | `ENCODER_OPTION_SVC_ENCODE_PARAM_EXT` | yes |
+| `keyframe_interval` | `param.uiIntraPeriod` | yes |
+| `width`, `height` | teardown + `Initialize` (returns `StreamError::RequiresRestart`) | no |
+| `bit_depth=10` / `hdr=true` | rejected with `StreamError::HdrUnsupported` -- pipeline switches to `vt_hw` HEVC Main10 | n/a |

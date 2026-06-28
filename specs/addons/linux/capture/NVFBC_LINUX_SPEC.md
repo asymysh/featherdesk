@@ -27,7 +27,7 @@ It's what Sunshine prefers on NVIDIA hardware. The ~2–3ms reduction matters fo
 | NVIDIA Video Codec SDK (NvFBC headers) | NVIDIA Software License (free use) | Cannot redistribute headers as standalone package |
 | `libnvidia-fbc.so` (driver-shipped) | proprietary NVIDIA | Ships with NVIDIA proprietary driver |
 | `NvFBCUnlock` patcher (consumer cards) | community / various | Required on GeForce; **not** required on Quadro/Tesla |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 **No royalties.** No GPL/LGPL contamination. Same SDK license model as NVENC.
 
@@ -71,10 +71,10 @@ NvFBC has been in every NVIDIA proprietary driver from ~2014 onward. Supported o
 ### Shared library build
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-nvfbc.so ./internal/capture/nvfbc
+cargo build --release -p featherdesk-addon-nvfbc   # cdylib → featherdesk-addon-nvfbc.so
 ```
 
-The `nvfbc` add-on shared library is built from the `internal/capture/nvfbc/` package.
+The `nvfbc` add-on cdylib is built from the `internal/capture/nvfbc/` crate.
 
 ### Runtime dependencies
 
@@ -84,21 +84,28 @@ The `nvfbc` add-on shared library is built from the `internal/capture/nvfbc/` pa
 - Video Codec SDK headers (build-time only — checked into source tree per NVIDIA
   SDK license, same as the NVENC add-on)
 
-### CGo configuration
+### FFI configuration
 
-```go
-/*
-#cgo CFLAGS: -I${SRCDIR}/sdk
-#cgo LDFLAGS: -L/usr/lib/x86_64-linux-gnu -lnvidia-fbc -lcuda -ldl
+The bindings are generated with `bindgen` in `build.rs`, which adds the SDK
+include path, links the driver libraries, and wraps the unified header:
 
-#include <NvFBC.h>            // Unified NvFBC 7.x+ header (replaces old NvFBCToSys.h / NvFBCToCuda.h)
-*/
-import "C"
+```rust
+// build.rs
+println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
+println!("cargo:rustc-link-lib=nvidia-fbc");
+println!("cargo:rustc-link-lib=cuda");
+println!("cargo:rustc-link-lib=dl");
+
+bindgen::Builder::default()
+    .clang_arg("-Isdk")
+    // Unified NvFBC 7.x+ header (replaces old NvFBCToSys.h / NvFBCToCuda.h)
+    .header("sdk/NvFBC.h")
+    .generate().unwrap();
 ```
 
 ---
 
-## CGo Implementation Sketch
+## FFI Implementation Sketch
 
 ```c
 // Session init (one-time)
@@ -191,13 +198,13 @@ NVENC add-on encoder.
 
 ## Probe & Selection
 
-```go
-//go:build linux
+```rust
+// crate: featherdesk-addon-nvfbc  (cfg(target_os = "linux"))
 
-func ProbeNvFBC() (*NvFBCCapabilities, error) {
+fn probe_nvfbc() -> Result<NvFbcCapabilities, CaptureError> {
     // 1. dlopen libnvidia-fbc.so (check NVIDIA proprietary driver presence)
     // 2. NvFBC_GetStatus → check bIsCapturePossible
-    // 3. If false on consumer card, return ErrNvFBCRestricted (suggest patcher)
+    // 3. If false on consumer card, return CaptureError::NvFbcRestricted (suggest patcher)
     // 4. Enumerate display outputs, return resolution/refresh per output
 }
 ```
@@ -215,12 +222,12 @@ None?                                → fatal: no capture add-on configured
 
 ```
 internal/capture/nvfbc/
-├── nvfbc.go                 // Capturer struct, NewNvFBCCapturer
-├── nvfbc_cgo.go             // CGo binding (built into the add-on shared library)
-├── probe.go                 // ProbeNvFBC()
-├── cuda_to_nvenc.go         // Direct CUDA → NVENC handoff
+├── nvfbc.rs                 // Capturer struct, NvFbcCapturer::new
+├── ffi.rs                   // Rust FFI bindings (built into the add-on cdylib)
+├── probe.rs                 // probe_nvfbc()
+├── cuda_to_nvenc.rs         // Direct CUDA → NVENC handoff
 ├── sdk/                     // NVIDIA SDK headers (NvFBC.h etc.)
-└── nvfbc_test.go            // Integration tests
+└── tests.rs                 // Integration tests
 ```
 
 ---
@@ -263,7 +270,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). NvFBC captures at native resolution; the pipeline handles scaling.
+This add-on implements `stream::ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). NvFBC captures at native resolution; the pipeline handles scaling.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|

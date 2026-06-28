@@ -30,8 +30,8 @@ streams video only. Audio is an opt-in add-on shared library. Audio is
 
 Build each add-on as its own shared library and drop the set into the add-ons directory:
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-sck.dylib       ./internal/capture/sck
-go build -buildmode=c-shared -tags vt_hw -o featherdesk-addon-vt_hw.dylib ./internal/encode/vt
-go build -buildmode=c-shared -o featherdesk-addon-sck_audio.dylib ./internal/audio/sckaudio
-go build -buildmode=c-shared -o featherdesk-addon-opus.dylib      ./internal/audio/opus
+cargo build --release -p featherdesk-addon-sck   # cdylib  featherdesk-addon-sck.dylib
+cargo build --release -p featherdesk-addon-vt_hw   # cdylib  featherdesk-addon-vt_hw.dylib
+cargo build --release -p featherdesk-addon-sck_audio   # cdylib  featherdesk-addon-sck_audio.dylib
+cargo build --release -p featherdesk-addon-opus   # cdylib  featherdesk-addon-opus.dylib
 ```

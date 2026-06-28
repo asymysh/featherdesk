@@ -22,7 +22,7 @@ so DXGI DD has an output to capture. Same approach as Sunshine/Moonlight.
 |-----------|---------|-------|
 | DXGI API | Windows system API | Usage governed by Windows SDK license |
 | D3D11 API | Windows system API | Same |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 System APIs; no redistribution concerns, no royalties, no GPL exposure.
 
@@ -83,7 +83,7 @@ Moonlight all use IddCx for headless Windows streaming.
 
 ### Bundled driver
 
-The binary embeds a pre-signed IddCx driver (INF + DLL) via `//go:embed`:
+The binary embeds a pre-signed IddCx driver (INF + DLL) via `include_bytes!`:
 
 | Component | Source | License | Notes |
 |-----------|--------|---------|-------|
@@ -112,7 +112,7 @@ Check if IddCx VDD is already installed
   |
   v
 Extract embedded driver files to temp directory
-  (vdd.inf + vdd.dll from //go:embed)
+  (vdd.inf + vdd.dll from include_bytes!)
   |
   v
 Check if running as admin
@@ -196,7 +196,7 @@ output that Desktop Duplication can capture, bypassing the RDP restriction.
 ### Build (shared library)
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-dxgi_dd.dll ./internal/capture/dxgi
+cargo build --release -p featherdesk-addon-dxgi_dd   # cdylib  featherdesk-addon-dxgi_dd.dll
 ```
 
 ### Runtime dependencies
@@ -207,88 +207,94 @@ go build -buildmode=c-shared -o featherdesk-addon-dxgi_dd.dll ./internal/capture
 - `pnputil.exe` (ships with Windows 10+) — for IddCx driver installation (headless only, admin only, once)
 
 All system components — nothing to install. The IddCx driver INF + DLL are
-embedded in the binary via `//go:embed` and extracted at runtime if needed.
+embedded in the binary via `include_bytes!` and extracted at runtime if needed.
 
-### CGo configuration
+### FFI configuration
 
-```go
-/*
-#cgo CFLAGS: -DCOBJMACROS -DUNICODE
-#cgo LDFLAGS: -ld3d11 -ldxgi -lole32
-
-#include <d3d11.h>
-#include <dxgi1_2.h>
-#include <dxgi1_5.h>
-#include <stdio.h>
-*/
-import "C"
+```rust
+// Cargo.toml pulls the relevant `windows` crate features:
+//   windows = { version = "0.58", features = [
+//       "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+//       "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+//       "Win32_System_Com",
+//   ] }
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::*;
 ```
 
-Alternatively, use Go's `golang.org/x/sys/windows` + `unsafe.Pointer` for
-COM vtable calls without CGo overhead. The CGo approach is used for
-consistency with other platform add-ons (KMS+EGL, SCK) that need C headers.
+The `windows` crate (windows-rs) exposes the DXGI/D3D11 COM interfaces directly
+as safe Rust types — vtable calls and `QueryInterface` are handled by the crate
+(`.cast()`), so no hand-written C header or bindgen step is needed. This is
+consistent with the other platform add-ons (KMS+EGL, SCK).
 
 ---
 
-## CGo Implementation Sketch
+## FFI Implementation Sketch
 
-```c
+```rust
 // 1. Create D3D11 device on the target adapter
-D3D_FEATURE_LEVEL featureLevel;
-ID3D11Device *device = NULL;
-ID3D11DeviceContext *ctx = NULL;
-D3D11CreateDevice(
-    adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL,
-    0, NULL, 0, D3D11_SDK_VERSION,
-    &device, &featureLevel, &ctx
-);
+let mut device: Option<ID3D11Device> = None;
+let mut ctx: Option<ID3D11DeviceContext> = None;
+let mut feature_level = D3D_FEATURE_LEVEL::default();
+unsafe {
+    D3D11CreateDevice(
+        &adapter, D3D_DRIVER_TYPE_UNKNOWN, HMODULE::default(),
+        D3D11_CREATE_DEVICE_FLAG(0), None, D3D11_SDK_VERSION,
+        Some(&mut device), Some(&mut feature_level), Some(&mut ctx),
+    )?;
+}
+let device = device.unwrap();
+let ctx = ctx.unwrap();
 
 // 2. Get DXGI Output (the monitor to capture)
-IDXGIOutput1 *output1 = NULL;
-IDXGIOutput *output = NULL;
-adapter->EnumOutputs(0, &output);
-output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1);
+let output: IDXGIOutput = unsafe { adapter.EnumOutputs(0)? };
+let output1: IDXGIOutput1 = output.cast()?; // QueryInterface
 
 // 3. Create Desktop Duplication
-IDXGIOutputDuplication *dupl = NULL;
-output1->DuplicateOutput(device, &dupl);
+let dupl: IDXGIOutputDuplication = unsafe { output1.DuplicateOutput(&device)? };
 
 // 4. Per-frame: acquire next frame
-DXGI_OUTDUPL_FRAME_INFO frameInfo;
-IDXGIResource *resource = NULL;
-HRESULT hr = dupl->AcquireNextFrame(16 /*timeout ms*/, &frameInfo, &resource);
-if (hr == DXGI_ERROR_WAIT_TIMEOUT) return; // no new frame
+let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+let mut resource: Option<IDXGIResource> = None;
+match unsafe { dupl.AcquireNextFrame(16 /* timeout ms */, &mut frame_info, &mut resource) } {
+    Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return, // no new frame
+    Err(e) => return Err(e.into()),
+    Ok(()) => {}
+}
 
 // 5. Get the D3D11 texture (GPU-resident)
-ID3D11Texture2D *frameTex = NULL;
-resource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&frameTex);
+let frame_tex: ID3D11Texture2D = resource.unwrap().cast()?;
 
 // 6. Path A: Zero-copy to HW encoder
-// Pass frameTex directly to MF/NVENC/AMF/QSV encoder — no GPU→CPU copy
+// Pass frame_tex directly to MF/NVENC/AMF/QSV encoder — no GPU→CPU copy.
 // Encode operates on the same D3D11 device.
-EncodeFrame(frameTex, frameInfo.LastPresentTime);
+encode_frame(&frame_tex, frame_info.LastPresentTime);
 
 // 6. Path B: CPU readback for SW encoder (OpenH264)
-// Create staging texture, CopyResource, Map, read BGRA pixels
-ID3D11Texture2D *staging = CreateStagingTexture(device, w, h);
-ctx->CopyResource(staging, frameTex);
-D3D11_MAPPED_SUBRESOURCE mapped;
-ctx->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
-memcpy(pixels, mapped.pData, w * h * 4);
-ctx->Unmap(staging, 0);
+// Create staging texture, CopyResource, Map, read BGRA pixels.
+let staging: ID3D11Texture2D = create_staging_texture(&device, w, h)?;
+unsafe {
+    ctx.CopyResource(&staging, &frame_tex);
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+    std::ptr::copy_nonoverlapping(
+        mapped.pData as *const u8, pixels.as_mut_ptr(), (w * h * 4) as usize,
+    );
+    ctx.Unmap(&staging, 0);
+}
 
 // 7. Release
-dupl->ReleaseFrame();
+unsafe { dupl.ReleaseFrame()?; }
 ```
 
 ---
 
 ## Two Output Paths
 
-| Interface | Method | Output | Use case |
-|-----------|--------|--------|----------|
-| `Capturer` (CPU readback) | `NextFrame()` | BGRA `[]byte` via staging texture + Map | Pair with SW encoder (OpenH264 or x264) |
-| `D3D11Capturer` (zero-copy) | `NextTexture()` | `*D3D11Texture2D` handle | Pair with HW encoder (MF HW, NVENC, AMF, QSV) |
+| Trait | Method | Output | Use case |
+|-------|--------|--------|----------|
+| `Capturer` (CPU readback) | `next_frame()` | BGRA `RVec<u8>` via staging texture + Map | Pair with SW encoder (OpenH264 or x264) |
+| `SurfaceCapturer` (zero-copy) | `next_surface()` | `FbInfo { handle: SurfaceHandle::D3D11Texture(..) }` | Pair with HW encoder (MF HW, NVENC, AMF, QSV) |
 
 The pipeline picks the right method based on the paired encoder add-on.
 The zero-copy path is the Windows equivalent of DMA-BUF on Linux and
@@ -359,10 +365,10 @@ via a future `[capture] display = 0` key.
 
 ## Probe & Selection
 
-```go
-//go:build windows
+```rust
+// crate: featherdesk-addon-dxgi_dd  (cfg(windows))
 
-func ProbeDXGIDD() (*DXGIDDCapabilities, error) {
+pub fn probe_dxgi_dd() -> Result<DxgiDdCapabilities, CaptureError> {
     // 1. CoInitializeEx (COM required)
     // 2. CreateDXGIFactory1 -> enumerate adapters
     // 3. For each adapter: enumerate outputs
@@ -389,22 +395,22 @@ Pipeline probe order (Windows — single capture path):
 ## File Structure
 
 ```
-internal/capture/dxgi/
-├── dxgi.go                     // DXGICapturer struct, NewDXGICapturer
-├── duplication.go              // IDXGIOutputDuplication wrapper
-├── device.go                   // D3D11 device + adapter discovery
-├── dxgi_cgo.go                 // CGo binding (built into the add-on's shared library)
-├── cursor.go                   // DXGI_OUTDUPL_POINTER handling
-├── probe.go                    // ProbeDXGIDD() + headless detection
-├── vdd.go                      // IddCx virtual display: install, create, keep-alive, remove
-├── vdd_driver/                 // Embedded IddCx driver (//go:embed)
+addons/dxgi_dd/
+├── src/
+│   ├── lib.rs                  // DxgiCapturer struct, constructor (Rust FFI via windows crate)
+│   ├── duplication.rs          // IDXGIOutputDuplication wrapper
+│   ├── device.rs               // D3D11 device + adapter discovery
+│   ├── cursor.rs               // DXGI_OUTDUPL_POINTER handling
+│   ├── probe.rs                // probe_dxgi_dd() + headless detection
+│   └── vdd.rs                  // IddCx virtual display: install, create, keep-alive, remove
+├── vdd_driver/                 // Embedded IddCx driver (include_bytes!)
 │   ├── vdd.inf                 // Driver INF (pre-signed)
 │   └── vdd.dll                 // Driver DLL (pre-signed)
-└── dxgi_integration_test.go    // integration test (//go:build windows,integration)
+└── tests/dxgi_integration.rs   // integration test (cfg(windows))
 ```
 
-No `!dxgi_dd` stub file is needed — the add-on is its own shared library, so an
-absent add-on is simply a `.dll` that isn't in the add-ons directory.
+No conditional-compilation stub file is needed — the add-on is its own cdylib
+crate, so an absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 
@@ -455,7 +461,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). DXGI Desktop Duplication captures at native resolution; the pipeline handles scaling.
+This add-on implements the `stream::ConfigurableCapturer` trait (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). DXGI Desktop Duplication captures at native resolution; the pipeline handles scaling.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|

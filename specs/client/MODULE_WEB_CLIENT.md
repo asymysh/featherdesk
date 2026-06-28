@@ -8,7 +8,7 @@ The Web Client module is the browser-based viewer and controller (v1). It connec
 
 ## Public Interface (JavaScript)
 
-The client is a single-page application embedded in the server binary via `go:embed`. It has no build step, no framework, no external dependencies (ES modules, served as-is).
+The client is a single-page application embedded in the server binary via `rust-embed`. It has no build step, no framework, no external dependencies (ES modules, served as-is).
 
 **Files (post-refactor, R-CLI-10):**
 | File | Purpose |

@@ -2,18 +2,21 @@
 
 ## Purpose
 
-The `uinput` add-on is the Linux keyboard+mouse injection backend for the core
-Input module (see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)).
-It implements `input.KeyMouseInjector`.
+The `uinput` add-on is an **opt-in override of the in-core `enigo` default** for
+the core Input module (see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)).
+It implements `input::KeyMouseInjector`; when loaded it **replaces** the built-in
+`enigo` `KeyMouseInjector` for the session. It is for power users — it is not
+required, and without it kb/mouse still work through the `enigo` default.
 
-It is the **single, unified Linux input solution**: the kernel `uinput` subsystem
-operates below the display server, so **one add-on covers both X11 and Wayland**
-with no compositor cooperation. The same mechanism also natively supports gamepad
-and multitouch evdev event codes, so when those features arrive they extend this
-add-on rather than adding a new one.
+As a kernel-level injector, the `uinput` subsystem operates below the display
+server, so this one add-on reaches **both X11 and Wayland** (and the console)
+with no compositor cooperation — the main reason to override `enigo`. The same
+mechanism also natively supports gamepad and multitouch evdev event codes, so
+when those features arrive they extend this add-on rather than adding a new one.
 
-> XTEST (X11-only) was rejected: it cannot inject gamepads, breaks on Wayland,
-> and X11 is being deprecated by major distros. uinput is strictly more capable.
+> The `enigo` default's X11 backend (XTEST) cannot inject gamepads and does not
+> reach Wayland/console; the `uinput` override is strictly more capable for those
+> power-user cases.
 
 ---
 
@@ -22,9 +25,9 @@ add-on rather than adding a new one.
 | Component | License | Notes |
 |-----------|---------|-------|
 | Linux uinput kernel API | GPL (kernel) — used via syscalls, no linkage | `/dev/uinput` ioctl interface |
-| Our implementation | MIT | Pure Go via `syscall`/`golang.org/x/sys/unix` — **no CGo** |
+| Our implementation | MIT | Pure Rust via the `nix` crate (raw `ioctl`/`write`) — **no C SDK** |
 
-No external library and no CGo: device creation and event writes are plain
+No external library and no C bindings: device creation and event writes are plain
 `ioctl`/`write` syscalls.
 
 ---
@@ -54,11 +57,11 @@ Every injection is one or more `input_event` writes terminated by an
 
 | Method | Events |
 |--------|--------|
-| `InjectKey(hid, down)` | `EV_KEY` `KEY_*` `value=1/0` + `SYN` |
-| `InjectPointerAbs(x, y)` | `EV_ABS ABS_X x` + `EV_ABS ABS_Y y` + `SYN` |
-| `InjectPointerRel(dx, dy)` | `EV_REL REL_X dx` + `EV_REL REL_Y dy` + `SYN` |
-| `InjectButton(btn, down)` | `EV_KEY BTN_* value=1/0` + `SYN` |
-| `InjectScroll(dx, dy, unit)` | `EV_REL REL_WHEEL_HI_RES`/`REL_HWHEEL_HI_RES` + `SYN` |
+| `inject_key(hid, down)` | `EV_KEY` `KEY_*` `value=1/0` + `SYN` |
+| `inject_pointer_abs(x, y)` | `EV_ABS ABS_X x` + `EV_ABS ABS_Y y` + `SYN` |
+| `inject_pointer_rel(dx, dy)` | `EV_REL REL_X dx` + `EV_REL REL_Y dy` + `SYN` |
+| `inject_button(btn, down)` | `EV_KEY BTN_* value=1/0` + `SYN` |
+| `inject_scroll(dx, dy, unit)` | `EV_REL REL_WHEEL_HI_RES`/`REL_HWHEEL_HI_RES` + `SYN` |
 
 ### HID-usage → KEY_*
 
@@ -71,7 +74,7 @@ device creation.
 ### Absolute coordinates & Resize
 
 `ABS_X`/`ABS_Y` ranges MUST equal the stream dimensions (the client already sent
-stream-pixel coordinates). On a resolution change the pipeline calls `Resize`,
+stream-pixel coordinates). On a resolution change the pipeline calls `resize`,
 which:
 
 1. **Releases every held key/button** on the about-to-be-destroyed device
@@ -82,7 +85,7 @@ which:
 3. Re-creates the device with new `UI_ABS_SETUP` ranges (the range cannot be
    changed on a live device).
 
-The same "release-all" pass runs at `Close()`.
+The same "release-all" pass runs in `Drop`.
 
 ### Scroll sign
 
@@ -101,10 +104,10 @@ detent) to preserve trackpad/pixel-precise scroll magnitude. Falls back to
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-uinput.so ./internal/input/uinput
+cargo build --release -p featherdesk-addon-uinput   # cdylib → featherdesk-addon-uinput.so
 ```
 
-The uinput payload is pure Go (no external `-l` libraries); only a thin cgo shim exporting the C-ABI `FeatherDeskAddonOpen` entry point is compiled for the c-shared build. The host needs **write access to
+The uinput payload is pure Rust (no external `-l` libraries); it exports the add-on's `abi_stable` root module as its entry point — no C SDK is linked. The host needs **write access to
 `/dev/uinput`** at runtime:
 
 - Run as root, OR
@@ -118,22 +121,22 @@ run as full root.
 
 ## Constructor & Probe
 
-```go
-// internal/input/uinput/uinput_linux.go  (//go:build linux)
+```rust
+// crate: featherdesk-addon-uinput  (cfg(target_os = "linux"))
 
-// Probe returns true if /dev/uinput is openable for writing.
+// probe returns true if /dev/uinput is openable for writing.
 // Side-effect-free: the FD is closed before return.
-func Probe() bool
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-// New creates and initializes the virtual device at cfg.Width × cfg.Height.
-func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
+// new creates and initializes the virtual device at cfg.width × cfg.height.
+fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::KeyMouseInjector>, InputError>;
 ```
 
-`Probe` attempts `open("/dev/uinput", O_RDWR|O_CLOEXEC|O_NONBLOCK)` — the **same
+`probe` attempts `open("/dev/uinput", O_RDWR|O_CLOEXEC|O_NONBLOCK)` — the **same
 mode** the constructor uses, so a probe success implies a setup success. The FD
 is closed before returning. Failure (ENOENT / EACCES) means the module isn't
-loaded or permissions are wrong → add-on not selected, with a logged hint
-(`modprobe uinput` / input-group).
+loaded or permissions are wrong → add-on not selected (the in-core `enigo`
+default stays in use), with a logged hint (`modprobe uinput` / input-group).
 
 ### Device identity
 
@@ -147,11 +150,11 @@ loaded or permissions are wrong → add-on not selected, with a logged hint
 
 | Failure | Behavior |
 |---------|----------|
-| `/dev/uinput` absent | `Probe` false → not selected; log `modprobe uinput` hint |
-| EACCES on open | `New` error → view-only; log input-group/udev hint |
-| ioctl failure during setup | `New` returns descriptive error; no half-created device |
+| `/dev/uinput` absent | `probe` false → not selected (stay on `enigo` default); log `modprobe uinput` hint |
+| EACCES on open | `new` error → fall back to in-core `enigo` default; log input-group/udev hint |
+| ioctl failure during setup | `new` returns descriptive error; no half-created device |
 | write() returns short/EBADF | recreate device once; if it fails again, surface error + metric |
-| `Resize` recreate fails | keep old device, log error, return error to pipeline |
+| `resize` recreate fails | keep old device, log error, return error to pipeline |
 
 All injection errors are surfaced to the dispatcher (no silent discard).
 
@@ -161,10 +164,10 @@ All injection errors are surfaced to the dispatcher (no silent discard).
 
 ```
 internal/input/uinput/
-├── uinput_linux.go        // KeyMouseInjector impl (//go:build linux)
-├── ioctl_linux.go         // UI_* ioctl numbers + input_event/uinput_setup structs
-├── keymap.go              // HID usage → KEY_* (generated)
-└── uinput_test.go         // mock-fd unit tests + /dev/uinput integration tests
+├── uinput.rs              // KeyMouseInjector impl (cfg(target_os = "linux"))
+├── ioctl.rs               // UI_* ioctl numbers + input_event/uinput_setup structs
+├── keymap.rs              // HID usage → KEY_* (generated)
+└── tests.rs               // mock-fd unit tests + /dev/uinput integration tests
 ```
 
 ---
@@ -185,7 +188,7 @@ If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ## Gamepad Capability
 
-This add-on implements `input.GamepadInjector` in addition to
+This add-on implements `input::GamepadInjector` in addition to
 `KeyMouseInjector` — uinput is the universal evdev injector and adding a
 gamepad device costs only an extra device-create call. See
 [`specs/interaction/MODULE_GAMEPAD.md`](../../../interaction/MODULE_GAMEPAD.md)
@@ -229,7 +232,7 @@ add-on must implement both phases or the kernel blocks the game:
 3. **Play trigger is a SEPARATE event.** Upload does NOT mean "rumble now." The
    game then writes an `EV_FF` input event (`code = effect.id`, `value = 1` to
    start, `0` to stop) which the kernel forwards to the uinput fd. The read-loop
-   goroutine harvests that `EV_FF` event, looks up the stashed magnitudes by
+   task harvests that `EV_FF` event, looks up the stashed magnitudes by
    `code`, and invokes the registered rumble emitter (start) — or emits a
    zero-magnitude stop on `value == 0`.
 

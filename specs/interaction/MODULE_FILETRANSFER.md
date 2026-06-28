@@ -49,41 +49,57 @@ subfolders on first use (mode 0700). Both paths are overridable in
 
 ## Public Interface
 
-```go
-package filetransfer
+```rust
+// crate: featherdesk-filetransfer
 
-// Service manages file transfers carried over WebTransport bidirectional
-// streams on the main /wt session.
-type Service interface {
-    // ServeStream handles ONE bidirectional stream that has been identified
-    // (by its first message) as a file-transfer stream. Blocks until the
-    // stream closes. Called by the server module from its AcceptStream loop
-    // after the controller has authenticated.
-    ServeStream(ctx context.Context, s transport.Stream) error
+/// Service manages file transfers carried over WebTransport bidirectional
+/// streams on the main /wt session. Cleanup is RAII (`Drop`) — no Close().
+pub trait Service {
+    /// serve_stream handles ONE bidirectional stream that has been identified
+    /// (by its first message) as a file-transfer stream. The future resolves when
+    /// the stream closes. Called by the server module from its accept-stream loop
+    /// after the controller has authenticated. The cancellation token replaces the
+    /// Go `context.Context`.
+    async fn serve_stream(
+        &self,
+        cancel: CancellationToken,
+        s: transport::Stream,
+    ) -> Result<(), FileTransferError>;
 
-    // ListOutgoing returns the files currently offered for download
-    // (contents of the Outgoing folder).
-    ListOutgoing() ([]FileInfo, error)
-
-    Close() error
+    /// list_outgoing returns the files currently offered for download
+    /// (contents of the Outgoing folder).
+    fn list_outgoing(&self) -> Result<Vec<FileInfo>, FileTransferError>;
 }
 
-type FileInfo struct {
-    Name     string
-    Size     int64
-    ModTime  time.Time
-    SHA256   string // computed lazily / cached
+pub struct FileInfo {
+    pub name: String,
+    pub size: u64,
+    pub mod_time: std::time::SystemTime,
+    pub sha256: String, // computed lazily / cached
 }
 
-// Config sources the [filetransfer] TOML section.
-type Config struct {
-    Enabled       bool
-    IncomingDir   string        // default <Downloads>/FeatherDesk/Incoming
-    OutgoingDir   string        // default <Downloads>/FeatherDesk/Outgoing
-    MaxFileBytes  int64         // per-file cap (default 0 = unlimited)
-    MaxConcurrent int           // concurrent transfers (default 4)
-    RateLimitBps  int64         // 0 = unlimited; else throttle to protect video
-    Logger        *slog.Logger
+/// FileTransferError — stable error enum for the filetransfer crate.
+#[derive(thiserror::Error, Debug)]
+pub enum FileTransferError {
+    #[error("filetransfer: payload exceeds the per-type cap")]
+    Oversized,
+    #[error("filetransfer: SHA-256 mismatch")]
+    HashMismatch,
+    #[error("filetransfer: path-traversal / invalid name rejected")]
+    BadName,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Config sources the [filetransfer] TOML section.
+/// (Logging is via the global `tracing` subscriber — no per-service logger handle.)
+pub struct Config {
+    pub enabled: bool,
+    pub incoming_dir: String,    // default <Downloads>/FeatherDesk/Incoming
+    pub outgoing_dir: String,    // default <Downloads>/FeatherDesk/Outgoing
+    pub max_file_bytes: u64,     // per-file cap (default 0 = unlimited)
+    pub max_concurrent: u32,     // concurrent transfers (default 4)
+    pub rate_limit_bps: u64,     // 0 = unlimited; else throttle to protect video
 }
 ```
 
@@ -126,9 +142,9 @@ Offset  Size  Field        Notes
 ```
 
 > **CRC32C, not CRC32.** Use the Castagnoli polynomial (`0x1EDC6F41`,
-> hardware-accelerated on x86 via SSE4.2 and on ARMv8). In Go,
-> `hash/crc32.MakeTable(crc32.Castagnoli)` — NOT the default `IEEEPoly` /
-> `crc32.IEEETable`. Mismatch corrupts the protocol.
+> hardware-accelerated on x86 via SSE4.2 and on ARMv8). In Rust, use the
+> `crc32c` crate (hardware-accelerated) — NOT a default `IEEE` CRC-32
+> (`crc32fast` / the `crc` crate's `CRC_32_ISO_HDLC`). Mismatch corrupts the protocol.
 
 The 1-byte `Version` lets a future binary wire change (wider `Seq`, different
 chunk size, new compression layer) negotiate via a `HELLO` message at the start
@@ -162,12 +178,12 @@ of the connection without forcing every reader to guess.
 
 ```
 C: INIT {name:"a.zip", size:10485760, sha256:"…"}
-H: validate name (sandbox guard), check MaxFileBytes, MaxConcurrent
+H: validate name (sandbox guard), check max_file_bytes, max_concurrent
 H: ACCEPT {transfer_id:7, resume_from_seq:0}
 C: CHUNK seq=0 … CHUNK seq=N  (sender just writes; QUIC stream flow control paces it)
 H: ACK {ack_seq:k}  (cumulative durable-write checkpoint; advances the resume point)
 C: COMPLETE {final_sha256:"…"}
-H: verify SHA-256 of received file == final_sha256, then os.Rename(.part → final)
+H: verify SHA-256 of received file == final_sha256, then std::fs::rename(.part → final)
 H: COMPLETE (echo) on success, or ERROR on mismatch (.part discarded)
 ```
 
@@ -188,9 +204,10 @@ downloads the client receives → client assigns. IDs are unique per WebTranspor
 session. This prevents collisions when both directions are active.
 
 **Atomic write.** The receiver writes chunks into `<IncomingDir>/<name>.part`,
-fsyncs, then `os.Rename` to the final name **only after** SHA-256 verifies. On
-SHA-256 mismatch / `CANCEL` / disconnect-without-resume the `.part` is
-`os.Remove`d so partial corrupt files never appear in the user's Downloads.
+fsyncs (`File::sync_all`), then `std::fs::rename` to the final name **only after**
+SHA-256 verifies. On SHA-256 mismatch / `CANCEL` / disconnect-without-resume the
+`.part` is `std::fs::remove_file`d so partial corrupt files never appear in the
+user's Downloads.
 
 **Name collisions.** If `<name>` already exists when renaming, the receiver
 appends ` (N)` before the extension (`report (1).pdf`, `report (2).pdf`, …)
@@ -300,15 +317,19 @@ rate_limit_bps = 0                    # 0 = unlimited; else throttle to protect 
   2. Reject the name if it matches a Windows reserved name **case-insensitively
      with any extension**: `CON`, `PRN`, `AUX`, `NUL`, `COM1..COM9`, `LPT1..LPT9`,
      plus `COM¹/COM²/COM³`, `LPT¹/LPT²/LPT³`. (`CON.txt` is also reserved.)
-  3. `joined = filepath.Clean(filepath.Join(IncomingDir, name))`.
-  4. `rel, err := filepath.Rel(IncomingDir, joined)`; reject if `err != nil`,
-     `rel == ".."`, or `strings.HasPrefix(rel, ".." + string(os.PathSeparator))`,
-     or `filepath.IsAbs(rel)`.
-  5. `os.Lstat(joined)` and every ancestor between `IncomingDir` (exclusive) and
-     `joined` (inclusive). If any is a symlink, reject — a previously planted
-     symlink would otherwise rewrite the prefix on TOCTOU.
-  6. Open with `O_CREATE|O_EXCL` (so a concurrent transfer can't race the
-     existence check) and a restrictive mode (`0600`).
+  3. `let joined = clean(Path::new(&incoming_dir).join(name));` — lexical clean
+     (the `path-clean` crate, or an equivalent normalization), NOT
+     `fs::canonicalize` (which follows symlinks before the check).
+  4. `let rel = pathdiff::diff_paths(&joined, &incoming_dir);` — reject if it is
+     `None`, equals `..`, starts with `..` + `std::path::MAIN_SEPARATOR`, or
+     `joined.is_absolute()` escapes the root.
+  5. `std::fs::symlink_metadata(&joined)` (lstat, does not follow) on `joined` and
+     every ancestor between `incoming_dir` (exclusive) and `joined` (inclusive).
+     If any `is_symlink()`, reject — a previously planted symlink would otherwise
+     rewrite the prefix on TOCTOU.
+  6. Open with `OpenOptions::new().write(true).create_new(true)` (`O_CREAT|O_EXCL`,
+     so a concurrent transfer can't race the existence check) and a restrictive
+     mode (`.mode(0o600)` via `std::os::unix::fs::OpenOptionsExt`).
 - **Controller-only.** Only the authenticated controller may transfer files;
   viewers cannot. File-transfer streams reuse the main WebTransport session's auth
   (Bearer token / session token), validated at upgrade.

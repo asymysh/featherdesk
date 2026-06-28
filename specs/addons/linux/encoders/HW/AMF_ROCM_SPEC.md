@@ -36,7 +36,7 @@ specifically request native AMD tuning or are already running ROCm.
 | AMD AMF SDK | **Apache 2.0** | Genuinely permissive — best license of the three vendor SDKs |
 | ROCm runtime | MIT / NCSA | AMD's open compute stack |
 | `libamf-component-encoder` | proprietary AMD | Ships with AMD GPU PRO driver |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 Apache 2.0 on the SDK itself is the cleanest of the three vendor encoder SDKs (NVIDIA
 is a custom NVIDIA license, Intel is MIT). No royalties, fully redistributable.
@@ -66,10 +66,10 @@ use. Users on pure open-source Mesa get VA-API (the default binary path) only.
 ### Shared library build
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-amf_rocm.so ./internal/encode/amf
+cargo build --release -p featherdesk-addon-amf_rocm   # cdylib → featherdesk-addon-amf_rocm.so
 ```
 
-The `amf_rocm` add-on shared library is built from the `internal/encode/amf/` package.
+The `amf_rocm` add-on cdylib is built from the `internal/encode/amf/` crate.
 
 ### Runtime dependencies
 
@@ -77,28 +77,36 @@ The `amf_rocm` add-on shared library is built from the `internal/encode/amf/` pa
 - `libamf-component-encoder` (ships with AMD PRO driver)
 - ROCm runtime libraries (`/opt/rocm/lib/`)
 
-### CGo configuration
+### FFI configuration
 
-```go
-/*
-#cgo CFLAGS: -I/opt/amdgpu-pro/include -I/opt/rocm/include
-#cgo LDFLAGS: -L/opt/amdgpu-pro/lib -L/opt/rocm/lib -lamf -lhsa-runtime64 -ldl
+The bindings are generated with `bindgen` in `build.rs`, which adds the SDK
+include paths, links the AMF + ROCm runtime libraries, and wraps the headers:
 
-#include <core/Factory.h>
-#include <components/VideoEncoderVCE.h>
-#include <components/VideoEncoderHEVC.h>
-#include <components/VideoEncoderAV1.h>
-*/
-import "C"
+```rust
+// build.rs
+println!("cargo:rustc-link-search=native=/opt/amdgpu-pro/lib");
+println!("cargo:rustc-link-search=native=/opt/rocm/lib");
+println!("cargo:rustc-link-lib=amf");
+println!("cargo:rustc-link-lib=hsa-runtime64");
+println!("cargo:rustc-link-lib=dl");
+
+bindgen::Builder::default()
+    .clang_args(["-I/opt/amdgpu-pro/include", "-I/opt/rocm/include"])
+    .header_contents("wrapper.h", "
+        #include <core/Factory.h>
+        #include <components/VideoEncoderVCE.h>
+        #include <components/VideoEncoderHEVC.h>
+        #include <components/VideoEncoderAV1.h>")
+    .generate().unwrap();
 ```
 
-AMF is a **C++ SDK** with a C wrapper. The CGo binding uses the C wrapper functions
+AMF is a **C++ SDK** with a C wrapper. The Rust FFI binding uses the C wrapper functions
 (`AMFCreateContext`, `AMFCreateComponent`, etc.) rather than instantiating C++ objects
 directly.
 
 ---
 
-## CGo Implementation Sketch
+## FFI Implementation Sketch
 
 ```c
 // Session setup -- load AMF runtime via dlopen
@@ -198,10 +206,10 @@ import extension is mature on Mesa and AMD's PRO driver.
 
 ## Probe & Selection
 
-```go
-//go:build linux
+```rust
+// crate: featherdesk-addon-amf_rocm  (cfg(target_os = "linux"))
 
-func ProbeAMF() (*AMFCapabilities, error) {
+fn probe_amf() -> Result<AmfCapabilities, EncodeError> {
     // 1. dlopen libamf.so
     // 2. dlopen("libamfrt64.so.1") → AMFInit() → CreateContext → InitVulkan
     // 3. Enumerate available encoder components
@@ -225,11 +233,11 @@ OpenH264?            → universal SW fallback
 
 ```
 internal/encode/amf/
-├── amf.go                // Encoder struct, NewAMFEncoder
-├── amf_cgo_linux.go      // CGo binding, //go:build linux (built into the add-on shared library)
-├── probe.go              // ProbeAMF()
-├── vulkan_interop.go     // DMA-BUF → VkImage → AMFSurface
-└── amf_test.go           // Integration tests
+├── amf.rs                // Encoder struct, AmfEncoder::new
+├── ffi.rs                // Rust FFI bindings, cfg(target_os = "linux") (built into the add-on cdylib)
+├── probe.rs              // probe_amf()
+├── vulkan_interop.rs     // DMA-BUF → VkImage → AMFSurface
+└── tests.rs              // Integration tests
 ```
 
 ---
@@ -284,7 +292,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
+This add-on implements `stream::ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
 
 | Param change | AMF API | Hot? |
 |--------------|---------|------|
@@ -292,8 +300,8 @@ This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../c
 | `BitrateBps` | `SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, b)` | yes |
 | `QP` | `SetProperty(AMF_VIDEO_ENCODER_QP_I/QP_P, qp)` | yes |
 | `KeyframeInterval` | `SetProperty(AMF_VIDEO_ENCODER_IDR_PERIOD, ki)` | yes |
-| `Width`, `Height` | `Terminate` + `ReInit` with new `AMF_VIDEO_ENCODER_FRAMESIZE` (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 only -- `AMF_VIDEO_ENCODER_HEVC_PROFILE = AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires codec negotiation at session start, not mid-stream (returns `stream.ErrRequiresRestart`) | no |
+| `Width`, `Height` | `Terminate` + `ReInit` with new `AMF_VIDEO_ENCODER_FRAMESIZE` (returns `StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 only -- `AMF_VIDEO_ENCODER_HEVC_PROFILE = AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires codec negotiation at session start, not mid-stream (returns `StreamError::RequiresRestart`) | no |
 | `NetworkRTTMs`, `PacketLossPct` | Used by `RATE_CONTROL_HQVBR_QVBR` quality boost when headroom available | yes |
 
 **ROCm note:** On Linux/ROCm, the same AMF VCE component is used. The `amf_rocm` add-on shared library links the ROCm/HIP runtime for GPU buffer management, but the encoder parameter API is identical to the Windows AMF add-on.

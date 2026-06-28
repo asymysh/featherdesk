@@ -1,11 +1,19 @@
-# macOS Input Add-On: CGEvent
+# macOS Input: CGEvent (the in-core `enigo` default)
+
+> **RETIRED as a standalone add-on — subsumed by the core `enigo` default.**
+> There is no separate `cgevent` add-on anymore. `enigo`'s macOS backend **IS**
+> CGEvent, and `enigo` is built into core as the default `KeyMouseInjector` on
+> every OS (see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)).
+> This document is kept as a reference for **how the macOS kb/mouse default works
+> under the hood** — the CGEvent / Core Graphics technical details below describe
+> `enigo`'s macOS code path, not a loadable shared library.
 
 ## Purpose
 
-The `cgevent` add-on is the macOS keyboard+mouse injection backend for the core
-Input module (see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)).
-It implements `input.KeyMouseInjector` using Core Graphics event synthesis
-(`CGEventPost` to `kCGHIDEventTap`).
+CGEvent is the macOS keyboard+mouse injection path used by the core's built-in
+`enigo` default `KeyMouseInjector` (see
+[`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)).
+It synthesizes events through Core Graphics (`CGEventPost` to `kCGHIDEventTap`).
 
 There is no alternative on macOS — `CGEventPost` is the supported public path for
 synthetic keyboard/mouse events. Touch injection has no public API on macOS, so
@@ -18,7 +26,7 @@ there is no macOS touch add-on (pen/touch from a client falls back to mouse).
 | Component | License | Notes |
 |-----------|---------|-------|
 | Core Graphics / ApplicationServices | Apple system framework | Linked, not redistributed |
-| Our CGo binding | MIT | |
+| Our Rust FFI binding (`objc2` / system framework) | MIT | |
 
 ---
 
@@ -75,8 +83,8 @@ physical pixels but the global space is 1440x900 points. Using raw pixel
 coordinates lands the cursor at half the intended position on every Retina
 display.
 
-The pipeline must therefore advertise `cfg.Width`/`cfg.Height` in **points** to
-this add-on, and the capture pipeline must agree. Conversion if needed:
+The pipeline must therefore advertise `cfg.width`/`cfg.height` in **points** to
+the `enigo` default, and the capture pipeline must agree. Conversion if needed:
 `CGDisplayPixelsWide(displayID)` (pixels) vs `CGDisplayBounds(displayID).size.width`
 (points) gives the per-display backing-scale factor.
 
@@ -87,14 +95,14 @@ maintained from the decoded key stream. On every event — **including mouse
 events**, so Cmd-click / Shift-drag / Ctrl-scroll behave correctly — the
 current mask is applied via `CGEventSetFlags`.
 
-On controller disconnect or `Resize`, the dispatcher tells this add-on to
+On controller disconnect or `resize`, the dispatcher tells the injector to
 **release all held keys + buttons**: emit a synthetic up event for each
 tracked-down key and button before tearing down. Without it, autorepeat / lost
 events leave "stuck modifier" state in the OS session.
 
 ### HID-usage → virtual key (kVK_*)
 
-The add-on maps the core's neutral HID usage IDs to macOS virtual key codes
+The `enigo` default maps the core's neutral HID usage IDs to macOS virtual key codes
 (`Carbon/HIToolbox Events.h` `kVK_*`). Generated for full coverage. Modifier
 state is tracked and applied via `CGEventSetFlags` so combinations (Cmd+C, etc.)
 behave correctly.
@@ -103,7 +111,7 @@ behave correctly.
 
 Stream-point coordinates (see "Coordinate space" above) map directly to the
 global display point space. For the single-display target with the captured
-display at origin (0,0): `globalPointX = x`, `globalPointY = y`. `Resize`
+display at origin (0,0): `globalPointX = x`, `globalPointY = y`. `resize`
 updates the width/height used for clamping. Multi-monitor is out of scope.
 
 ---
@@ -113,14 +121,14 @@ updates the width/height used for clamping. Multi-monitor is out of scope.
 `CGEventPost` to `kCGHIDEventTap` **silently drops events** unless the process has
 **Accessibility** permission (System Settings → Privacy & Security →
 Accessibility). This is the single biggest macOS support issue for remote-desktop
-tools, so the add-on handles it explicitly:
+tools, so the `enigo` default handles it explicitly:
 
 ```c
 Boolean trusted = AXIsProcessTrustedWithOptions(
     (__bridge CFDictionaryRef)@{ (__bridge id)kAXTrustedCheckOptionPrompt : @YES });
 ```
 
-- At startup, `Probe`/`New` calls `AXIsProcessTrusted()`. If not trusted, it
+- At startup, `probe`/`new` calls `AXIsProcessTrusted()`. If not trusted, it
   prompts (opens the Accessibility pane) and returns a clear error; the pipeline
   starts view-only until permission is granted.
 - The error message tells the operator exactly which toggle to enable.
@@ -134,17 +142,19 @@ Boolean trusted = AXIsProcessTrustedWithOptions(
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-cgevent.dylib ./internal/input/cgevent
+cargo build --release -p featherdesk-addon-cgevent   # cdylib  featherdesk-addon-cgevent.dylib
 ```
 
-CGo config:
+Framework link config (Rust FFI):
 
-```go
-/*
-#cgo LDFLAGS: -framework ApplicationServices -framework Carbon
-#include <ApplicationServices/ApplicationServices.h>
-*/
-import "C"
+```rust
+// build.rs — link the macOS system frameworks:
+//   println!("cargo:rustc-link-lib=framework=ApplicationServices");
+//   println!("cargo:rustc-link-lib=framework=Carbon");
+// The CGEvent / Core Graphics declarations come from the `objc2` /
+// `core-graphics` crates (or `bindgen` over
+// <ApplicationServices/ApplicationServices.h>). `enigo` itself pulls these in;
+// the macOS backend is compiled directly into the core `featherdesk-input` crate.
 ```
 
 For distribution the app must be **signed + notarized**, and the user grants
@@ -154,15 +164,15 @@ Accessibility once. Apple Silicon and Intel use the identical API.
 
 ## Constructor & Probe
 
-```go
-// internal/input/cgevent/cgevent_darwin.go  (built into the add-on's shared library)
+```rust
+// crate: featherdesk-input (the `enigo` default's macOS backend, compiled into core)
 
-// Probe returns true on macOS (the API always exists); it does NOT guarantee
-// Accessibility permission — that is checked in New with an actionable error.
-func Probe() bool
+/// probe returns true on macOS (the API always exists); it does NOT guarantee
+/// Accessibility permission — that is checked in `new` with an actionable error.
+pub fn probe() -> bool;
 
-// New creates the injector. Returns ErrNoAccessibility if not trusted.
-func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
+/// new creates the injector. Returns Err(InputError::NoAccessibility) if not trusted.
+pub fn new(cfg: InjectorConfig) -> Result<Box<dyn KeyMouseInjector>, InputError>;
 ```
 
 ---
@@ -171,7 +181,7 @@ func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
 
 | Failure | Behavior |
 |---------|----------|
-| No Accessibility permission | `New` returns `ErrNoAccessibility`, prompts, opens Settings pane; view-only until granted |
+| No Accessibility permission | `new` returns `InputError::NoAccessibility`, prompts, opens Settings pane; view-only until granted |
 | `CGEventCreate*` returns NULL | log + skip that event; do not crash |
 | Unmappable HID usage | log once; drop the key |
 | Permission revoked mid-session | injection silently no-ops (OS behavior); detect via a periodic `AXIsProcessTrusted` check and warn |
@@ -181,14 +191,15 @@ func New(cfg input.InjectorConfig) (input.KeyMouseInjector, error)
 ## File Structure
 
 ```
-internal/input/cgevent/
-├── cgevent_darwin.go     // KeyMouseInjector impl, CGo (built into the add-on's shared library)
-├── keymap.go             // HID usage → kVK_* (generated)
-├── accessibility.go      // AXIsProcessTrusted check + prompt
-└── cgevent_test.go
+featherdesk-input/src/macos/   (the `enigo` default's macOS backend, compiled into core)
+├── cgevent.rs            // KeyMouseInjector impl, Rust FFI
+├── keymap.rs             // HID usage → kVK_* (generated)
+├── accessibility.rs      // AXIsProcessTrusted check + prompt
+└── tests.rs
 ```
 
-> No `!cgevent` stub file is needed — the add-on is its own shared library.
+> There is no separate `cgevent` shared library — the macOS kb/mouse path is
+> compiled into the core `featherdesk-input` crate as the `enigo` default backend.
 
 ---
 
@@ -201,7 +212,8 @@ Reads `[addon_module_cgevent]` (see [`specs/core/MODULE_CONFIG.md`](../../../cor
 prompt_accessibility = true   # auto-open the Accessibility pane if not trusted
 ```
 
-If absent, defaults apply. Strictly validated only when this add-on is loaded.
+If absent, defaults apply. Folded into the core input config now that the macOS
+kb/mouse path is the in-core `enigo` default (no separate add-on to load).
 
 ---
 

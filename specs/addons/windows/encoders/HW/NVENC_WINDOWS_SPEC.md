@@ -21,7 +21,7 @@ encoder available.
 | Component | License | Notes |
 |-----------|---------|-------|
 | NVIDIA Video Codec SDK | NVIDIA SDK License (free use) | Same model as NVENC Linux add-on |
-| Our CGo binding | MIT | |
+| Our Rust FFI binding | MIT | |
 
 No royalties. SDK redistribution rules same as Linux side — headers vendored into
 source tree per NVIDIA's permissive header redistribution policy.
@@ -44,14 +44,17 @@ On Linux, NVENC consumes CUDA device pointers (from CUDA-EGL interop with KMS DM
 
 On Windows, NVENC consumes **D3D11 textures directly**:
 
-```c
-NV_ENC_REGISTER_RESOURCE registerParams = { NV_ENC_REGISTER_RESOURCE_VER };
-registerParams.resourceType        = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-registerParams.width               = W;
-registerParams.height              = H;
-registerParams.resourceToRegister  = (void*)d3d11Texture;     // ← from DXGI Desktop Duplication
-registerParams.bufferFormat        = NV_ENC_BUFFER_FORMAT_ARGB;
-funcs.nvEncRegisterResource(encoder, &registerParams);
+```rust
+let mut register_params = NV_ENC_REGISTER_RESOURCE {
+    version: NV_ENC_REGISTER_RESOURCE_VER,
+    ..Default::default()
+};
+register_params.resourceType       = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+register_params.width              = W;
+register_params.height             = H;
+register_params.resourceToRegister = d3d11_texture as *mut c_void; // ← from DXGI Desktop Duplication
+register_params.bufferFormat       = NV_ENC_BUFFER_FORMAT_ARGB;
+unsafe { (funcs.nvEncRegisterResource)(encoder, &mut register_params); }
 ```
 
 This is the canonical Windows zero-copy path: DXGI Desktop Duplication captures
@@ -63,23 +66,21 @@ on the GPU. No CPU memory copy at any stage.
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-nvenc.dll ./internal/encode/nvenc
+cargo build --release -p featherdesk-addon-nvenc   # cdylib  featherdesk-addon-nvenc.dll
 ```
 
-CGo config:
+FFI link config (in `build.rs`):
 
-```go
-/*
-#cgo CFLAGS: -I${SRCDIR}/sdk
-#cgo LDFLAGS: -lnvencodeapi -ld3d11 -ldxgi
-
-#include <nvEncodeAPI.h>
-*/
-import "C"
+```rust
+// build.rs:
+//   println!("cargo:rustc-link-lib=dylib=nvencodeapi");
+//   println!("cargo:rustc-link-lib=dylib=d3d11");
+//   println!("cargo:rustc-link-lib=dylib=dxgi");
+// nvEncodeAPI.h is vendored and bound via bindgen into an `nvenc-sys` module.
 ```
 
 `nvencodeapi.lib` ships with the NVIDIA driver; no separate SDK install needed at
-runtime. SDK headers vendored under `internal/encode/nvenc/sdk/`.
+runtime. SDK headers vendored under `addons/nvenc/sdk/`.
 
 ---
 
@@ -128,18 +129,19 @@ plus access to REF_FRAMES_INVALIDATION.
 ## File Structure
 
 ```
-internal/encode/nvenc/
-├── nvenc.go             // shared with Linux (mostly)
-├── nvenc_cgo_linux.go   // built into the add-on's shared library (//go:build linux)
-├── nvenc_cgo_windows.go // built into the add-on's shared library (//go:build windows) — D3D11 surface path
-├── d3d11_interop.go     // DXGI texture registration
-├── probe.go
+addons/nvenc/            // Rust source shared by the Linux + Windows nvenc builds
+├── src/
+│   ├── lib.rs           // shared encoder impl
+│   ├── linux.rs         // CUDA surface path (cfg(target_os = "linux"))
+│   ├── windows.rs       // D3D11 surface path (cfg(windows))
+│   ├── d3d11_interop.rs // DXGI texture registration
+│   └── probe.rs
 ├── sdk/                 // NVIDIA SDK headers
-└── nvenc_test.go
+└── tests.rs
 ```
 
-No `!nvenc` stub file is needed — the add-on is its own shared library; an absent
-add-on is simply a `.dll` that isn't in the add-ons directory.
+No conditional-compilation stub file is needed — the add-on is its own cdylib
+crate; an absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 

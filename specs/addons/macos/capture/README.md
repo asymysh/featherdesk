@@ -4,7 +4,7 @@
 
 Mirroring the Linux and encoder architecture: the default macOS binary ships
 with **zero capture backends**. Capture is an opt-in add-on shared library. Build
-the `sck` library with `go build -buildmode=c-shared -o featherdesk-addon-sck.dylib ./internal/capture/sck`
+the `sck` library with `cargo build --release -p featherdesk-addon-sck`
 and drop it into the add-ons directory to enable ScreenCaptureKit.
 
 In practice, **every** real macOS deployment will load the SCK add-on —
@@ -71,5 +71,5 @@ workload requires it (e.g., a hypothetical pre-compositor frame access API):
 1. Write the spec at `specs/addons/macos/capture/{NAME}_MACOS_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a c-shared library from `internal/capture/{name}/`
+4. Build as a cdylib from `internal/capture/{name}/`
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`

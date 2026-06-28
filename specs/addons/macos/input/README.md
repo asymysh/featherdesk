@@ -1,15 +1,19 @@
 # macOS Input Add-Ons
 
-## Default binary input: NONE — view-only
+## Default binary input: kb/mouse via the in-core `enigo` default
 
-Mirroring the capture and encoder architecture: the default macOS binary ships
-with **zero input backends**. With no input add-on loaded, the core binary
-is **view-only** — it streams the desktop but injects nothing. Input injection
-is an opt-in add-on shared library. Compose the deployment you need by choosing
-capture + encoder + input add-on(s).
+macOS keyboard + mouse injection is **built into core** via the default `enigo`
+`KeyMouseInjector` — and **`enigo`'s macOS backend IS CGEvent**. So out of the
+box (with `[input] enabled = true`) the macOS binary already injects keyboard +
+mouse; no add-on is required. The standalone **`cgevent` add-on is retired /
+subsumed** into this `enigo` default — there is no separate `cgevent` shared
+library anymore. (The CGEvent technical details are kept in
+[`./CGEVENT_MACOS_SPEC.md`](./CGEVENT_MACOS_SPEC.md) as documentation of how the
+in-core default works on macOS.)
 
-In practice every interactive macOS deployment loads `cgevent` — the only
-supported injection path. The pluggable structure exists for cross-platform symmetry.
+The only macOS **input add-on** that remains is `gcvirtual` (gamepad) — `enigo`
+has no gamepad path, so virtual-controller injection stays an opt-in add-on
+shared library.
 
 ---
 
@@ -17,16 +21,16 @@ supported injection path. The pluggable structure exists for cross-platform symm
 
 | Add-on | Add-on ID | Spec | When to use | Status |
 |--------|-----------|------|------------|--------|
-| **CGEventPost** | `cgevent` | [`./CGEVENT_MACOS_SPEC.md`](./CGEVENT_MACOS_SPEC.md) | Always — keyboard + mouse injection via the Core Graphics event API | 📋 Specced |
+| _kb/mouse (CGEvent)_ | _core `enigo` default_ | [`./CGEVENT_MACOS_SPEC.md`](./CGEVENT_MACOS_SPEC.md) | Always — built into core; **not** a loadable add-on (the former `cgevent` add-on is retired/subsumed) | ✅ In core |
 | **GCVirtualController** | `gcvirtual` | [`./GCVIRTUAL_MACOS_SPEC.md`](./GCVIRTUAL_MACOS_SPEC.md) | Browser gamepad redirection (macOS 14+) — virtual controller via the Game Controller framework | 📋 Specced |
 
 ### Recommended combinations
 
-| Deployment | Input add-on(s) | Add-on libraries to drop in |
-|------------|-----------------|------------------------------|
-| Any interactive Mac | `cgevent` | `featherdesk-addon-sck.dylib`, `featherdesk-addon-vt_hw.dylib`, `featherdesk-addon-cgevent.dylib` |
-| Casual gaming with gamepad (macOS 14+) | `cgevent,gcvirtual` | `featherdesk-addon-sck.dylib`, `featherdesk-addon-vt_hw.dylib`, `featherdesk-addon-cgevent.dylib`, `featherdesk-addon-gcvirtual.dylib` |
-| View-only monitoring (no injection) | *(none)* | `featherdesk-addon-sck.dylib`, `featherdesk-addon-vt_hw.dylib` |
+| Deployment | Input | Add-on libraries to drop in |
+|------------|-------|------------------------------|
+| Any interactive Mac | core `enigo` default (kb/mouse) | `featherdesk-addon-sck.dylib`, `featherdesk-addon-vt_hw.dylib` |
+| Casual gaming with gamepad (macOS 14+) | core `enigo` default + `gcvirtual` | `featherdesk-addon-sck.dylib`, `featherdesk-addon-vt_hw.dylib`, `featherdesk-addon-gcvirtual.dylib` |
+| View-only monitoring (no injection) | `[input] enabled = false` | `featherdesk-addon-sck.dylib`, `featherdesk-addon-vt_hw.dylib` |
 
 `gcvirtual` only reaches apps using Apple's GameController framework. SDL2-based
 games that read IOKit HID directly do **not** see the virtual controller — this
@@ -36,8 +40,8 @@ is a real limitation, document it in user-facing release notes.
 
 ## Permission requirements
 
-`cgevent` calls `CGEventPost`, which macOS gates behind **Accessibility**
-permission. The app must be:
+The in-core `enigo` default calls `CGEventPost`, which macOS gates behind
+**Accessibility** permission. The app must be:
 
 - **signed + notarized**, and
 - granted **Accessibility** in **System Settings → Privacy & Security →
@@ -58,16 +62,16 @@ back to mouse emulation. There's also no vendor fragmentation to add backends fo
 
 ## Runtime input registration
 
-With a single input add-on the selection is trivial:
+Keyboard + mouse come from core; only gamepad is add-on-gated:
 
 ```
-1. cgevent loaded AND Accessibility granted?    → register keyboard + mouse
+1. [input] enabled AND Accessibility granted?   → core enigo default registers keyboard + mouse (CGEvent)
 2. gcvirtual loaded AND macOS 14+?              → register gamepad injection
 3. Neither?                                      → view-only: no input capabilities
 ```
 
-Each add-on is independent — `gcvirtual` doesn't require `cgevent`, though a typical
-gaming deployment loads both.
+`gcvirtual` is independent of the core `enigo` default — it adds gamepad on top,
+though a typical gaming deployment uses both.
 
 ---
 
@@ -76,5 +80,5 @@ gaming deployment loads both.
 1. Write the spec at `specs/addons/macos/input/{NAME}_MACOS_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the input index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a c-shared library from `internal/input/{name}/`
+4. Build as a cdylib from `internal/input/{name}/`
 5. Wire the capability registration in `MODULE_PIPELINE.md`

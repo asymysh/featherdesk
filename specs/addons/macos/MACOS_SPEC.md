@@ -148,7 +148,7 @@ advertised in the Config handshake.
 ```
 
 VideoToolbox is the **primary encoder API** for all three tiers on macOS — HW and SW.
-OpenH264 CGo or x264 subprocess can be used as alternative SW paths for cross-platform
+OpenH264 or x264 subprocess can be used as alternative SW paths for cross-platform
 binary consistency or to leverage the BSD/GPL licensing differentiation.
 
 **No software HEVC fallback.** If HEVC hardware is unavailable, fall straight to
@@ -254,6 +254,12 @@ message. The client configures `VideoDecoder` from this string — never hardcod
 ⏸️ **Deferred.** The macOS audio (CoreAudio / SCK built-in capture) and input
 (CGEvent) sections have been deliberately removed from this document to keep the
 focus on the capture and encode pipeline.
+
+> **Input note:** macOS keyboard/mouse is **not** an add-on — it is provided by
+> the core's built-in **`enigo` default** `KeyMouseInjector`, whose macOS backend
+> **is CGEvent**. The former standalone `cgevent` add-on is retired/subsumed into
+> that default (see [`input/CGEVENT_MACOS_SPEC.md`](./input/CGEVENT_MACOS_SPEC.md)).
+> Only the `gcvirtual` gamepad add-on remains an input add-on on macOS.
 
 When we resume work on audio and input, the existing core specs remain authoritative:
 - [`specs/media/MODULE_AUDIO.md`](../../media/MODULE_AUDIO.md)

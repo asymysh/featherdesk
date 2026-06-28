@@ -1,11 +1,11 @@
-# Linux HW Encoder Add-On: libva (Direct VA-API CGo Bindings)
+# Linux HW Encoder Add-On: libva (Direct VA-API Rust FFI Bindings)
 
 ## Purpose
 
 The `libva` add-on is the Linux HW encoder implementation backing the
-`hwencode.HardwareEncoder` interface defined in
+`hwencode::HardwareEncoder` trait defined in
 [`specs/media/MODULE_HARDWARE_ENCODE.md`](../../../../media/MODULE_HARDWARE_ENCODE.md).
-It binds directly to `libva` via CGo — no subprocess, no ffmpeg, no LGPL/GPL
+It binds directly to `libva` via Rust FFI — no subprocess, no ffmpeg, no LGPL/GPL
 dependencies.
 
 VA-API is the universal Linux HW encode abstraction. The same `libva` add-on
@@ -13,7 +13,7 @@ covers Intel Quick Sync (all generations from Sandy Bridge through Arc), AMD
 GCN/RDNA via Mesa, and NVIDIA via the open-source VA-API wrapper.
 
 **Why it is a separate spec from MODULE_HARDWARE_ENCODE:**
-`MODULE_HARDWARE_ENCODE.md` defines the abstract `HardwareEncoder` interface
+`MODULE_HARDWARE_ENCODE.md` defines the abstract `HardwareEncoder` trait
 that all HW encoder add-ons implement. This document defines *how to build the
 libva add-on specifically* — the specific VA-API calls, the SPS/PPS
 serialization approach, the reference implementations to draw from, and the
@@ -27,7 +27,7 @@ implementation plan.
 |-----------|---------|-------|
 | `libva` (Intel) | **MIT** | github.com/intel/libva — confirmed |
 | `libva-utils` h264encode.c | **MIT** | Reference implementation we copy SPS/PPS from |
-| Our CGo bindings | **MIT** | We own it, no contamination |
+| Our Rust FFI bindings | **MIT** | We own it, no contamination |
 | `libva-drm` | **MIT** | DRM display backend |
 
 No GPL. No LGPL. The entire chain is MIT. This is the reason to write our own bindings rather than going through ffmpeg (LGPL).
@@ -50,10 +50,10 @@ The same binary works on all of these — the driver handles vendor differences.
 | Qualcomm (some ARM Linux SoCs) | varies | `msm` / `freedreno` | device-specific | ❌ typically | ❌ |
 
 **Runtime capability check (mandatory at startup):**
-```go
+```rust
 // Never hardcode what the GPU supports. Always query.
-caps, err := probeVAAPI(renderNode)
-// caps.H264Encode, caps.HEVCEncode, caps.AV1Encode
+let caps = probe_vaapi(render_node)?;
+// caps.h264_encode, caps.hevc_encode, caps.av1_encode
 // If a profile is absent, fall back to software gracefully.
 ```
 
@@ -69,30 +69,30 @@ Two files to study before writing a single line of code. Both MIT licensed.
 - Contains the exact SPS/PPS/slice_header serialization needed
 - Has correct Exp-Golomb bit packing (`put_ue`, `put_se`, `bitstream_*`)
 - Has reference frame management, POC calculation, DPB logic
-- **Strategy:** copy the bitstream serialization functions verbatim into our CGo preamble. This is the hardest part and it already exists as MIT code.
+- **Strategy:** copy the bitstream serialization functions verbatim into our FFI C shim. This is the hardest part and it already exists as MIT code.
 
 ### 2. pion/mediadevices — `pkg/codec/vaapi/vp8.go`
 - **URL:** https://github.com/pion/mediadevices/blob/master/pkg/codec/vaapi/vp8.go
-- **572 lines** — pure CGo, no separate .c file, Go-native style
-- Template for how to structure the Go side
-- Shows the CGo bitfield helper pattern (VA-API structs have bitfields CGo can't access)
-- Shows the `newEncoder` / `Read()` / `Close()` architecture to follow
+- **572 lines** — a compact CGo example; a good template to mirror in Rust FFI
+- Template for how to structure the Rust side
+- Shows the bitfield helper pattern (VA-API structs have bitfields that bindgen can't access directly — wrap them in C accessors)
+- Shows the `new` / `next_frame()` / `Drop` architecture to follow
 
 ---
 
 ## Shared Library Build
 
-```go
-//go:build linux
+```rust
+// crate: featherdesk-addon-libva  (cfg(target_os = "linux"))
 ```
 
-The `libva` add-on is built as a standalone C-ABI shared library from the
-`internal/encode/libva/` package; its `libva` CGo dependencies are linked into
+The `libva` add-on is built as a standalone cdylib from the
+`internal/encode/libva/` crate; its `libva` FFI dependencies are linked into
 that library, never into the host. If the library isn't dropped into the
 add-ons directory, the host simply never loads it.
 
 ```
-go build -buildmode=c-shared -o featherdesk-addon-libva.so ./internal/encode/libva
+cargo build --release -p featherdesk-addon-libva   # cdylib → featherdesk-addon-libva.so
 ```
 
 ---
@@ -124,20 +124,20 @@ Understanding this prevents wasted time on false-start implementations.
 ### Phase 1 — Capability Probe (standalone, no encoding)
 **Goal:** detect VA-API hardware at startup, no ffmpeg involved.
 
-```go
-// internal/encode/libva/probe.go
-type VAAPICapabilities struct {
-    Available    bool
-    RenderNode   string   // e.g. /dev/dri/renderD128
-    VendorString string   // "Intel", "AMD/ATI", etc.
-    H264Encode   bool
-    HEVCEncode   bool
-    AV1Encode    bool
-    MaxWidth     int
-    MaxHeight    int
+```rust
+// internal/encode/libva/probe.rs
+pub struct VaapiCapabilities {
+    pub available:     bool,
+    pub render_node:   String,  // e.g. /dev/dri/renderD128
+    pub vendor_string: String,  // "Intel", "AMD/ATI", etc.
+    pub h264_encode:   bool,
+    pub hevc_encode:   bool,
+    pub av1_encode:    bool,
+    pub max_width:     u32,
+    pub max_height:    u32,
 }
 
-func ProbeVAAPI(renderNode string) (*VAAPICapabilities, error)
+pub fn probe_vaapi(render_node: &str) -> Result<VaapiCapabilities, EncodeError>;
 ```
 
 VA-API calls needed:
@@ -148,7 +148,7 @@ VA-API calls needed:
 5. `vaQueryConfigEntrypoints(display, VAProfileHEVCMain, ...)` → check HEVC
 6. `vaTerminate(display)` → cleanup
 
-This is ~80 lines of CGo. **Deliverable:** the `TestProbeVAAPI` integration test passes on a machine with VA-API GPU.
+This is ~80 lines of FFI. **Deliverable:** the `test_probe_vaapi` integration test passes on a machine with VA-API GPU.
 
 ---
 
@@ -163,7 +163,7 @@ VA-API calls:
 5. `vaCreateSurfaces(display, VA_RT_FORMAT_YUV420, width, height, surfaces, nSurfaces, nil, 0)` — for software-path surfaces
 6. `vaCreateSurfaces(...)` with `VASurfaceAttribExternalBuffers` — for DMA-BUF import surfaces
 
-**Deliverable:** `NewVAAPIEncoder()` returns without error on real hardware.
+**Deliverable:** `VaapiEncoder::new()` returns without error on real hardware.
 
 ---
 
@@ -183,7 +183,7 @@ VA-API calls:
 - `build_packed_pic_buffer` — wraps PPS as VAEncPackedHeaderPicture
 - `build_packed_slice_buffer` — wraps slice_header as VAEncPackedHeaderSlice
 
-These ~350 lines of C live in the CGo preamble. They are not Go-translated — they stay as C inside the `/* */` CGo block. Go never needs to see bitstream internals.
+These ~350 lines of C live in the FFI C shim. They are not Rust-translated — they stay as C, compiled via the `cc` crate in `build.rs` and called through Rust FFI. Rust never needs to see bitstream internals.
 
 **Deliverable:** `sps_rbsp` + `pps_rbsp` produce valid SPS/PPS bytes verifiable with `h264parse` from GStreamer or `ffprobe -show_streams`.
 
@@ -241,15 +241,15 @@ VASurfaceAttrib attrs[2] = {
 vaCreateSurfaces(display, VA_RT_FORMAT_RGB32, w, h, &surface, 1, attrs, 2);
 ```
 
-**Deliverable:** DMA-BUF from `KMSCapturer.NextSurface()` → `EncodeSurface()` → NALs with zero CPU pixel copies. Validate with `iotop` showing no memory bus traffic during encode.
+**Deliverable:** DMA-BUF from `KmsCapturer::next_surface()` → `encode_surface()` → NALs with zero CPU pixel copies. Validate with `iotop` showing no memory bus traffic during encode.
 
 ---
 
 ### Phase 6 — ForceKeyframe + Rate Control
-**Goal:** support `ForceKeyframe()` and `EncoderConfig.QP` / `BitrateBps`.
+**Goal:** support `force_keyframe()` and `EncoderConfig`'s `qp` / `bitrate_bps`.
 
-```go
-// ForceKeyframe: set flag, next encode call sets slice_type to IFRAME
+```rust
+// force_keyframe: set flag, next encode call sets slice_type to IFRAME
 // and rebuilds SPS+PPS packed headers
 
 // QP mode (RC_OFF_MODE): set VAEncMiscParameterRateControl with constant QP
@@ -258,14 +258,12 @@ vaCreateSurfaces(display, VA_RT_FORMAT_RGB32, w, h, &surface, 1, attrs, 2);
 
 ---
 
-## CGo Preamble Skeleton
+## FFI C Shim Skeleton
 
-This is the full set of includes and declarations needed. The body of each function is filled in during Phases 1–5.
+This is the full set of includes and declarations needed. The body of each function is filled in during Phases 1–5. Linking (`pkg-config: libva libva-drm`; `-lva -lva-drm`) is configured in `build.rs`; the `cc` crate compiles this shim and `bindgen` generates the Rust declarations.
 
 ```c
-/*
-#cgo pkg-config: libva libva-drm
-#cgo LDFLAGS: -lva -lva-drm
+// vaapi.h / vaapi.c — the C shim, compiled by build.rs and called via Rust FFI.
 
 #include <va/va.h>
 #include <va/va_drm.h>
@@ -314,8 +312,6 @@ VAStatus va_import_dmabuf(VADisplay dpy, int dmabufFD,
                           uint32_t width, uint32_t height,
                           uint32_t stride, uint32_t format,
                           uint64_t modifier, VASurfaceID *surface);
-*/
-import "C"
 ```
 
 ---
@@ -324,17 +320,17 @@ import "C"
 
 ```
 internal/encode/libva/
-├── probe.go          // Phase 1: VAAPICapabilities, ProbeVAAPI()
-├── encoder.go        // Phases 2+4: VAAPIEncoder struct, NewVAAPIEncoder(), Encode(), Close()
-├── surface.go         // Phase 5: EncodeSurface() zero-copy path
-├── ratecontrol.go    // Phase 6: QP / CBR rate control
-├── vaapi.c           // CGo preamble: bitstream + SPS/PPS + VA-API wrappers
-│                     // (keep C in a .c file for better IDE support and build isolation)
+├── probe.rs          // Phase 1: VaapiCapabilities, probe_vaapi()
+├── encoder.rs        // Phases 2+4: VaapiEncoder struct, VaapiEncoder::new(), encode(), Drop
+├── surface.rs         // Phase 5: encode_surface() zero-copy path
+├── ratecontrol.rs    // Phase 6: QP / CBR rate control
+├── vaapi.c           // C shim: bitstream + SPS/PPS + VA-API wrappers
+│                     // (kept in a .c file, compiled via build.rs `cc`)
 ├── vaapi.h           // VA264Ctx struct, function declarations
-└── vaapi_test.go     // Integration tests (//go:build integration)
+└── tests.rs          // Integration tests (cfg(feature = "integration"))
 ```
 
-> Note: splitting the C into a `.c` file (rather than the CGo `/* */` preamble) gives better compiler errors, IDE support, and build caching. CGo supports this via `#cgo CFLAGS` pointing to local includes.
+> Note: keeping the C in a `.c` file (rather than inline) gives better compiler errors, IDE support, and build caching. The `cc` crate compiles it in `build.rs` and `bindgen` generates the Rust declarations from `vaapi.h`.
 
 ---
 
@@ -342,15 +338,15 @@ internal/encode/libva/
 
 | Test | What | Requires |
 |------|------|---------|
-| `TestProbeVAAPI` | ProbeVAAPI() returns non-nil, H264Encode=true | VA-API GPU |
-| `TestEncoderInit` | NewVAAPIEncoder() doesn't error | VA-API GPU |
-| `TestEncodeSynthetic` | 300 frames encoded, NALs parseable by ffprobe | VA-API GPU |
-| `TestSurfaceEncode` | DMA-BUF from real KMS → NALs (zero-copy verified) | Root + GPU |
-| `TestForceKeyframe` | IDR produced on demand | VA-API GPU |
-| `BenchmarkEncode1080p` | Latency p50/p95/p99, fps ceiling | VA-API GPU |
-| `BenchmarkEncode1440p` | Same at 1440p | VA-API GPU |
+| `test_probe_vaapi` | probe_vaapi() returns Ok, h264_encode=true | VA-API GPU |
+| `test_encoder_init` | VaapiEncoder::new() doesn't error | VA-API GPU |
+| `test_encode_synthetic` | 300 frames encoded, NALs parseable by ffprobe | VA-API GPU |
+| `test_surface_encode` | DMA-BUF from real KMS → NALs (zero-copy verified) | Root + GPU |
+| `test_force_keyframe` | IDR produced on demand | VA-API GPU |
+| `bench_encode_1080p` | Latency p50/p95/p99, fps ceiling | VA-API GPU |
+| `bench_encode_1440p` | Same at 1440p | VA-API GPU |
 
-All tests behind `//go:build integration` — normal `go test` skips them.
+All tests behind `cfg(feature = "integration")` — a normal `cargo test` skips them.
 
 ---
 
@@ -386,10 +382,10 @@ Runtime (user must have installed):
 
 | Module | Relationship |
 |--------|-------------|
-| `MODULE_HARDWARE_ENCODE.md` | Defines the `HardwareEncoder` interface this implements |
-| `MODULE_CAPTURE.md` | `SurfaceCapturer.NextSurface()` provides the fd for Phase 5 |
-| `MODULE_PIPELINE.md` | Selects this encoder when `caps.H264Encode == true` |
-| `MODULE_ENCODE.md` | Software fallback when this module returns `ErrFallbackToSoftware` |
+| `MODULE_HARDWARE_ENCODE.md` | Defines the `HardwareEncoder` trait this implements |
+| `MODULE_CAPTURE.md` | `SurfaceCapturer::next_surface()` provides the fd for Phase 5 |
+| `MODULE_PIPELINE.md` | Selects this encoder when `caps.h264_encode == true` |
+| `MODULE_ENCODE.md` | Software fallback when this module returns `StreamError::FallbackToSoftware` |
 
 ---
 
@@ -408,13 +404,13 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). VA-API supports limited hot reconfiguration -- rate control parameters can change between frames, but resolution and profile changes require full context teardown.
+This add-on implements `stream::ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). VA-API supports limited hot reconfiguration -- rate control parameters can change between frames, but resolution and profile changes require full context teardown.
 
 | Param change | VA-API mechanism | Hot? |
 |--------------|-----------------|------|
 | `FPS` | Adjust frame timing in `VAEncMiscParameterFrameRate` + `vaRenderPicture` | yes |
 | `BitrateBps` | `VAEncMiscParameterRateControl.bits_per_second` via `vaRenderPicture` per-frame | yes |
 | `QP` | `VAEncPictureParameterBufferH264.pic_init_qp` per-frame (CQP mode) | yes |
-| `KeyframeInterval` | `VAEncSequenceParameterBufferH264.intra_period` -- requires `vaCreateContext` reinit (returns `stream.ErrRequiresRestart`) | no |
-| `Width`, `Height` | `vaDestroyContext` + `vaCreateContext` + `vaCreateSurfaces` (returns `stream.ErrRequiresRestart`) | no |
+| `KeyframeInterval` | `VAEncSequenceParameterBufferH264.intra_period` -- requires `vaCreateContext` reinit (returns `StreamError::RequiresRestart`) | no |
+| `Width`, `Height` | `vaDestroyContext` + `vaCreateContext` + `vaCreateSurfaces` (returns `StreamError::RequiresRestart`) | no |
 | `BitDepth=10` / `HDR=true` | HEVC Main10 profile -- `VAProfileHEVCMain10`; requires full context recreation and HEVC codec selection at session start | no |

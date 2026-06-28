@@ -18,76 +18,76 @@ implementations evolve independently.
 
 ## Public Interface
 
-```go
-package capture
+```rust
+// crate: featherdesk-capture
 
 // Frame holds raw screen pixels (CPU-resident).
-// Used by the SW encoder path (pixels → I420 → encoder).
-type Frame struct {
-    Data      []byte      // Pixel buffer (Stride * Height bytes)
-    Stride    int         // Bytes per row. MAY exceed Width*4 (GPU readback
-                          // rows are often padded to a power-of-two pitch).
-                          // libyuv ARGBToI420/ABGRToI420 take this stride
-                          // directly; assuming Stride == Width*4 corrupts the
-                          // image on padded backends (e.g. DXGI). Width*4 is
-                          // the valid byte count per row.
-    PixelFmt  PixelFormat // PixelBGRA (macOS/Windows) or PixelRGBA (Linux GL)
-    Width     int
-    Height    int
-    Timestamp uint64      // CLOCK_MONOTONIC ns, sampled at capture
+// Used by the SW encoder path (pixels → I420 → encoder). Cleanup is RAII (Drop)
+// — no Close(). Across the add-on ABI `data` is an owned RVec<u8> whose
+// ownership transfers to the host (deterministic drop).
+pub struct Frame {
+    pub data: RVec<u8>,         // Pixel buffer (stride * height bytes), owned
+    pub stride: u32,            // Bytes per row. MAY exceed width*4 (GPU readback
+                                // rows are often padded to a power-of-two pitch).
+                                // libyuv ARGBToI420/ABGRToI420 take this stride
+                                // directly; assuming stride == width*4 corrupts the
+                                // image on padded backends (e.g. DXGI). width*4 is
+                                // the valid byte count per row.
+    pub pixel_fmt: PixelFormat, // Bgra (macOS/Windows) or Rgba (Linux GL)
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,      // CLOCK_MONOTONIC ns, sampled at capture
 }
 
-type PixelFormat uint8
-const (
-    PixelBGRA PixelFormat = iota  // BGRA in memory = libyuv ARGB → use ARGBToI420
-    PixelRGBA                     // RGBA in memory = libyuv ABGR → use ABGRToI420
-)
+#[repr(u8)]
+pub enum PixelFormat {
+    Bgra = 0,  // BGRA in memory = libyuv ARGB → use ARGBToI420
+    Rgba = 1,  // RGBA in memory = libyuv ABGR → use ABGRToI420
+}
 
-// FBInfo holds a GPU-resident surface handle (zero-copy path).
+// FbInfo holds a GPU-resident surface handle (zero-copy path).
 // Used by the HW encoder path — the capturer never touches CPU memory.
-// Per-OS handle types:
+// `handle` is a tagged enum (SurfaceHandle), not a struct of nullable per-OS
+// fields; FbInfo's Drop releases the underlying resource exactly once (RAII
+// replaces the manual `Release func()`). Per-OS handle variants:
 //   Linux:   DMA-BUF fd + DRM format + modifier
 //   macOS:   IOSurface backing the CMSampleBuffer
-//   Windows: ID3D11Texture2D shared handle
-type FBInfo struct {
-    // Generic fields
-    Width, Height int
-    Timestamp     uint64
-    Release       func()  // Platform-specific cleanup; set by capture add-on
+//   Windows: ID3D11Texture2D
+pub struct FbInfo {
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,        // CLOCK_MONOTONIC ns, stamped at capture
+    pub handle: SurfaceHandle,
+}
 
-    // Linux fields (set when platform == "linux")
-    DMAFD     int
-    Stride    int
-    Format    uint32 // DRM fourcc
-    Modifier  uint64
-
-    // macOS field (set when platform == "darwin")
-    IOSurface uintptr // CVPixelBufferRef (CMSampleBuffer-backed)
-
-    // Windows field (set when platform == "windows")
-    D3DTexture uintptr // ID3D11Texture2D*
+pub enum SurfaceHandle {
+    // Linux: DMA-BUF. `OwnedFd` closes the fd on Drop (no manual close).
+    DmaBuf { fd: std::os::fd::OwnedFd, stride: u32, fourcc: u32, modifier: u64 },
+    // macOS: CVPixelBuffer-backed IOSurface (retained; released on Drop).
+    IoSurface(objc2_io_surface::IOSurface),
+    // Windows: ID3D11Texture2D (COM ref released on Drop via windows-rs).
+    D3D11Texture(windows::Win32::Graphics::Direct3D11::ID3D11Texture2D),
 }
 
 // Capturer is the contract every capture add-on must satisfy.
 //
-// CPU readback path: NextFrame() returns CPU-resident BGRA pixels.
-// Used by SW encoder path.
-type Capturer interface {
-    // NextFrame returns the most recent screen frame as CPU pixels. It BLOCKS
-    // until either a new frame is available or the per-frame deadline (~one
-    // frame interval) elapses. Three outcomes:
-    //   (*Frame, nil) — a new frame (borrowed: valid only until the next call).
-    //   (nil,    nil) — no new frame within the deadline (screen idle). The
-    //                   caller skips this tick; it does NOT re-encode. A newly
-    //                   joined client is still served from the IDR cache via the
-    //                   bootstrap stream, so idle screens cost ~zero bandwidth.
-    //   (nil,    err) — capture failed (device lost, etc.).
-    // It never returns a stale frame as if it were new, and never blocks
-    // forever on an idle screen.
-    NextFrame() (*Frame, error)
-
-    // Close releases all resources (DRM fds, EGL contexts, COM refs).
-    Close() error
+// CPU readback path: next_frame() returns CPU-resident BGRA pixels.
+// Used by the SW encoder path. Cleanup is RAII (Drop) — no Close().
+pub trait Capturer {
+    /// next_frame returns the most recent screen frame as CPU pixels. It BLOCKS
+    /// until either a new frame is available or the per-frame deadline (~one
+    /// frame interval) elapses. Three outcomes:
+    ///   Ok(Some(frame)) — a new frame (owned: `frame.data` is an RVec<u8> whose
+    ///                     ownership transfers to the caller — no borrowed-slice
+    ///                     footgun).
+    ///   Ok(None)        — no new frame within the deadline (screen idle). The
+    ///                     caller skips this tick; it does NOT re-encode. A newly
+    ///                     joined client is still served from the IDR cache via the
+    ///                     bootstrap stream, so idle screens cost ~zero bandwidth.
+    ///   Err(_)          — capture failed (device lost, etc.).
+    /// It never returns a stale frame as if it were new, and never blocks
+    /// forever on an idle screen.
+    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError>;
 }
 
 // SurfaceCapturer is the optional zero-copy contract.
@@ -95,39 +95,37 @@ type Capturer interface {
 // implement this in addition to Capturer.
 //
 // The pipeline uses this when a hardware encoder is selected.
-// NOTE: the old name "DMABufCapturer" was Linux-specific. The interface is
-// cross-platform — the returned FBInfo uses a tagged-union pattern with
-// per-OS fields (DMAFD, IOSurface, D3DTexture).
-type SurfaceCapturer interface {
-    Capturer
-
-    // NextSurface returns a GPU-resident surface handle (same blocking + nil
-    // semantics as NextFrame: nil,nil means "no new surface this interval").
-    // OWNERSHIP: the handle is normally passed straight to a HW encoder's
-    // EncodeSurface, which calls fb.Release() exactly once on every path. The
-    // pipeline does NOT release it itself in that case. ONLY if the surface is
-    // never handed to an encoder (e.g. probe/teardown) must the caller invoke
-    // fb.Release(). Release is set per-platform by the add-on.
-    NextSurface() (*FBInfo, error)
+// NOTE: the old name "DMABufCapturer" was Linux-specific. The trait is
+// cross-platform — the returned FbInfo carries a SurfaceHandle tagged enum with
+// per-OS variants (DmaBuf, IoSurface, D3D11Texture).
+pub trait SurfaceCapturer: Capturer {
+    /// next_surface returns a GPU-resident surface handle (same blocking + None
+    /// semantics as next_frame: Ok(None) means "no new surface this interval").
+    /// OWNERSHIP: the FbInfo is normally passed BY VALUE straight into a HW
+    /// encoder's encode_surface, where FbInfo's Drop releases the resource
+    /// exactly once on every path. The pipeline does NOT release it itself in
+    /// that case. ONLY if the surface is never handed to an encoder (e.g.
+    /// probe/teardown) does dropping the FbInfo here release it — release is
+    /// automatic (RAII) per-platform via SurfaceHandle's Drop.
+    fn next_surface(&mut self) -> Result<Option<FbInfo>, CaptureError>;
 }
 
 // CaptureConfig holds the capturer's INITIAL configuration. Once running,
-// dynamic parameters (Width, Height, FPS, HDR) flow through stream.Params
-// and ConfigurableCapturer (see MODULE_STREAM_PARAMS.md).
+// dynamic parameters (width, height, fps, HDR) flow through stream::Params
+// and ConfigurableCapturer (see MODULE_STREAM_PARAMS.md). Logging is via the
+// `tracing` crate (no logger handle is passed in).
 //
 // Per-add-on STATIC tuning (DRM card path, IOSurface format, DXGI adapter
 // index) comes from the [addon_module_<id>] TOML section.
-type CaptureConfig struct {
-    InitialParams stream.Params  // initial Width/Height/FPS/HDR/BitDepth
-    Logger        *slog.Logger
+pub struct CaptureConfig {
+    pub initial_params: stream::Params,  // initial width/height/fps/HDR/bit_depth
 }
 
 // ConfigurableCapturer lets the pipeline change capture parameters at
 // runtime (resolution, HDR mode). Add-ons that don't implement this are
 // torn down + recreated whenever capture parameters change.
-type ConfigurableCapturer interface {
-    Capturer
-    UpdateStreamParams(p stream.Params) error
+pub trait ConfigurableCapturer: Capturer {
+    fn update_stream_params(&mut self, p: stream::Params) -> Result<(), StreamError>;
 }
 ```
 
@@ -135,9 +133,9 @@ type ConfigurableCapturer interface {
 
 ## Surface Handle Abstraction Across OSes
 
-The `FBInfo` struct uses a tagged-union pattern — only the field corresponding
-to the current OS is populated. HW encoder add-ons type-switch on the platform
-and consume the appropriate handle:
+The `FbInfo` struct carries a `SurfaceHandle` tagged enum — only the variant
+corresponding to the current OS is constructed. HW encoder add-ons `match` on the
+variant and consume the appropriate handle:
 
 | OS | Capture output | HW encoder input |
 |----|----------------|------------------|
@@ -148,7 +146,7 @@ and consume the appropriate handle:
 
 The pipeline never converts between formats — it pairs a capturer with an
 encoder both on the same platform, and the HW encoder add-on knows which
-field of `FBInfo` to read.
+`SurfaceHandle` variant of `FbInfo` to read.
 
 ---
 
@@ -183,7 +181,7 @@ The module intentionally does NOT support:
 - **Windows WGC / GDI / Magnification** — rejected (slower than DXGI DD
   with no benefit)
 - **Pipeline-level frame buffering** — capture add-ons are pull-latest:
-  each `NextFrame()` returns the most recent frame, not a queued one.
+  each `next_frame()` returns the most recent frame, not a queued one.
 
 ---
 
@@ -200,26 +198,29 @@ The module intentionally does NOT support:
 
 ## Buffer Ownership Contract
 
-- `Capturer.NextFrame()` returns a **borrowed** `*Frame.Data` — valid only
-  until the next `NextFrame()` call. Callers (the SW path's Converter) copy
-  into pinned encoder input buffers as needed.
-- `SurfaceCapturer.NextSurface()` returns an `*FBInfo` whose ownership passes to
-  the HW encoder: `EncodeSurface` calls `fb.Release()` **exactly once on every
-  path** (success, error, and `ErrFallbackToSoftware`). The capturer and pipeline
-  never release it. The single exception is a surface that is never handed to an
-  encoder, which the caller must release itself. (This is the single-owner rule
-  that resolves the prior capture/encode/pipeline ambiguity — see
+- `Capturer::next_frame()` returns an **owned** `Frame` whose `data` is an
+  `RVec<u8>` — ownership transfers to the caller (the Go "borrowed slice valid
+  only until the next call" hazard is gone). Callers (the SW path's Converter)
+  read it directly or copy into pinned encoder input buffers as needed.
+- `SurfaceCapturer::next_surface()` returns an `FbInfo` whose ownership passes
+  **by value** to the HW encoder: `encode_surface(surface: FbInfo)` consumes it
+  and `FbInfo`'s `Drop` releases the resource **exactly once on every path**
+  (success, error, and `StreamError::FallbackToSoftware`). The capturer and
+  pipeline never release it. The single exception is a surface that is never
+  handed to an encoder, which the caller drops itself. (This is the single-owner
+  rule — RAII — that resolves the prior capture/encode/pipeline ambiguity, the
+  M-1/TD-01 win; see
   [`MODULE_HARDWARE_ENCODE.md`](./MODULE_HARDWARE_ENCODE.md).)
-- The Capturer is **not safe** for concurrent `NextFrame()` calls from
-  multiple goroutines. The pipeline ensures single-goroutine access.
+- The Capturer takes `&mut self`, so the borrow checker statically prevents
+  concurrent `next_frame()` calls; the pipeline drives it from a single task.
 
 ### Resolution: capture is always native; the encoder scales
 
 Capturers always emit frames/surfaces at the **display's native resolution**.
 They do **not** downscale to the stream resolution — that is the encoder's job
 (HW: in-encoder VPP/scaler; SW: libyuv `I420Scale`). Consequently a
-`ConfigurableCapturer.UpdateStreamParams` call uses only the HDR / bit-depth /
-FPS fields; a Width/Height change does **not** resize capture output (the encoder
+`ConfigurableCapturer::update_stream_params` call uses only the HDR / bit-depth /
+FPS fields; a width/height change does **not** resize capture output (the encoder
 absorbs it). This keeps the invariant **encoder-output dims == `config` dims ==
 input-coordinate range** without the capturer and encoder both trying to scale.
 
@@ -230,10 +231,10 @@ input-coordinate range** without the capturer and encoder both trying to scale.
 | Add-on | Status |
 |--------|--------|
 | KMS+EGL DMA-BUF | ✅ Working (the original Linux capture path; refactor moves into `internal/capture/kms/`) |
-| NvFBC | 📋 Specced; CGo bindings pending |
+| NvFBC | 📋 Specced; Rust FFI bindings pending |
 | ScreenCaptureKit | ✅ Working (Hackintosh benchmark: 91 FPS @ 1080p, P50 10.5ms) |
-| DXGI Desktop Duplication | ✅ Working (benchmarked sub-microsecond raw overhead on GTX 1080 Ti + RX 6800 XT) |
+| DXGI Desktop Duplication | ✅ Working — **VALIDATED on this hardware: ~7 ms p50 acquire, ~2.4× better than GDI BitBlt** (also benchmarked sub-microsecond raw copy overhead on GTX 1080 Ti + RX 6800 XT). The virtual-display `DXGI_ERROR_UNSUPPORTED` case is handled by the IddCx virtual-display fallback (capture stays add-on-based). |
 
-The old `internal/capture/x11grab.go` (subprocess-based X11 capture) and
+The old `internal/capture/x11grab.rs` (subprocess-based X11 capture) and
 `internal/capture/screencast.py` (Mutter/PipeWire ScreenCast helper) are
 **rejected** and will be removed as part of the implementation refactor.

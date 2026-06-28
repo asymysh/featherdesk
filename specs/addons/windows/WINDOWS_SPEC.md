@@ -128,16 +128,30 @@ alongside MF HW.
 
 ## Audio + Input
 
-⏸️ **Deferred.** The Windows audio (WASAPI loopback) and input (Interception
-driver, `win_touch` InjectTouchInput, ViGEmBus) sections have been deliberately
-removed from this document to keep the focus on the capture and encode pipeline.
+⏸️ **Deferred.** The Windows audio (WASAPI loopback) section has been
+deliberately removed from this document to keep the focus on the capture and
+encode pipeline.
 
-When we resume work on audio and input, the existing core specs remain authoritative:
+**Keyboard/mouse input is NOT deferred and NOT an add-on.** The default
+kb/mouse injector ships **in core** via the `enigo` crate, whose Windows
+backend is `SendInput`. It is chosen because `SendInput` is anti-cheat-safe,
+the same approach Sunshine uses. So a default Windows build is fully
+controllable (not view-only) with no input add-on installed.
+
+The input add-ons are extensions/overrides of that in-core default:
+- `interception` — opt-in, power-user override (kernel filter driver; reaches
+  elevated windows + the Secure Attention Sequence). See its spec for the
+  anti-cheat-risk warning.
+- `win_touch` (`InjectTouchInput`) — touch injection (`enigo` covers neither
+  touch nor gamepad).
+- `vigem` (ViGEmBus) — virtual gamepad.
+
+When we resume work on audio, the existing core specs remain authoritative:
 - [`specs/media/MODULE_AUDIO.md`](../../media/MODULE_AUDIO.md)
 - [`specs/interaction/MODULE_INPUT.md`](../../interaction/MODULE_INPUT.md)
 
-This platform spec will be updated with Windows-specific details (WASAPI loopback,
-Interception driver, `win_touch`, optional ViGEmBus for gamepads) at that point.
+This platform spec will be updated with Windows-specific audio details (WASAPI
+loopback) at that point.
 
 ---
 
@@ -150,7 +164,7 @@ A working benchmark binary exists for Windows in `cmd/benchmark/`. It benchmarks
 
 Results stored in SQLite (`featherdesk_bench.db`) + raw per-frame CSVs.
 
-**Build:** `go build -o bench.exe ./cmd/benchmark/` (pure Go, no CGo required)
+**Build:** `cargo build --release -p featherdesk-bench` (no native/FFI dependencies required)
 
 **First run results on this machine (Ryzen 9 5900X, Windows 11, virtual display):**
 ```

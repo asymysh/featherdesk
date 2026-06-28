@@ -7,8 +7,9 @@
 
 The `wasapi` add-on is the Windows **system-audio capture** backend for the core
 Audio module ([`../../../media/MODULE_AUDIO.md`](../../../media/MODULE_AUDIO.md)).
-It implements `audio.AudioCapturer` by capturing the default render endpoint's
-output via **WASAPI loopback** — no driver, no subprocess, no virtual cable.
+It implements the `audio::AudioCapturer` trait by capturing the default render
+endpoint's output via **WASAPI loopback** — no driver, no subprocess, no virtual
+cable.
 
 ---
 
@@ -18,28 +19,34 @@ WASAPI exposes a **loopback** capture mode on a *render* endpoint: you open the
 speakers as if to play, but with `AUDCLNT_STREAMFLAGS_LOOPBACK` you instead
 receive whatever the system is mixing to them.
 
-```c
+```rust
+// WASAPI / Core Audio via the `windows` crate (windows-rs).
 // 1. Default render endpoint (the speakers/headphones the user hears).
-IMMDeviceEnumerator *en;  CoCreateInstance(__uuidof(MMDeviceEnumerator), …, &en);
-IMMDevice *dev;           en->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
+let en: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+let dev: IMMDevice = unsafe { en.GetDefaultAudioEndpoint(eRender, eConsole)? };
 
 // 2. Activate an IAudioClient in SHARED mode + LOOPBACK + event-driven.
-IAudioClient *ac;         dev->Activate(__uuidof(IAudioClient), …, (void**)&ac);
-WAVEFORMATEX *mix;        ac->GetMixFormat(&mix);   // usually 32-bit float, 48k, 2ch
-ac->Initialize(AUDCLNT_SHAREMODE_SHARED,
-               AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-               bufDuration, 0, mix, NULL);
-ac->SetEventHandle(hEvent);
+let ac: IAudioClient = unsafe { dev.Activate(CLSCTX_ALL, None)? };
+let mix: *mut WAVEFORMATEX = unsafe { ac.GetMixFormat()? }; // usually 32-bit float, 48k, 2ch
+unsafe {
+    ac.Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        buf_duration, 0, mix, None,
+    )?;
+    ac.SetEventHandle(h_event)?;
+}
 
-// 3. Capture loop on a dedicated, COM-initialized, LockOSThread goroutine.
-IAudioCaptureClient *cap; ac->GetService(__uuidof(IAudioCaptureClient), (void**)&cap);
-ac->Start();
-for (;;) {
-    WaitForSingleObject(hEvent, INFINITE);
-    cap->GetBuffer(&data, &frames, &flags, NULL, NULL);
-    ts = clockMonotonicNs();                  // stamp AT CAPTURE
-    emit(data, frames, flags);                // → normalize → PCMChunk
-    cap->ReleaseBuffer(frames);
+// 3. Capture loop on a dedicated, COM-initialized OS thread.
+let cap: IAudioCaptureClient = unsafe { ac.GetService()? };
+unsafe { ac.Start()?; }
+loop {
+    unsafe { WaitForSingleObject(h_event, INFINITE); }
+    let (mut data, mut frames, mut flags) = (std::ptr::null_mut::<u8>(), 0u32, 0u32);
+    unsafe { cap.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?; }
+    let ts = clock_monotonic_ns();            // stamp AT CAPTURE
+    emit(data, frames, flags);                // → normalize → PcmChunk
+    unsafe { cap.ReleaseBuffer(frames)?; }
 }
 ```
 
@@ -75,7 +82,7 @@ but the read-loop stamp is sufficient for the ~40 ms sync window.
 | Component | License |
 |-----------|---------|
 | WASAPI / Core Audio (`mmdeviceapi`, `audioclient`) | Windows system API — no third-party license |
-| Our CGo / COM binding | MIT |
+| Our Rust FFI / COM binding | MIT |
 
 No driver, no redistributable.
 
@@ -84,27 +91,27 @@ No driver, no redistributable.
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-wasapi.dll ./internal/audio/wasapi
+cargo build --release -p featherdesk-addon-wasapi   # cdylib  featherdesk-addon-wasapi.dll
 ```
 
-- COM must be initialized (`CoInitializeEx`, MTA) on the capture goroutine, which
-  is pinned with `runtime.LockOSThread`. Uninitialize on Close.
+- COM must be initialized (`CoInitializeEx`, MTA) on the capture thread (a
+  dedicated `std::thread` owned by the add-on). Uninitialize in `Drop`.
 - Pairs with the `opus` codec add-on for compressed audio; without it, raw PCM.
 
 ---
 
 ## Constructor & Probe
 
-```go
-// internal/audio/wasapi/wasapi_windows.go  (built into the add-on's shared library)
+```rust
+// crate: featherdesk-addon-wasapi (the add-on's cdylib)
 
-// Probe returns true if a default render endpoint exists and IAudioClient
-// activates with the loopback flag (side-effect-free; releases what it opens).
-func Probe() bool
+/// `probe` returns true if a default render endpoint exists and IAudioClient
+/// activates with the loopback flag (side-effect-free; releases what it opens).
+pub fn probe() -> bool;
 
-// New opens the loopback client at [audio] frame_ms and starts the capture
-// goroutine. Honors [addon_module_wasapi] device (default = default endpoint).
-func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
+/// Open the loopback client at [audio] frame_ms and start the capture thread.
+/// Honors [addon_module_wasapi] device (default = default endpoint).
+pub fn new(cfg: audio::AudioConfig) -> Result<Box<dyn audio::AudioCapturer>, audio::Error>;
 ```
 
 ---
@@ -113,7 +120,7 @@ func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
 
 | Failure | Behavior |
 |---------|----------|
-| No render endpoint (headless / no audio device) | `Probe` false → add-on not selected; log "no audio output device" |
+| No render endpoint (headless / no audio device) | `probe` false → add-on not selected; log "no audio output device" |
 | Default device changes mid-session (`IMMNotificationClient`) | Re-open on the new default endpoint; emit silence across the gap |
 | `GetBuffer` glitch / `AUDCLNT_S_BUFFER_EMPTY` | Treat as silence for that interval; continue |
 | `AUDCLNT_E_DEVICE_INVALIDATED` (device unplugged) | Reconnect to the new default; bounded retry/backoff |
@@ -123,14 +130,15 @@ func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
 ## File Structure
 
 ```
-internal/audio/wasapi/
-├── wasapi_windows.go     // built into the add-on's shared library (AudioCapturer impl, COM/CGo)
-├── resample.go           // device mix-format → 48k/stereo/S16LE
-└── wasapi_test.go
+addons/wasapi/
+├── src/
+│   ├── lib.rs        // AudioCapturer impl (COM via the windows crate)
+│   └── resample.rs   // device mix-format → 48k/stereo/S16LE
+└── tests.rs
 ```
 
-No `!wasapi` stub file is needed — the add-on is its own shared library; an absent
-add-on is simply a `.dll` that isn't in the add-ons directory.
+No conditional-compilation stub file is needed — the add-on is its own cdylib
+crate; an absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 ---
 
@@ -154,5 +162,5 @@ device = ""   # "" = default render endpoint (loopback). Or a specific endpoint 
 ## Status
 
 📋 Specced — implementation deferred. Order: endpoint enumerate + probe → loopback
-client + event loop → mix-format normalize → silence synthesis → `Format()`/Close
+client + event loop → mix-format normalize → silence synthesis → `format()`/`Drop`
 lifecycle.

@@ -29,9 +29,9 @@ future no-root XShm for a kiosk) without `#ifdef` spaghetti.
 | AMD ROCm workstation | `kms_egl` | `libva` + `amf_rocm` + `openh264` |
 | Intel Arc on Linux | `kms_egl` | `libva` + `openh264` (libva handles Arc via iHD driver) |
 
-Build each add-on once as its own shared library and drop the resulting
+Build each add-on once as its own cdylib and drop the resulting
 `featherdesk-addon-<id>.so` files into the add-ons directory — e.g.
-`go build -buildmode=c-shared -o featherdesk-addon-kms_egl.so ./internal/capture/kms`.
+`cargo build --release -p featherdesk-addon-kms_egl` (cdylib → `featherdesk-addon-kms_egl.so`).
 The host loads whatever it finds there; the same host binary serves every row.
 
 KMS+EGL is the only add-on in the default recommended set because it's the only
@@ -75,5 +75,5 @@ The first available capture wins. Drop in only what you need.
 1. Write the spec at `specs/addons/linux/capture/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a c-shared library from `internal/capture/{name}/`
+4. Build as a cdylib from `internal/capture/{name}/`
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`

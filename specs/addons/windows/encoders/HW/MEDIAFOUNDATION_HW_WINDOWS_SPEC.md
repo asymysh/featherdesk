@@ -16,7 +16,7 @@ is registered:
 | Qualcomm Snapdragon (ARM) | Qualcomm driver | Snapdragon HW encoder |
 | Microsoft Basic Display | Microsoft | falls back to software |
 
-One CGo binding handles all of them — same way `libva` handles Intel + AMD + NVIDIA
+One Rust FFI binding handles all of them — same way `libva` handles Intel + AMD + NVIDIA
 on Linux. The vendor SDKs (NVENC, AMF, QSV) are still worth shipping as separate
 add-ons for users who want vendor-specific low-latency features
 (`REF_FRAMES_INVALIDATION`, AMF Pre-Analysis, QSV tuning), but for default cross-vendor
@@ -30,7 +30,7 @@ HW encoding, MF is enough.
 |-----------|---------|-------|
 | MediaFoundation framework | Windows system framework | Built into the OS |
 | H.264 / HEVC patent royalties | **Microsoft pays** for system-shipped encoder; **vendors pay** for their HW MFTs | Both layers are licensed |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 No royalty concern. No SDK to ship. The vendor's driver brings the hardware path.
 
@@ -56,65 +56,72 @@ gracefully so the SW add-on takes over).
 ### Build (shared library)
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-mf_hw.dll ./internal/encode/mf
+cargo build --release -p featherdesk-addon-mf_hw   # cdylib  featherdesk-addon-mf_hw.dll
 ```
 
 ### Runtime dependencies
 
 None beyond a vendor GPU driver. Windows 10+ assumed.
 
-### CGo configuration
+### FFI configuration
 
-```go
-/*
-#cgo LDFLAGS: -lmf -lmfplat -lmfuuid -lwmcodecdspuuid -ld3d11 -ldxgi -lole32 -loleaut32
-
-#define COBJMACROS
-#include <windows.h>
-#include <mfapi.h>
-#include <mfidl.h>
-#include <codecapi.h>
-#include <wmcodecdsp.h>
-#include <d3d11.h>
-#include <dxgi1_2.h>
-*/
-import "C"
+```rust
+// Cargo.toml — the `windows` crate (windows-rs) features:
+//   windows = { version = "0.58", features = [
+//       "Win32_Media_MediaFoundation", "Win32_Graphics_Direct3D11",
+//       "Win32_Graphics_Direct3D", "Win32_Graphics_Dxgi",
+//       "Win32_Graphics_Dxgi_Common", "Win32_System_Com",
+//   ] }
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::Media::MediaFoundation::*;
 ```
 
 ---
 
-## CGo Implementation Sketch (HW path)
+## FFI Implementation Sketch (HW path)
 
-```c
+```rust
 // 1. Create D3D11 device (used for both DXGI Desktop Duplication capture and MF encode)
-ID3D11Device *d3dDevice = NULL;
-ID3D11DeviceContext *d3dCtx = NULL;
-D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    NULL, 0, D3D11_SDK_VERSION, &d3dDevice, NULL, &d3dCtx);
+let mut d3d_device: Option<ID3D11Device> = None;
+let mut d3d_ctx: Option<ID3D11DeviceContext> = None;
+unsafe {
+    D3D11CreateDevice(
+        None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(),
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        None, D3D11_SDK_VERSION,
+        Some(&mut d3d_device), None, Some(&mut d3d_ctx),
+    )?;
+}
+let d3d_device = d3d_device.unwrap();
 
 // 2. Wrap as IMFDXGIDeviceManager so MF can share the D3D11 device
-UINT resetToken = 0;
-IMFDXGIDeviceManager *deviceManager = NULL;
-MFCreateDXGIDeviceManager(&resetToken, &deviceManager);
-deviceManager->lpVtbl->ResetDevice(deviceManager, (IUnknown*)d3dDevice, resetToken);
+let mut reset_token: u32 = 0;
+let mut device_manager: Option<IMFDXGIDeviceManager> = None;
+unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut device_manager)?; }
+let device_manager = device_manager.unwrap();
+unsafe { device_manager.ResetDevice(&d3d_device, reset_token)?; }
 
 // 3. Enumerate HARDWARE H.264 encoder MFTs
-IMFActivate **activates = NULL;
-UINT32 numActivates = 0;
-MFT_REGISTER_TYPE_INFO outInfo = { MFMediaType_Video, MFVideoFormat_H264 };
-MFTEnumEx(
-    MFT_CATEGORY_VIDEO_ENCODER,
-    MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
-    NULL, &outInfo, &activates, &numActivates
-);
+let out_info = MFT_REGISTER_TYPE_INFO {
+    guidMajorType: MFMediaType_Video,
+    guidSubtype: MFVideoFormat_H264,
+};
+let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+let mut num_activates: u32 = 0;
+unsafe {
+    MFTEnumEx(
+        MFT_CATEGORY_VIDEO_ENCODER,
+        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        None, Some(&out_info), &mut activates, &mut num_activates,
+    )?;
+}
 
 // activates[0] is now (typically) the vendor HW MFT — NVENC / AMF / QSV / Qualcomm
-IMFTransform *encoder = NULL;
-activates[0]->lpVtbl->ActivateObject(activates[0], &IID_IMFTransform, (void**)&encoder);
+let encoder: IMFTransform = unsafe { (*activates).as_ref().unwrap().ActivateObject()? };
 
 // 4. Attach the D3D11 device manager so the MFT uses the GPU
-encoder->lpVtbl->ProcessMessage(encoder, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)deviceManager);
+unsafe { encoder.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, std::mem::transmute(&device_manager))?; }
 
 // 5. Set input + output media types (same as SW spec, but with D3D11 surface as input)
 // ... SetInputType / SetOutputType with codec config
@@ -122,8 +129,8 @@ encoder->lpVtbl->ProcessMessage(encoder, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR
 // 6. Per frame:
 //    DXGI Desktop Duplication produces an ID3D11Texture2D
 //    Wrap as IMFSample via MFCreateVideoSampleFromSurface
-//    encoder->ProcessInput(0, sample, 0);
-//    encoder->ProcessOutput(...);
+//    encoder.ProcessInput(0, &sample, 0);
+//    encoder.ProcessOutput(...);
 ```
 
 ### Zero-copy DXGI Desktop Duplication → MF
@@ -131,19 +138,18 @@ encoder->lpVtbl->ProcessMessage(encoder, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR
 DXGI Desktop Duplication returns `IDXGIResource` which can be queried for an
 `ID3D11Texture2D`. That texture is passed to MF without any CPU copy:
 
-```c
-ID3D11Texture2D *captureTex = ...;  // from DXGI Desktop Duplication
+```rust
+let capture_tex: ID3D11Texture2D = /* from DXGI Desktop Duplication */;
 
-// Wrap as DXGI surface and create IMFSample
-IDXGISurface *surface;
-captureTex->lpVtbl->QueryInterface(captureTex, &IID_IDXGISurface, (void**)&surface);
+// Wrap as DXGI surface and create IMFSample (QueryInterface via .cast())
+let surface: IDXGISurface = capture_tex.cast()?;
 
-IMFSample *sample;
-MFCreateVideoSampleFromSurface((IUnknown*)surface, &sample);
-sample->lpVtbl->SetSampleTime(sample, ptsHundredsOfNanos);
-sample->lpVtbl->SetSampleDuration(sample, durHundredsOfNanos);
-
-encoder->lpVtbl->ProcessInput(encoder, 0, sample, 0);
+let sample: IMFSample = unsafe { MFCreateVideoSampleFromSurface(&surface)? };
+unsafe {
+    sample.SetSampleTime(pts_hundreds_of_nanos)?;
+    sample.SetSampleDuration(dur_hundreds_of_nanos)?;
+    encoder.ProcessInput(0, &sample, 0)?;
+}
 ```
 
 This is the canonical zero-copy GPU-resident streaming pipeline on Windows.
@@ -195,12 +201,12 @@ Skip / prefer vendor add-ons when:
 ## File Structure
 
 ```
-internal/encode/mf/
-├── mediafoundation.go
-├── mf_hw_cgo.go             // CGo binding (built into the add-on's shared library)
-├── d3d11_interop.go         // DXGI texture → IMFSample wrapping
-├── probe.go
-└── mf_test.go
+addons/mf_hw/
+├── src/
+│   ├── lib.rs               // encoder impl (Rust FFI via the windows crate)
+│   ├── d3d11_interop.rs     // DXGI texture → IMFSample wrapping
+│   └── probe.rs
+└── tests.rs
 ```
 
 ---
@@ -227,13 +233,13 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). MediaFoundation has mixed hot-reconfiguration support -- bitrate and quality are hot via `ICodecAPI` property store; resolution and profile require full MFT re-init.
+This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). MediaFoundation has mixed hot-reconfiguration support -- bitrate and quality are hot via `ICodecAPI` property store; resolution and profile require full MFT re-init.
 
 | Param change | MF API | Hot? |
 |--------------|--------|------|
-| `FPS` | `MF_MT_FRAME_RATE` on output media type -- requires `ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM)` + reinit (returns `stream.ErrRequiresRestart`) | no |
+| `FPS` | `MF_MT_FRAME_RATE` on output media type -- requires `ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM)` + reinit (returns `stream::Error::RequiresRestart`) | no |
 | `BitrateBps` | `ICodecAPI::SetValue(CODECAPI_AVEncCommonMeanBitRate, b)` | yes |
 | `QP` | `ICodecAPI::SetValue(CODECAPI_AVEncCommonQuality, q)` | yes |
 | `KeyframeInterval` | `ICodecAPI::SetValue(CODECAPI_AVEncMPVGOPSize, ki)` -- behavior varies per GPU vendor MFT | vendor-dependent |
-| `Width`, `Height` | Full `IMFTransform` teardown + recreation (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 MFT subtype -- requires HEVC-capable MFT + D3D11 10-bit surfaces; full reinit (returns `stream.ErrRequiresRestart`) | no |
+| `Width`, `Height` | Full `IMFTransform` teardown + recreation (returns `stream::Error::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 MFT subtype -- requires HEVC-capable MFT + D3D11 10-bit surfaces; full reinit (returns `stream::Error::RequiresRestart`) | no |

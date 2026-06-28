@@ -179,39 +179,45 @@ client.
 
 ## Public Interface
 
-```go
-package input
+```rust
+// crate: featherdesk-input
 
-// GamepadInjector is the optional contract a gamepad add-on implements. The
-// dispatcher type-asserts for it; gamepad records are dropped when no
-// GamepadInjector is loaded.
-type GamepadInjector interface {
-    // Connect creates a virtual controller for index. id is logging-only.
-    Connect(index uint8, id string) error
+/// GamepadInjector is the optional contract a gamepad add-on implements
+/// (`vigem` on Windows, `gcvirtual` on macOS, `uinput` on Linux — the built-in
+/// `enigo` default does NOT cover gamepad). The dispatcher checks for it at
+/// runtime; gamepad records are dropped when no GamepadInjector is loaded.
+/// Cleanup is RAII (`Drop`) — no Close().
+pub trait GamepadInjector {
+    /// connect creates a virtual controller for index. id is logging-only.
+    fn connect(&mut self, index: u8, id: &str) -> Result<(), InputError>;
 
-    // Disconnect tears down the virtual controller for index. Idempotent
-    // (Disconnect on a never-Connected index is a no-op).
-    Disconnect(index uint8) error
+    /// disconnect tears down the virtual controller for index. Idempotent
+    /// (disconnect on a never-connected index is a no-op).
+    fn disconnect(&mut self, index: u8) -> Result<(), InputError>;
 
-    // Update applies a state snapshot. The injector handles diffing internally
-    // and only touches the OS device when fields actually changed.
-    Update(state GamepadState) error
+    /// update applies a state snapshot. The injector handles diffing internally
+    /// and only touches the OS device when fields actually changed.
+    fn update(&mut self, state: GamepadState) -> Result<(), InputError>;
 
-    // SetRumbleEmitter registers a callback fired when the host game requests
-    // vibration via the OS API. The dispatcher wires this to the server which
-    // sends FrameTypeGamepadRumble to the client.
-    SetRumbleEmitter(fn func(index uint8, weak, strong uint16, durationMs uint32))
-
-    Close() error
+    /// set_rumble_emitter registers a callback fired when the host game requests
+    /// vibration via the OS API. The dispatcher wires this to the server which
+    /// sends FrameTypeGamepadRumble to the client.
+    fn set_rumble_emitter(
+        &mut self,
+        f: Box<dyn Fn(u8 /*index*/, u16 /*weak*/, u16 /*strong*/, u32 /*duration_ms*/) + Send + Sync>,
+    );
 }
 
-// GamepadState is one decoded state snapshot.
-type GamepadState struct {
-    Index   uint8
-    Buttons uint32 // bit N = W3C Standard Gamepad button N (see table above)
-    LX, LY  int16  // left stick, -32768..32767
-    RX, RY  int16  // right stick
-    LT, RT  uint16 // analog triggers, 0..65535
+/// GamepadState is one decoded state snapshot.
+pub struct GamepadState {
+    pub index: u8,
+    pub buttons: u32, // bit N = W3C Standard Gamepad button N (see table above)
+    pub lx: i16,      // left stick, -32768..32767
+    pub ly: i16,
+    pub rx: i16,      // right stick
+    pub ry: i16,
+    pub lt: u16,      // analog triggers, 0..65535
+    pub rt: u16,
 }
 ```
 
@@ -224,15 +230,15 @@ alongside its `KeyMouseInjector` and optional `TouchInjector`. The
 gamepad routing slots into the existing `byte[1]` switch:
 
 ```
-0x10..0x1F  keyboard   → keyMouse.InjectKey
-0x20..0x2F  mouse      → keyMouse.Inject{PointerAbs,PointerRel,Button,Scroll}
-0x30..0x3F  touch      → if touch != nil { touch.InjectTouch }
-0x40..0x4F  gamepad    → if gamepad != nil { gamepad.Connect|Disconnect|Update }
+0x10..0x1F  keyboard   → key_mouse.inject_key
+0x20..0x2F  mouse      → key_mouse.inject_{pointer_abs,pointer_rel,button,scroll}
+0x30..0x3F  touch      → if let Some(t) = &mut touch { t.inject_touch(..) }
+0x40..0x4F  gamepad    → if let Some(g) = &mut gamepad { g.connect|disconnect|update }
                          else: drop (with metric)
 ```
 
 The pipeline wires the gamepad rumble emitter to a new
-`server.SendGamepadRumble(index, weak, strong, durationMs)` method. The server
+`server.send_gamepad_rumble(index, weak, strong, duration_ms)` method. The server
 routes the rumble datagram to the client that **owns gamepad slot `index`** —
 the controller for slot 0, or the player client for slots 1…N in co-op mode (see
 below). Single-controller mode is just the co-op case with one owner.
@@ -252,10 +258,10 @@ letting **multiple clients** own slots, via a **player-slot model** in the serve
 - **Slot ownership** is server-side. The controller reserves slot 0; each `player`
   client claims the next free slot on connect (≤ `max_controllers` total). The
   server **remaps** a client's local gamepad index to its assigned global slot and
-  routes its `GamepadState`/`Connect`/`Disconnect` records to `gamepad.Update(slot)`
+  routes its `GamepadState`/`Connect`/`Disconnect` records to `gamepad.update(slot)`
   etc. A player's keyboard/mouse/touch records are **ignored** (gamepad-only).
 - **Rumble** for slot N goes back to whichever client owns slot N.
-- **Disconnect** frees the slot and `Disconnect`s the virtual pad.
+- **Disconnect** frees the slot and `disconnect`s the virtual pad.
 - **One pad per player client** in v1 (the client's primary gamepad). A *single*
   client driving several local pads (slots 0…N from one machine) remains the
   non-co-op path. Multi-keyboard/mouse co-op is **out of scope** (single OS cursor).

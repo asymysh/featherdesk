@@ -3,7 +3,7 @@
 ## Purpose
 
 Hardware-accelerated H.264 / HEVC encoder via Apple's VideoToolbox,
-called from Go through CGo. Routes to the appropriate hardware encoder on every
+called from Rust through FFI. Routes to the appropriate hardware encoder on every
 Mac platform:
 
 | Mac hardware | Hardware encoder used |
@@ -27,7 +27,7 @@ AOMedia AV1).
 |-----------|---------|
 | VideoToolbox framework | macOS system framework, no separate license |
 | H.264 / HEVC / AV1 royalties | Apple pays |
-| Our CGo binding | MIT |
+| Our Rust FFI binding | MIT |
 
 ---
 
@@ -49,34 +49,31 @@ add-on advertises in the `config` control-stream message the codec it actually p
 
 ## Build & Distribution
 
-### Shared library (c-shared)
+### Shared library (cdylib)
 
 ```bash
-go build -buildmode=c-shared -tags vt_hw -o featherdesk-addon-vt_hw.dylib ./internal/encode/vt
+cargo build --release -p featherdesk-addon-vt_hw   # cdylib  featherdesk-addon-vt_hw.dylib
 ```
 
 ### Runtime dependencies
 
 None. VideoToolbox ships with macOS.
 
-### CGo configuration
+### FFI / link configuration (Rust)
 
-```go
-/*
-#cgo CFLAGS: -fmodules
-#cgo LDFLAGS: -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework Metal
-
-#include <VideoToolbox/VideoToolbox.h>
-#include <CoreMedia/CoreMedia.h>
-#include <CoreVideo/CoreVideo.h>
-#include <Metal/Metal.h>
-*/
-import "C"
+```rust
+// build.rs — link the macOS frameworks (and compile any Obj-C glue):
+//   for fw in ["VideoToolbox", "CoreMedia", "CoreVideo", "Metal"] {
+//       println!("cargo:rustc-link-lib=framework={fw}");
+//   }
+// VideoToolbox / CoreMedia / CoreVideo / Metal declarations come from `bindgen`
+// over their umbrella headers (or the `core-video`/`objc2` crates); the Rust
+// side calls them from an `extern "C"` block.
 ```
 
 ---
 
-## CGo Implementation Sketch
+## Native Implementation Sketch
 
 ```c
 VTCompressionSessionRef session;
@@ -172,27 +169,27 @@ Documented separately in [`../../MACOS_SPEC.md`](../../MACOS_SPEC.md) and
 ## File Structure
 
 ```
-internal/encode/vt/
-├── videotoolbox.go        // shared with vt_sw add-on
-├── videotoolbox_cgo.go    // CGo binding (built into the add-on's shared library)
-├── probe.go               // ProbeVideoToolbox() — enumerates encoders, advertises codecs
-└── videotoolbox_test.go
+featherdesk-addon-vt_hw/   (its own cdylib crate)
+├── src/videotoolbox.rs     // shared module with the vt_sw add-on
+├── src/ffi.rs              // extern "C" binding to VideoToolbox (Rust FFI)
+├── src/probe.rs            // probe_videotoolbox() — enumerates encoders, advertises codecs
+└── tests/videotoolbox.rs
 ```
 
-> No `!vt_sw` / `!vt_hw` stub files are needed — the add-on is its own shared library.
+> No build-tag stub files are needed — the add-on is its own cdylib crate.
 
-Same `internal/encode/vt/` package as the VT SW add-on; each variant is built
-into its own shared library (`featherdesk-addon-vt_hw.dylib` /
+Shares the `videotoolbox` module with the VT SW add-on (a common dependency
+crate); each variant is built into its own cdylib (`featherdesk-addon-vt_hw.dylib` /
 `featherdesk-addon-vt_sw.dylib`).
 
 ---
 
 ## Probe & Selection
 
-```go
-//go:build darwin
+```rust
+// cfg(target_os = "macos")
 
-func ProbeVideoToolboxHW() (*VTHWCapabilities, error) {
+pub fn probe_videotoolbox_hw() -> Result<VtHwCapabilities, StreamError> {
     // 1. VTCopyVideoEncoderList → enumerate available encoders
     // 2. Look for "*.gva" suffix entries (= hardware-accelerated)
     // 3. Per codec: H.264, HEVC
@@ -204,7 +201,7 @@ Pipeline probes (macOS, this add-on loaded):
 ```
 VT HW supports HEVC? → pick HEVC (announce hvc1.1.6.L93.B0 in Config)
 VT HW supports H.264? → pick H.264 (announce avc1.42E01F)
-Neither?              → fall through to VT SW or OpenH264 CGo add-on
+Neither?              → fall through to VT SW or OpenH264 add-on
 ```
 
 ---
@@ -244,16 +241,16 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). VideoToolbox has partial hot-reconfiguration support -- some properties can be set mid-session, but profile/resolution changes require full session invalidation + recreation.
+This add-on implements the `ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). VideoToolbox has partial hot-reconfiguration support -- some properties can be set mid-session, but profile/resolution changes require full session invalidation + recreation.
 
 | Param change | VideoToolbox API | Hot? |
 |--------------|-----------------|------|
-| `FPS` | `kVTCompressionPropertyKey_ExpectedFrameRate` via `VTSessionSetProperty` | yes |
-| `BitrateBps` | `kVTCompressionPropertyKey_AverageBitRate` via `VTSessionSetProperty` | yes |
-| `QP` | `kVTCompressionPropertyKey_Quality` via `VTSessionSetProperty` | yes |
-| `KeyframeInterval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` via `VTSessionSetProperty` | yes |
-| `Width`, `Height` | `VTCompressionSessionInvalidate` + recreate session (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | `kVTProfileLevel_HEVC_Main10_AutoLevel` -- requires HEVC codec + session recreation (returns `stream.ErrRequiresRestart`) | no |
-| `NetworkRTTMs`, `PacketLossPct` | Used to adjust `kVTCompressionPropertyKey_AverageBitRate` headroom | yes |
+| `fps` | `kVTCompressionPropertyKey_ExpectedFrameRate` via `VTSessionSetProperty` | yes |
+| `bitrate_bps` | `kVTCompressionPropertyKey_AverageBitRate` via `VTSessionSetProperty` | yes |
+| `qp` | `kVTCompressionPropertyKey_Quality` via `VTSessionSetProperty` | yes |
+| `keyframe_interval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` via `VTSessionSetProperty` | yes |
+| `width`, `height` | `VTCompressionSessionInvalidate` + recreate session (returns `StreamError::RequiresRestart`) | no |
+| `bit_depth=10` / `hdr=true` | `kVTProfileLevel_HEVC_Main10_AutoLevel` -- requires HEVC codec + session recreation (returns `StreamError::RequiresRestart`) | no |
+| `network_rtt_ms`, `packet_loss_pct` | Used to adjust `kVTCompressionPropertyKey_AverageBitRate` headroom | yes |
 
 **macOS 26 note:** Use C function pointer `outputCallback` at `VTCompressionSessionCreate` -- per-frame closure is broken on macOS 26.

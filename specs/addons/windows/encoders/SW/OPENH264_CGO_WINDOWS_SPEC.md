@@ -1,9 +1,9 @@
-# Windows SW Encoder Add-On: OpenH264 CGo
+# Windows SW Encoder Add-On: OpenH264 (Rust FFI)
 
 ## Purpose
 
 Software H.264 Baseline encoder via Cisco's OpenH264 library on Windows. **Identical
-Go code to the Linux and macOS OpenH264 CGo add-ons** — one of FeatherDesk's main
+Rust code to the Linux and macOS OpenH264 add-ons** — one of FeatherDesk's main
 cross-platform consistency points.
 
 When the Windows machine has no GPU at all (rare, mostly VMs and headless test
@@ -17,7 +17,7 @@ machines) or no vendor HW encoder add-on installed, this is the encoder that run
 |-----------|---------|-------|
 | OpenH264 library | BSD-2 | Permissive |
 | MPEG-LA H.264 royalties | **Cisco pays** | Same on every platform |
-| Our CGo binding | MIT | Same Go file as Linux + macOS |
+| Our Rust FFI binding | MIT | Same Rust source as Linux + macOS |
 
 Zero royalty concern — see `specs/addons/linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md` for the
 full licensing background. This applies identically on Windows.
@@ -42,10 +42,10 @@ Same encoder, same code on both x86 and ARM Windows.
 ### Build (shared library)
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-openh264.dll ./internal/encode/openh264
+cargo build --release -p featherdesk-addon-openh264   # cdylib  featherdesk-addon-openh264.dll
 ```
 
-The add-on ID matches the Linux add-on ID. Same encoder, same Go file.
+The add-on ID matches the Linux add-on ID. Same encoder, same Rust source.
 
 ### Runtime dependencies
 
@@ -56,21 +56,18 @@ The Windows binary needs the OpenH264 DLL shipped alongside it. Cisco's official
 prebuilt DLLs are downloadable from the OpenH264 GitHub releases. Their license
 permits redistribution.
 
-### CGo configuration (Windows)
+### FFI configuration (Windows)
 
-```go
-/*
-#cgo CFLAGS: -I${SRCDIR}/openh264/include
-#cgo LDFLAGS: -L${SRCDIR}/openh264/win64 -lopenh264
-
-#include <wels/codec_api.h>
-#include <wels/codec_app_def.h>
-*/
-import "C"
+```rust
+// build.rs:
+//   println!("cargo:rustc-link-search=native=openh264/win64");
+//   println!("cargo:rustc-link-lib=dylib=openh264");
+// OpenH264 headers (wels/codec_api.h, wels/codec_app_def.h) are vendored and
+// bound via bindgen into an `openh264-sys` module.
 ```
 
 The OpenH264 SDK headers and import library are vendored in the source tree under
-`internal/encode/openh264/openh264/` (Cisco's license permits this for binary
+`addons/openh264/openh264/` (Cisco's license permits this for binary
 distribution).
 
 ---
@@ -80,13 +77,13 @@ distribution).
 Identical to the Linux spec. See
 [`linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md`](../../../linux/encoders/SW/OPENH264_CGO_LINUX_SPEC.md)
 for:
-- CGo session setup
+- FFI session setup
 - Per-frame encode loop
 - Force-keyframe path
 - IDR-on-demand configuration
 
-The Go code is byte-for-byte the same across Linux + Windows + macOS. Only the
-CGo `#cgo` directives differ for finding the OpenH264 library at link time.
+The Rust code is the same across Linux + Windows + macOS. Only the `build.rs`
+link directives differ for finding the OpenH264 library at link time.
 
 ---
 
@@ -138,22 +135,23 @@ BSD + Cisco royalty coverage = no GPL, no patent fees, fully proprietary binary.
 ## File Structure
 
 ```
-internal/encode/openh264/
-├── openh264.go              // shared with Linux + macOS
-├── openh264_cgo.go          // CGo binding (built into the add-on's shared library)
-├── probe.go
+addons/openh264/
+├── src/
+│   ├── lib.rs               // shared with Linux + macOS (Rust FFI binding)
+│   └── probe.rs
 ├── openh264/                // vendored OpenH264 SDK (headers + import libs)
 │   ├── include/wels/*.h
 │   ├── win64/openh264.lib   // Windows MSVC import library
 │   └── win64/openh264-X.dll // Cisco's official prebuilt DLL
-└── openh264_test.go
+├── build.rs                 // link config for openh264
+└── tests.rs
 ```
 
-No `!openh264` stub file is needed — the add-on is its own shared library; an
-absent add-on is simply a `.dll` that isn't in the add-ons directory.
+No conditional-compilation stub file is needed — the add-on is its own cdylib
+crate; an absent add-on is simply a `.dll` that isn't in the add-ons directory.
 
 The vendored `openh264/win64/openh264-X.dll` ships alongside the .exe at install
-time. Build process copies it from `internal/encode/openh264/openh264/win64/`
+time. The build copies it from `addons/openh264/openh264/win64/`
 into the install directory.
 
 ---
@@ -173,9 +171,9 @@ Skip when:
 
 ## Status
 
-📋 Specced — implementation exists today as the default SW encoder in
-`internal/encode/openh264.go`. Refactor moves it to `internal/encode/openh264/`
-and builds it as a c-shared library, with Windows-specific DLL vendoring added.
+📋 Specced — implementation exists today as the default SW encoder in the core
+encode crate. Refactor moves it to `addons/openh264/` and builds it as a cdylib,
+with Windows-specific DLL vendoring added.
 
 ---
 
@@ -193,7 +191,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `UpdateStreamParams(p stream.Params)`.
+This add-on implements the `stream::ConfigurableEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `update_stream_params(p: stream::Params)`.
 
 | Param change | OpenH264 API | Hot? |
 |--------------|--------------|------|
@@ -201,5 +199,5 @@ This add-on implements `stream.ConfigurableEncoder` (see [`../../../../core/MODU
 | `BitrateBps` | `ISVCEncoder::SetOption(ENCODER_OPTION_BITRATE, &b)` | yes |
 | `QP` | `ENCODER_OPTION_SVC_ENCODE_PARAM_EXT` | yes |
 | `KeyframeInterval` | `param.uiIntraPeriod` | yes |
-| `Width`, `Height` | teardown + `Initialize` (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` -- pipeline switches to `mf_hw`/`nvenc`/`amf` HEVC Main10 | n/a |
+| `Width`, `Height` | teardown + `Initialize` (returns `stream::Error::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | rejected with `stream::Error::HdrUnsupported` -- pipeline switches to `mf_hw`/`nvenc`/`amf` HEVC Main10 | n/a |

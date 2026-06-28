@@ -2,26 +2,26 @@
 
 ## Purpose
 
-Software H.264 / HEVC encoder via Apple's VideoToolbox, called from Go through CGo
+Software H.264 / HEVC encoder via Apple's VideoToolbox, called from Rust through FFI
 on macOS. This is the **macOS-native software fallback** — used when no GPU is
 available, no hardware MFT is registered, or hardware encoding is explicitly disabled.
 
 VideoToolbox abstracts both software and hardware paths behind the same
 `VTCompressionSession` API. Configure with
 `kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: false` and you
-get Apple's tuned software encoder. Same CGo binding as the HW spec, different config.
+get Apple's tuned software encoder. Same Rust FFI binding as the HW spec, different config.
 
 ---
 
-## Why use this over OpenH264 CGo on macOS
+## Why use this over OpenH264 on macOS
 
-OpenH264 CGo works on macOS too (we verified during benchmark sessions), but
+OpenH264 works on macOS too (we verified during benchmark sessions), but
 VideoToolbox SW is preferable when targeting Apple Silicon:
 
 | Encoder | 1080p p50 (Apple Silicon estimated) | Notes |
 |---------|------------------------------------|-------|
 | **VideoToolbox SW H.264** | **~5–8ms** | Apple-tuned, optimized for ARM Neon and Apple Performance counters |
-| OpenH264 CGo | ~10ms | Cisco's NEON build, slightly slower on Apple Silicon |
+| OpenH264 | ~10ms | Cisco's NEON build, slightly slower on Apple Silicon |
 
 On Intel Macs the two are roughly equivalent (~5ms each). On Apple Silicon, VT SW
 wins meaningfully. Since VideoToolbox is built into the OS, no SDK installation
@@ -35,7 +35,7 @@ is required.
 |-----------|---------|-------|
 | VideoToolbox framework | macOS system framework | Built into the OS; no separate license |
 | H.264 / HEVC patent royalties | **Apple pays** | Apple's macOS license covers the use of MPEG-LA / MPEG-LA HEVC pools for system-shipped encoders |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 Same model as OpenH264 (vendor pays the patent pool). Zero royalty concern for
 FeatherDesk shipping this on macOS.
@@ -64,33 +64,30 @@ FeatherDesk shipping this on macOS.
 
 ## Build & Distribution
 
-### Shared library (c-shared)
+### Shared library (cdylib)
 
 ```bash
-go build -buildmode=c-shared -tags vt_sw -o featherdesk-addon-vt_sw.dylib ./internal/encode/vt
+cargo build --release -p featherdesk-addon-vt_sw   # cdylib  featherdesk-addon-vt_sw.dylib
 ```
 
 ### Runtime dependencies
 
 None. VideoToolbox ships with macOS.
 
-### CGo configuration
+### FFI / link configuration (Rust)
 
-```go
-/*
-#cgo CFLAGS: -fmodules
-#cgo LDFLAGS: -framework VideoToolbox -framework CoreMedia -framework CoreVideo
-
-#include <VideoToolbox/VideoToolbox.h>
-#include <CoreMedia/CoreMedia.h>
-#include <CoreVideo/CoreVideo.h>
-*/
-import "C"
+```rust
+// build.rs — link the macOS frameworks:
+//   for fw in ["VideoToolbox", "CoreMedia", "CoreVideo"] {
+//       println!("cargo:rustc-link-lib=framework={fw}");
+//   }
+// VideoToolbox / CoreMedia / CoreVideo declarations come from `bindgen` over
+// their umbrella headers; the Rust side calls them from an `extern "C"` block.
 ```
 
 ---
 
-## CGo Implementation Sketch
+## Native Implementation Sketch
 
 ```c
 // CRITICAL: closure-style outputHandler is BROKEN on macOS 26 — use the
@@ -103,7 +100,7 @@ static void encoded_callback(
     VTEncodeInfoFlags infoFlags,
     CMSampleBufferRef sampleBuffer
 ) {
-    // copy NAL bytes to Go-accessible buffer; signal semaphore
+    // copy NAL bytes to a Rust-accessible buffer; signal semaphore
 }
 
 VTCompressionSessionRef session;
@@ -147,18 +144,18 @@ HEVC SW is meaningfully slower (~2× H.264 SW). Avoid HEVC SW for real-time stre
 ## File Structure
 
 ```
-internal/encode/vt/
-├── videotoolbox.go        // Encoder struct, NewVideoToolboxEncoder (covers SW + HW)
-├── videotoolbox_cgo.go    // CGo binding (built into the add-on's shared library)
-├── probe.go               // ProbeVideoToolbox()
-└── videotoolbox_test.go
+featherdesk-addon-vt_sw/   (its own cdylib crate)
+├── src/videotoolbox.rs     // Encoder struct, VideoToolboxEncoder::new (covers SW + HW)
+├── src/ffi.rs              // extern "C" binding to VideoToolbox (Rust FFI)
+├── src/probe.rs            // probe_videotoolbox()
+└── tests/videotoolbox.rs
 ```
 
-> No `!vt_sw` / `!vt_hw` stub files are needed — the add-on is its own shared library.
+> No build-tag stub files are needed — the add-on is its own cdylib crate.
 
-Note: the same Go file serves both VT SW and VT HW add-ons; each is built into
-its own shared library (add-on ID `vt_sw` / `vt_hw`), which selects the relevant
-probe and select paths. The CGo wrapper is identical.
+Note: the same Rust module serves both VT SW and VT HW add-ons; each is built into
+its own cdylib (add-on ID `vt_sw` / `vt_hw`), which selects the relevant
+probe and select paths. The Rust FFI wrapper is identical.
 
 ---
 
@@ -167,18 +164,18 @@ probe and select paths. The CGo wrapper is identical.
 Use this add-on when:
 - Targeting macOS with no hardware encoder available (rare on modern Macs)
 - Explicitly opting out of hardware encoding for testing
-- Apple Silicon — VT SW is faster than OpenH264 CGo on this hardware
+- Apple Silicon — VT SW is faster than OpenH264 on this hardware
 
 Skip when:
 - Have VT HW (essentially every Mac from 2011+) — use the HW add-on instead
-- Cross-platform single binary preferred — use OpenH264 CGo for portability
+- Cross-platform single binary preferred — use OpenH264 for portability
 
 ---
 
 ## Status
 
 📋 Specced — not yet implemented. The current featherdesk codebase uses OpenH264
-CGo on all platforms. This add-on will be the macOS-preferred SW encoder once built.
+on all platforms. This add-on will be the macOS-preferred SW encoder once built.
 
 ---
 
@@ -197,13 +194,13 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableEncoder` (note: SW encoder interface, not HW) (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). Identical VideoToolbox property API as `vt_hw`; see [`../HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md#stream-params-translation).
+This add-on implements the `ConfigurableEncoder` trait (note: SW encoder trait, not HW) (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). Identical VideoToolbox property API as `vt_hw`; see [`../HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md`](../HW/VIDEOTOOLBOX_HW_MACOS_SPEC.md#stream-params-translation).
 
 | Param change | VideoToolbox API | Hot? |
 |--------------|-----------------|------|
-| `FPS` | `kVTCompressionPropertyKey_ExpectedFrameRate` | yes |
-| `BitrateBps` | `kVTCompressionPropertyKey_AverageBitRate` | yes |
-| `QP` | `kVTCompressionPropertyKey_Quality` | yes |
-| `KeyframeInterval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` | yes |
-| `Width`, `Height` | session recreation (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | VT SW supports HEVC on macOS 12+ (set `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = false` + `kCMVideoCodecType_HEVC`). Requires session recreation with HEVC Main10 profile (returns `stream.ErrRequiresRestart`). | no |
+| `fps` | `kVTCompressionPropertyKey_ExpectedFrameRate` | yes |
+| `bitrate_bps` | `kVTCompressionPropertyKey_AverageBitRate` | yes |
+| `qp` | `kVTCompressionPropertyKey_Quality` | yes |
+| `keyframe_interval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` | yes |
+| `width`, `height` | session recreation (returns `StreamError::RequiresRestart`) | no |
+| `bit_depth=10` / `hdr=true` | VT SW supports HEVC on macOS 12+ (set `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = false` + `kCMVideoCodecType_HEVC`). Requires session recreation with HEVC Main10 profile (returns `StreamError::RequiresRestart`). | no |

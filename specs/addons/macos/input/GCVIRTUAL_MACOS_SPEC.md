@@ -4,7 +4,7 @@
 
 The `gcvirtual` add-on is the macOS virtual-gamepad backend for the core
 Gamepad module (see [`specs/interaction/MODULE_GAMEPAD.md`](../../../interaction/MODULE_GAMEPAD.md)).
-It implements `input.GamepadInjector` using Apple's `GCVirtualController`
+It implements the `GamepadInjector` trait using Apple's `GCVirtualController`
 (Game Controller framework).
 
 `GCVirtualController` is Apple's blessed path for synthesizing a gamepad on
@@ -28,7 +28,7 @@ Apple supports.
   for *apps* to play effects on a *connected* controller. There is no public
   inbox by which a virtual controller can observe a host app's vibration
   request. v1 therefore does **not** forward rumble on this add-on -
-  `SetRumbleEmitter` is registered and stored but never invoked. The dispatcher
+  `set_rumble_emitter` is registered and stored but never invoked. The dispatcher
   treats this as "rumble unavailable" the same way Safari treats missing
   `vibrationActuator`.
 
@@ -39,7 +39,7 @@ Apple supports.
 | Component | License | Notes |
 |-----------|---------|-------|
 | GameController framework | Apple system framework | Linked, not redistributed |
-| Our CGo / Obj-C++ binding | MIT | |
+| Our Rust FFI / Obj-C++ binding | MIT | |
 
 ---
 
@@ -47,8 +47,9 @@ Apple supports.
 
 `GCVirtualController` is an Objective-C class with an async `connect`
 completion handler. The add-on talks to it through a small Objective-C++
-shim file compiled with CGo - Go cannot call the framework directly. The
-shim exposes plain C entry points the Go side calls.
+shim file linked via Rust FFI - Rust cannot call the Objective-C framework
+directly through `objc2` ergonomically here. The shim exposes plain C entry
+points the Rust side calls via `extern "C"`.
 
 ```objc
 // Pseudocode in the shim (gcvirtual_bridge.mm):
@@ -114,7 +115,7 @@ void gcv_disconnect(uint8_t index) {
 }
 ```
 
-The Go side calls these through CGo, marshalling the W3C `GamepadState` into
+The Rust side calls these through FFI, marshalling the W3C `GamepadState` into
 per-element updates.
 
 ### Button mapping (W3C bit -> GCInput* key)
@@ -149,22 +150,27 @@ bits are folded into `(x, y)` before the call.
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-gcvirtual.dylib ./internal/input/gcvirtual
+cargo build --release -p featherdesk-addon-gcvirtual   # cdylib  featherdesk-addon-gcvirtual.dylib
 ```
 
-CGo config:
+FFI / link config (Rust):
 
-```go
-/*
-#cgo CFLAGS:  -x objective-c++ -fobjc-arc
-#cgo LDFLAGS: -framework GameController -framework Foundation
-#include "gcvirtual_bridge.h"
-*/
-import "C"
+```rust
+// build.rs — compile the Objective-C++ shim and link the frameworks:
+//   cc::Build::new()
+//       .cpp(true)
+//       .flag("-x").flag("objective-c++")
+//       .flag("-fobjc-arc")
+//       .file("src/gcvirtual_bridge.mm")
+//       .compile("gcvirtual_bridge");
+//   println!("cargo:rustc-link-lib=framework=GameController");
+//   println!("cargo:rustc-link-lib=framework=Foundation");
+// The Rust side declares the shim entry points in an `extern "C"` block,
+// generated from `gcvirtual_bridge.h` (e.g. via `bindgen`).
 ```
 
 The shim file is `gcvirtual_bridge.mm` (Objective-C++); the header
-`gcvirtual_bridge.h` exposes plain C signatures for CGo.
+`gcvirtual_bridge.h` exposes plain C signatures for the Rust `extern "C"` block.
 
 For distribution the app must be **signed + notarized** like every other
 macOS add-on. There is no driver to install and no permission prompt -
@@ -176,19 +182,19 @@ Apple Silicon and Intel use the identical framework API.
 
 ## Constructor & Probe
 
-```go
-// internal/input/gcvirtual/gcvirtual_darwin.go  (built into the add-on's shared library)
+```rust
+// crate: featherdesk-addon-gcvirtual (built as a cdylib add-on)
 
-// Probe returns true only on macOS 14 (Sonoma) and later. It does not
-// allocate any virtual controllers; that happens in Connect.
-func Probe() bool
+/// probe returns true only on macOS 14 (Sonoma) and later. It does not
+/// allocate any virtual controllers; that happens in `connect`.
+pub fn probe() -> bool;
 
-// New stores config and prepares the shim. No virtual controllers are
-// brought online until Connect(index, id) is called.
-func New(cfg input.InjectorConfig) (input.GamepadInjector, error)
+/// new stores config and prepares the shim. No virtual controllers are
+/// brought online until `connect(index, id)` is called.
+pub fn new(cfg: InjectorConfig) -> Result<Box<dyn GamepadInjector>, InputError>;
 ```
 
-`Probe` checks `@available(macOS 14, *)` via the shim. On pre-Sonoma it
+`probe` checks `@available(macOS 14, *)` via the shim. On pre-Sonoma it
 returns false and the pipeline starts without gamepad capability; the log
 line tells the operator the OS version requirement.
 
@@ -198,27 +204,27 @@ line tells the operator the OS version requirement.
 
 | Failure | Behavior |
 |---------|----------|
-| Pre-macOS 14 | `Probe` false -> add-on not selected; log "GCVirtualController requires macOS 14+" |
-| `GCVirtualController` init / connect fails | `Connect` returns the `NSError` description; that index stays unbound |
+| Pre-macOS 14 | `probe` false -> add-on not selected; log "GCVirtualController requires macOS 14+" |
+| `GCVirtualController` init / connect fails | `connect` returns the `NSError` description (mapped to `InputError`); that index stays unbound |
 | Host game does not use GameController framework | undetectable from our side; the virtual pad simply has no observer. Document in the user-facing README |
 | `setValue:` on an element fails | log once + continue (do not crash the stream) |
-| `Disconnect` called on never-Connected index | no-op (matches interface contract) |
-| Rumble request from server | `SetRumbleEmitter` is stored; the emitter is never invoked (no inbox); no error returned |
+| `disconnect` called on never-connected index | no-op (matches trait contract) |
+| Rumble request from server | `set_rumble_emitter` is stored; the emitter is never invoked (no inbox); no error returned |
 
 ---
 
 ## File Structure
 
 ```
-internal/input/gcvirtual/
-├── gcvirtual_darwin.go     // GamepadInjector impl, CGo (built into the add-on's shared library)
-├── gcvirtual_bridge.h      // plain C signatures for CGo
-├── gcvirtual_bridge.mm     // Objective-C++ shim -> GameController framework
-├── buttons.go              // W3C bit -> GCInput* key table, axis/trigger math
-└── gcvirtual_test.go
+featherdesk-addon-gcvirtual/   (its own cdylib crate)
+├── src/lib.rs              // GamepadInjector impl + abi_stable root module, Rust FFI
+├── src/gcvirtual_bridge.h  // plain C signatures for the Rust extern "C" block
+├── src/gcvirtual_bridge.mm // Objective-C++ shim -> GameController framework
+├── src/buttons.rs          // W3C bit -> GCInput* key table, axis/trigger math
+└── build.rs                // compiles the .mm shim + links the frameworks
 ```
 
-> No `!gcvirtual` stub file is needed — the add-on is its own shared library.
+> No build-tag stub file is needed — the add-on is its own cdylib crate.
 
 ---
 
@@ -240,6 +246,6 @@ If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 Specced - not yet built. Implementation order: `@available` probe + version
 gate -> Objective-C++ shim with `gcv_connect` / `gcv_disconnect` lifecycle ->
-button + thumbstick + trigger + D-pad mapping -> `Update` diff suppression on
-the Go side (avoid crossing CGo on no-change) -> documentation pass on the
+button + thumbstick + trigger + D-pad mapping -> `update` diff suppression on
+the Rust side (avoid crossing FFI on no-change) -> documentation pass on the
 SDL2/IOKit visibility caveat.

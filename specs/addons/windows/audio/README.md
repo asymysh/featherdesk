@@ -25,9 +25,9 @@ streams video only. Audio is an opt-in add-on shared library. Audio is
 | `opus` | Opus codec (BSD libopus, in-process). FEC/PLC, ~96–128 kbps. **Recommended.** |
 | _(none)_ | Raw S16LE PCM passthrough (1.536 Mbps, no loss concealment). |
 
-Build each add-on (capture, encoder, `wasapi`, `opus`) separately as a C-shared
-library and drop the resulting `.dll` files into the add-ons directory, e.g.:
+Build each add-on (capture, encoder, `wasapi`, `opus`) separately as a cdylib
+and drop the resulting `.dll` files into the add-ons directory, e.g.:
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-wasapi.dll ./internal/audio/wasapi
+cargo build --release -p featherdesk-addon-wasapi   # cdylib  featherdesk-addon-wasapi.dll
 ```

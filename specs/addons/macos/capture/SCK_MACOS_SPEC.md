@@ -17,7 +17,7 @@ The default macOS capture add-on. There is no realistic alternative on modern ma
 | Component | License |
 |-----------|---------|
 | ScreenCaptureKit framework | Apple system framework — usage governed by macOS SLA |
-| Our CGo/Swift bridge | MIT |
+| Our Rust FFI / Objective-C bridge | MIT |
 
 System framework; no redistribution, no royalties, no GPL exposure. Same status
 as VideoToolbox.
@@ -84,10 +84,10 @@ grants permission as it did pre-26.
 
 ## Build & Distribution
 
-### Shared library (c-shared)
+### Shared library (cdylib)
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-sck.dylib ./internal/capture/sck
+cargo build --release -p featherdesk-addon-sck   # cdylib  featherdesk-addon-sck.dylib
 ```
 
 Without the `sck` library in the add-ons directory the default macOS binary has
@@ -97,28 +97,30 @@ no capture backend and will fail at runtime — same pattern as Linux.
 
 ScreenCaptureKit framework (ships with macOS 12.3+, nothing to install).
 
-### CGo configuration
+### FFI / link configuration (Rust)
 
-```go
-/*
-#cgo CFLAGS: -x objective-c -fmodules -fobjc-arc
-#cgo LDFLAGS: -framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework IOSurface -framework Foundation
-
-#import <ScreenCaptureKit/ScreenCaptureKit.h>
-#import <CoreMedia/CoreMedia.h>
-#import <CoreVideo/CoreVideo.h>
-#import <IOSurface/IOSurface.h>
-*/
-import "C"
+```rust
+// build.rs — compile the Objective-C wrapper and link the macOS frameworks:
+//   cc::Build::new()
+//       .flag("-x").flag("objective-c")
+//       .flag("-fmodules")
+//       .flag("-fobjc-arc")
+//       .file("src/sck_objc.m")
+//       .compile("sck_objc");
+//   for fw in ["ScreenCaptureKit", "CoreMedia", "CoreVideo", "IOSurface", "Foundation"] {
+//       println!("cargo:rustc-link-lib=framework={fw}");
+//   }
+// The Rust side declares the wrapper's C entry points in an `extern "C"` block
+// (generated from `sck_objc.h` via `bindgen`); `objc2` covers the rest.
 ```
 
-The capture itself is written in Objective-C (not Swift) for clean CGo interop —
-Swift's runtime isn't ABI-stable across language versions and adds bridging
-overhead.
+The capture itself is written in Objective-C (not Swift) for clean Rust FFI
+interop — Swift's runtime isn't ABI-stable across language versions and adds
+bridging overhead.
 
 ---
 
-## CGo Implementation Sketch
+## Native Implementation Sketch
 
 ```objc
 // 1. Discover displays
@@ -173,10 +175,10 @@ SCStream *stream = [[SCStream alloc] initWithFilter:filter
 
 ## Two Output Paths
 
-| Interface | Method | Output | Use case |
-|-----------|--------|--------|----------|
-| `Capturer` (CPU readback) | `NextFrame()` | BGRA `[]byte` via `CVPixelBufferLockBaseAddress` | Pair with OpenH264 add-on |
-| `IOSurfaceCapturer` (zero-copy) | `NextIOSurface()` | `CVPixelBufferRef` (IOSurface-backed) | Pair with VideoToolbox HW/SW add-on |
+| Trait | Method | Output | Use case |
+|-------|--------|--------|----------|
+| `Capturer` (CPU readback) | `next_frame()` | BGRA `RVec<u8>` via `CVPixelBufferLockBaseAddress` | Pair with OpenH264 add-on |
+| `SurfaceCapturer` (zero-copy) | `next_surface()` | `FbInfo { handle: SurfaceHandle::IoSurface(..) }` (CVPixelBuffer/IOSurface-backed) | Pair with VideoToolbox HW/SW add-on |
 
 The pipeline picks the right method based on the paired encoder.
 
@@ -220,27 +222,27 @@ is irrelevant.
 ## File Structure
 
 ```
-internal/capture/sck/
-├── sck.go                      // SCKCapturer struct, NewSCKCapturer
-├── sck_objc.m                  // Objective-C SCK wrapper
-├── sck_objc.h                  // C-callable function declarations
-├── sck_cgo.go                  // CGo binding (built into the add-on's shared library)
-├── cursor.go                   // NSCursor polling
-├── probe.go                    // ProbeSCK() — checks bundle + permission
-└── sck_integration_test.go     // integration test (//go:build integration)
+featherdesk-addon-sck/   (its own cdylib crate)
+├── src/lib.rs              // SckCapturer struct + abi_stable root module
+├── src/sck_objc.m          // Objective-C SCK wrapper
+├── src/sck_objc.h          // C-callable function declarations
+├── src/ffi.rs              // extern "C" binding to the Obj-C wrapper (Rust FFI)
+├── src/cursor.rs           // NSCursor polling
+├── src/probe.rs            // probe_sck() — checks bundle + permission
+└── tests/integration.rs    // integration test (cfg(feature = "integration"))
 ```
 
-> No `!sck` stub file is needed — the add-on is its own shared library, so an
+> No build-tag stub file is needed — the add-on is its own cdylib crate, so an
 > absent add-on is simply a library that isn't in the directory.
 
 ---
 
 ## Probe & Selection
 
-```go
-//go:build darwin
+```rust
+// cfg(target_os = "macos")
 
-func ProbeSCK() (*SCKCapabilities, error) {
+pub fn probe_sck() -> Result<SckCapabilities, CaptureError> {
     // 1. Verify running inside a code-signed app bundle (check CFBundleIdentifier)
     // 2. Check Screen Recording TCC permission via CGPreflightScreenCaptureAccess()
     //    If not granted: CGRequestScreenCaptureAccess() to trigger dialog
@@ -272,8 +274,9 @@ Skip only if:
 
 ✅ **Working** — implemented and benchmarked on Hackintosh + macOS 26.5.1. Real
 Apple Silicon hardware not yet measured but expected to be 2–4× faster. The
-refactor moves the existing Objective-C SCK wrapper to `internal/capture/sck/`,
-built into the `sck` add-on shared library, without changing the underlying capture logic.
+refactor moves the existing Objective-C SCK wrapper into the
+`featherdesk-addon-sck` crate, built into the `sck` add-on cdylib, without
+changing the underlying capture logic.
 
 ---
 
@@ -292,11 +295,11 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). SCK supports hot reconfiguration via `updateConfiguration:`.
+This add-on implements the `ConfigurableCapturer` trait (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). SCK supports hot reconfiguration via `updateConfiguration:`.
 
 | Param change | SCK API | Hot? |
 |--------------|---------|------|
-| `Width`, `Height` | `SCStreamConfiguration.width/height` + `[stream updateConfiguration:completionHandler:]` | yes |
-| `FPS` | `SCStreamConfiguration.minimumFrameInterval` + `updateConfiguration:` | yes |
-| `BitDepth=10` / `HDR=true` | `SCStreamConfiguration.pixelFormat = kCVPixelFormatType_64RGBALeAccurate` + `updateConfiguration:` (requires macOS 14+) | yes |
-| `ColorSpace` | Set automatically based on display; `CGColorSpaceCreateWithName` from `CMSampleBuffer` attachment | n/a (read-only) |
+| `width`, `height` | `SCStreamConfiguration.width/height` + `[stream updateConfiguration:completionHandler:]` | yes |
+| `fps` | `SCStreamConfiguration.minimumFrameInterval` + `updateConfiguration:` | yes |
+| `bit_depth=10` / `hdr=true` | `SCStreamConfiguration.pixelFormat = kCVPixelFormatType_64RGBALeAccurate` + `updateConfiguration:` (requires macOS 14+) | yes |
+| `color_space` | Set automatically based on display; `CGColorSpaceCreateWithName` from `CMSampleBuffer` attachment | n/a (read-only) |

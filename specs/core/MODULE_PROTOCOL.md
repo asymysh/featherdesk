@@ -437,7 +437,7 @@ JSON message on the control stream, BEFORE any video/audio/IDR media flows:
 - If capabilities change (resolution, codec, cursor mode, HDR), the server sends a **new** `config` message; the client reconfigures its decoder and input scaling.
 - Send order on connect: **`config` (control stream) → IDR (bootstrap stream) → live frames (datagrams).**
 
-### Shared Payload Types (Go)
+### Shared Payload Types (Rust)
 
 ```rust
 /// ConfigPayload is a control-stream JSON message (newline-delimited). Like all

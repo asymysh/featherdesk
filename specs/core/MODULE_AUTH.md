@@ -61,7 +61,7 @@ session_ttl_minutes = 60             # successful auth lifetime before re-auth
 ### Behavior
 
 - At startup, if `token` is empty, server generates a random 32-byte token
-  via `crypto/rand.Read()` (**CSPRNG mandatory**), base64url encoded (43 chars).
+  via a CSPRNG (the `getrandom` crate / `OsRng`) (**CSPRNG mandatory**), base64url encoded (43 chars).
   If set explicitly, must be ≥ 32 characters.
 - Token is printed to stdout once at startup:
   ```
@@ -84,7 +84,7 @@ session_ttl_minutes = 60             # successful auth lifetime before re-auth
   Referer headers, and browser history.
 - The 5-second auth timer ends in `CloseWithError(4408 CloseAuthTimeout)` if the
   client doesn't authenticate in time.
-- Wrong/missing/expired token → `CloseAuthFailed (4401)`.
+- Wrong/missing/expired token → `close::AUTH_FAILED (4401)`.
 
 ### Token rotation
 
@@ -131,7 +131,7 @@ session_ttl_minutes = 60
 
 - Memory-hard (resistant to GPU brute-force)
 - Side-channel resistant
-- Stdlib support via `golang.org/x/crypto/argon2`
+- Crate support via the `argon2` crate (RustCrypto)
 - Industry standard for password hashing (winner of PHC 2015)
 
 ---
@@ -222,7 +222,7 @@ oauth_allowed_emails = []    # whitelist; empty = anyone authenticated
 ⏸️ **Deferred.** Interface and config schema are defined; no implementation
 in v1. Trigger to un-defer:
 - A real customer requests SSO
-- We adopt an OIDC library (likely `github.com/coreos/go-oidc`)
+- We adopt an OIDC library (likely the `openidconnect` crate)
 
 The deferred status is documented so external integrations can plan around it.
 
@@ -269,7 +269,7 @@ Server-side flow:
 2. If found AND not expired: skip auth, send the "resumed" config message
    (`{"type":"config","resumed":true,…}`) then seed the decoder over a fresh
    bootstrap stream (see [`MODULE_PROTOCOL.md`](./MODULE_PROTOCOL.md) resume flow)
-3. If not found / expired: session closed with CloseAuthFailed (4401). Client falls back to
+3. If not found / expired: session closed with close::AUTH_FAILED (4401). Client falls back to
    full auth re-flow with stored credentials (token / password / device token).
    NOTE: resume happens post-WebTransport-upgrade, so an HTTP 401 is not possible
    here -- always use the QUIC application close code 4401.
@@ -321,101 +321,112 @@ allow_takeover       = false     # SECURE default (false). Set true to permit an
 
 ## Implementation Sketch
 
-```go
-package auth
+```rust
+// crate: featherdesk-auth
 
-type Mode int
-const (
-    ModeNone Mode = iota
-    ModeToken
-    ModePassword
-    ModePIN
-    ModeOAuth
-)
-
-type Authenticator interface {
-    // Authenticate validates the first JSON message on the WebTransport
-    // control stream. The Token + Role (and optional resume) fields are
-    // parsed from that message before Authenticate is invoked; the
-    // *http.Request is the original WebTransport upgrade request (carries
-    // Origin, RemoteAddr, etc. — useful for rate limiting and ACLs).
-    // Returns the authenticated identity on success, or error with HTTP
-    // status code. The SERVER creates the session token -- the Authenticator
-    // only validates credentials.
-    Authenticate(r *http.Request) (identity Identity, err error)
+pub enum Mode {
+    None,
+    Token,
+    Password,
+    Pin,
+    OAuth,
 }
 
-type Identity struct {
-    UserID   string // empty for token/none modes; populated for password/OAuth
-    DeviceID string // populated for PIN mode (paired device)
-    Role     string // "control" | "view" | "" (auto)
+pub trait Authenticator: Send + Sync {
+    /// Validates the first JSON message on the WebTransport control stream. The
+    /// token + role (and optional resume) fields are parsed from that message
+    /// before authenticate is invoked; `req` is the original WebTransport upgrade
+    /// request (carries Origin, remote_addr, etc. — useful for rate limiting and
+    /// ACLs). Returns the authenticated identity on success, or an error. The
+    /// SERVER creates the session token — the Authenticator only validates creds.
+    fn authenticate(&self, req: &UpgradeRequest) -> Result<Identity, AuthError>;
 }
 
-type Session struct {
-    Token       string
-    Created     time.Time
-    LastSeen    time.Time
-    UserID      string  // empty for token/PIN modes; populated for password/OAuth
-    Role        string  // "control" | "view"
-    DeviceID    string  // populated for PIN mode
+pub struct Identity {
+    pub user_id: String,   // empty for token/none modes; populated for password/OAuth
+    pub device_id: String, // populated for PIN mode (paired device)
+    pub role: String,      // "control" | "view" | "" (auto)
 }
 
-// Server's auth pipeline
-type Server struct {
-    auth          Authenticator
-    sessions      map[string]*Session  // by session_token
-    sessionMu     sync.RWMutex
-    sessionTTL    time.Duration
+pub struct Session {
+    pub token: String,
+    pub created: std::time::Instant,
+    pub last_seen: std::time::Instant,
+    pub user_id: String,   // empty for token/PIN modes; populated for password/OAuth
+    pub role: String,      // "control" | "view"
+    pub device_id: String, // populated for PIN mode
 }
 
-func (s *Server) handleWebTransport(w http.ResponseWriter, r *http.Request) {
-    // Upgrade the WebTransport session. NO credentials are read from the URL
-    // query or HTTP headers — they arrive in-band on the control stream
-    // (see Security Considerations: NEVER a URL query parameter).
-    session, err := s.upgrade(w, r)
-    if err != nil {
-        return
-    }
+// One thiserror-derived error enum for the crate.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("bad credentials")] BadCredentials,
+    #[error("expired")] Expired,
+    #[error("rate limited")] RateLimited,
+}
 
-    // The client's FIRST control-stream message carries credentials in-band
-    // (JSON body inside the encrypted QUIC stream): {token, role, resume?}.
-    ctrl, msg, err := s.acceptAuthMessage(session)
-    if err != nil {
-        session.CloseWithError(CloseProtocolError, "auth handshake")
-        return
-    }
+/// Server's auth pipeline
+pub struct Server {
+    auth: Box<dyn Authenticator>,
+    sessions: tokio::sync::RwLock<HashMap<String, Session>>, // by session_token
+    session_ttl: std::time::Duration,
+}
 
-    // 1. Try resume first — gated by the in-band `resume` boolean flag; the
-    //    session `token` is itself the resume credential (matches the
-    //    {token, role, resume:bool} shape in TRANSPORT/PROTOCOL/SERVER).
-    if msg.Resume {
-        if sess := s.resumeSession(msg.Token); sess != nil {
-            s.attachResume(session, ctrl, sess)
-            return
+impl Server {
+    async fn handle_web_transport(&self, req: UpgradeRequest) {
+        // Upgrade the WebTransport session. NO credentials are read from the URL
+        // query or HTTP headers — they arrive in-band on the control stream
+        // (see Security Considerations: NEVER a URL query parameter).
+        let session = match self.upgrade(&req).await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // The client's FIRST control-stream message carries credentials in-band
+        // (JSON body inside the encrypted QUIC stream): {token, role, resume?}.
+        let (ctrl, msg) = match self.accept_auth_message(&session).await {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = session.close_with_error(close::PROTOCOL_ERROR, "auth handshake");
+                return;
+            }
+        };
+
+        // 1. Try resume first — gated by the in-band `resume` boolean flag; the
+        //    session `token` is itself the resume credential (matches the
+        //    {token, role, resume:bool} shape in TRANSPORT/PROTOCOL/SERVER).
+        if msg.resume {
+            if let Some(sess) = self.resume_session(&msg.token) {
+                self.attach_resume(session, ctrl, sess).await;
+                return;
+            }
+            // stale / invalid session token → fall through to full auth
         }
-        // stale / invalid session token → fall through to full auth
-    }
 
-    // 2. Fall back to full auth. Token + Role are already parsed from `msg`;
-    //    `r` is passed only for Origin / RemoteAddr (rate limiting, ACLs).
-    identity, err := s.auth.Authenticate(r)
-    if err != nil {
-        s.respondAuthError(ctrl, err)
-        session.CloseWithError(CloseAuthFailed, "auth failed")
-        return
-    }
+        // 2. Fall back to full auth. token + role are already parsed from `msg`;
+        //    `req` is passed only for Origin / remote_addr (rate limiting, ACLs).
+        let identity = match self.auth.authenticate(&req) {
+            Ok(id) => id,
+            Err(e) => {
+                self.respond_auth_error(&ctrl, e).await;
+                let _ = session.close_with_error(close::AUTH_FAILED, "auth failed");
+                return;
+            }
+        };
 
-    // Server creates the session token (Authenticator only validates).
-    token := generateSessionToken() // crypto/rand 32-byte base64url
-    sess := &Session{
-        Token:    token,
-        UserID:   identity.UserID,
-        DeviceID: identity.DeviceID,
-        Created:  time.Now(),
-        Role:     identity.Role,
+        // Server creates the session token (Authenticator only validates).
+        let token = generate_session_token(); // CSPRNG (getrandom) 32-byte base64url
+        let sess = Session {
+            token: token.clone(),
+            user_id: identity.user_id,
+            device_id: identity.device_id,
+            created: Instant::now(),
+            last_seen: Instant::now(),
+            role: identity.role,
+        };
+        self.store_session(sess);
+        self.attach_stream(session, ctrl, &token).await;
     }
-    s.storeSession(sess)
-    s.attachStream(session, ctrl, sess)
 }
 ```
 
@@ -424,17 +435,17 @@ func (s *Server) handleWebTransport(w http.ResponseWriter, r *http.Request) {
 ## File Structure
 
 ```
-internal/auth/
-├── auth.go            // Authenticator interface, Identity struct, ModeXxx constants
-├── none.go            // ModeNone implementation (prints security warning)
-├── token.go           // ModeToken implementation (Bearer header, not URL params)
-├── password.go        // ModePassword implementation + argon2id hashing
-├── pin.go             // ModePIN implementation + /pair handler + CSRF tokens
-├── devices.go         // Paired device storage, per-device revocation
-├── oauth_stub.go      // ModeOAuth stub (build tag: oauth)
-├── sessions.go        // Session cache, TTL, lookup (crypto/rand tokens only)
-├── ratelimit.go       // Per-IP attempt limiting + global PIN attempt counter
-└── auth_test.go
+featherdesk-auth/src/
+├── lib.rs             // Authenticator trait, Identity struct, Mode enum
+├── none.rs            // Mode::None implementation (prints security warning)
+├── token.rs           // Mode::Token implementation (bearer in control-stream msg, not URL params)
+├── password.rs        // Mode::Password implementation + argon2id hashing
+├── pin.rs             // Mode::Pin implementation + /pair handler + CSRF tokens
+├── devices.rs         // Paired device storage, per-device revocation
+├── oauth_stub.rs      // Mode::OAuth stub (cargo feature: oauth)
+├── sessions.rs        // Session cache, TTL, lookup (CSPRNG tokens only)
+├── ratelimit.rs       // Per-IP attempt limiting + global PIN attempt counter
+└── tests.rs
 ```
 
 ---
@@ -447,15 +458,15 @@ internal/auth/
 | Replay attack on token | Session tokens are scoped to TTL -- once expired, must re-auth |
 | Brute-force password | Argon2id (memory-hard), per-IP rate limit (5/min), 60s block on exceed |
 | Brute-force PIN | 8-digit default (100M space), global max 10 attempts per window, exponential backoff after 3 |
-| Session fixation | Server generates session_token via `crypto/rand.Read()` (CSPRNG mandatory), never accepts client-supplied |
+| Session fixation | Server generates session_token via a CSPRNG (`getrandom` / `OsRng`) (CSPRNG mandatory), never accepts client-supplied |
 | CSRF on /pair | CSRF token issued on GET `/pair`, required on POST. Cookie: `SameSite=Strict; Secure; HttpOnly` |
 | Cleartext over HTTP | TLS 1.3 mandatory (enforced by QUIC; weaker negotiation is impossible), AEAD ciphers only (see [`MODULE_SERVER.md`](./MODULE_SERVER.md)) |
-| Token generation | **All** random tokens (auth, session, device) MUST use `crypto/rand.Read()`. `math/rand` is prohibited. |
+| Token generation | **All** random tokens (auth, session, device) MUST use a CSPRNG (`getrandom` / `OsRng`). Non-cryptographic RNGs (e.g. `rand::thread_rng` for non-crypto use) are prohibited for tokens. |
 | TLS key storage | Self-signed cert private key cached with mode 0600 (Unix) / restrictive ACL (Windows). Permissions verified on startup. |
 | Device revocation | `DELETE /devices/{device_id}` admin endpoint (requires controller auth) revokes individual paired devices. CLI: `featherdesk revoke-device <id>`. |
 | Metrics endpoint | If `metrics.bind` is not a loopback address, server prints a security warning at startup. Consider adding bearer token auth to scrape endpoint for exposed deployments. |
 | Viewer-only attacks | `require_auth_for_view = true` by default. Unauthenticated viewing requires explicit opt-in. |
-| Controller takeover | `allow_takeover = false` by default. When enabled, displaced controller receives QUIC application close code 4410 (`CloseControllerTakeover`). |
+| Controller takeover | `allow_takeover = false` by default. When enabled, displaced controller receives QUIC application close code 4410 (`close::CONTROLLER_TAKEOVER`). |
 | Origin hijacking | `allow_origin = ""` by default (same-origin only). Wildcard `"*"` requires explicit opt-in. |
 
 ---

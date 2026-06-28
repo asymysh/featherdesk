@@ -35,91 +35,92 @@ connected clients, tightly synchronized to the video. It follows the same
   loss-resilient), otherwise **raw PCM** passthrough (zero dependency).
 
 There is **no subprocess** (`pw-cat`/`parec` are gone) and **no custom logger**
-(every constructor takes `*slog.Logger`).
+(logging is via the `tracing` crate).
 
 ---
 
 ## Public Interface
 
-```go
-package audio
+```rust
+// crate: featherdesk-audio
 
 // AudioCapturer captures the host system-audio output. Per-OS add-ons implement
 // it (wasapi / sck_audio / pipewire). Zero-by-default: absent ⇒ no audio.
-type AudioCapturer interface {
-    // Chunks delivers timestamped PCM chunks. Each chunk is exactly one frame
-    // (FrameSamples * Channels * 2 bytes, S16LE interleaved). The channel is
-    // closed when the capturer is stopped. Stamped AT CAPTURE (see "Realtime").
-    Chunks() <-chan PCMChunk
+// Cleanup is RAII (Drop) — no Close().
+//
+// The channel does NOT cross the add-on ABI: the add-on exposes next_chunk()
+// and the host's audio task pumps it into a tokio::sync::mpsc channel (see
+// CENTRAL "Pluggable Architecture"). Each chunk is exactly one frame
+// (frame_samples * channels * 2 bytes, S16LE interleaved), stamped AT CAPTURE
+// (see "Realtime").
+pub trait AudioCapturer {
+    /// next_chunk delivers the next timestamped PCM chunk. Ok(Some(chunk)) = a
+    /// chunk; Ok(None) = the capturer has stopped (end of stream); Err = failure.
+    fn next_chunk(&mut self) -> Result<Option<PcmChunk>, AudioError>;
 
-    // Format reports the negotiated capture format (rate/channels). The add-on
-    // resamples/mixes the OS device format to this canonical format so the
-    // encoder + client see one shape regardless of OS.
-    Format() Format
-
-    Close() error
+    /// format reports the negotiated capture format (rate/channels). The add-on
+    /// resamples/mixes the OS device format to this canonical format so the
+    /// encoder + client see one shape regardless of OS.
+    fn format(&self) -> Format;
 }
 
 // AudioEncoder turns PCM chunks into wire payloads. Selected by loaded add-on:
-//   opus  → internal/audio/opus/  (libopus, BSD, in-process CGo)
+//   opus  → internal/audio/opus/  (libopus, BSD, in-process Rust FFI)
 //   <none>→ PCM passthrough (built-in; copies the S16LE bytes through)
-type AudioEncoder interface {
-    // Encode encodes one PCM chunk into one wire payload (Opus packet or raw
-    // PCM). Returns the payload (borrowed from a sync.Pool — copy before reuse)
-    // and the codec string for the config handshake on first call.
-    Encode(chunk PCMChunk) (payload []byte, err error)
+// Cleanup is RAII (Drop) — no Close().
+pub trait AudioEncoder {
+    /// encode encodes one PCM chunk into one wire payload (Opus packet or raw
+    /// PCM). The returned RVec<u8> is owned (ownership transfers — deterministic
+    /// drop across the add-on ABI). The codec string for the config handshake is
+    /// reported by codec().
+    fn encode(&mut self, chunk: &PcmChunk) -> Result<RVec<u8>, AudioError>;
 
-    // Codec returns the codec advertised in the config message, e.g.
-    // "opus" or "pcm/s16le". The client configures its decoder from this.
-    Codec() string
-
-    Close() error
+    /// codec returns the codec advertised in the config message, e.g.
+    /// "opus" or "pcm/s16le". The client configures its decoder from this.
+    fn codec(&self) -> &str;
 }
 
-// PCMChunk is one fixed-size PCM frame stamped at CAPTURE time.
-type PCMChunk struct {
-    Data      []byte // FrameSamples*Channels*2 bytes, S16LE interleaved, channel
-                     // order per Format.Layout (stereo / 5.1 / 7.1)
-    Timestamp uint64 // CLOCK_MONOTONIC ns, sampled in the capture read loop —
-                     // NOT when the pipeline consumes it (see "Realtime").
+// PcmChunk is one fixed-size PCM frame stamped at CAPTURE time.
+pub struct PcmChunk {
+    pub data: RVec<u8>,    // frame_samples*channels*2 bytes, S16LE interleaved, channel
+                           // order per Format.layout (stereo / 5.1 / 7.1)
+    pub timestamp_ns: u64, // CLOCK_MONOTONIC ns, sampled in the capture read loop —
+                           // NOT when the pipeline consumes it (see "Realtime").
 }
 
 // Format is the canonical capture/transport format.
-type Format struct {
-    SampleRate int          // 48000 (fixed for v1)
-    Channels   int          // 1..8 — follows the host output (stereo, 5.1=6, 7.1=8)
-    Layout     ChannelLayout // channel order/positions (see "Surround")
+pub struct Format {
+    pub sample_rate: u32,       // 48000 (fixed for v1)
+    pub channels: u8,           // 1..8 — follows the host output (stereo, 5.1=6, 7.1=8)
+    pub layout: ChannelLayout,  // channel order/positions (see "Surround")
 }
 
 // ChannelLayout names the speaker mapping so the client renders/downmixes
 // correctly. Order is the standard Vorbis/Opus mapping-family-1 order.
-type ChannelLayout uint8
-const (
-    LayoutMono     ChannelLayout = iota // 1ch: M
-    LayoutStereo                        // 2ch: L R
-    Layout5_1                           // 6ch: L R C LFE Ls Rs
-    Layout7_1                           // 8ch: L R C LFE Rls Rrs Ls Rs
-)
-
-// AudioConfig is the core config (from [audio] TOML). Per-add-on device
-// selection lives in [addon_module_<id>].
-type AudioConfig struct {
-    FrameMs  int          // 10 or 20 (default 20). Drives PCMChunk size + Opus frame.
-    Channels string       // "auto" (follow host, ≤7.1) | "stereo" (force downmix at host)
-    Logger   *slog.Logger
+#[repr(u8)]
+pub enum ChannelLayout {
+    Mono = 0,    // 1ch: M
+    Stereo,      // 2ch: L R
+    Layout5_1,   // 6ch: L R C LFE Ls Rs
+    Layout7_1,   // 8ch: L R C LFE Rls Rrs Ls Rs
 }
 
-const (
-    DefaultSampleRate = 48000
-    DefaultChannels   = 2   // stereo when the host is stereo (the common case)
-    MaxChannels       = 8   // 7.1
-    DefaultFrameMs    = 20  // 20 ms @ 48 kHz = 960 samples/chan
-    // ChunkBytes(ch) for a 20 ms frame = 960 * ch * 2B (e.g. stereo 3840, 5.1 11520).
-)
+// AudioConfig is the core config (from [audio] TOML). Per-add-on device
+// selection lives in [addon_module_<id>]. Logging is via the `tracing` crate.
+pub struct AudioConfig {
+    pub frame_ms: u32,    // 10 or 20 (default 20). Drives PcmChunk size + Opus frame.
+    pub channels: String, // "auto" (follow host, ≤7.1) | "stereo" (force downmix at host)
+}
+
+pub const DEFAULT_SAMPLE_RATE: u32 = 48000;
+pub const DEFAULT_CHANNELS: u8 = 2;   // stereo when the host is stereo (the common case)
+pub const MAX_CHANNELS: u8 = 8;       // 7.1
+pub const DEFAULT_FRAME_MS: u32 = 20; // 20 ms @ 48 kHz = 960 samples/chan
+// chunk_bytes(ch) for a 20 ms frame = 960 * ch * 2B (e.g. stereo 3840, 5.1 11520).
 ```
 
 > **Why the encoder is in-process (not a subprocess):** unlike x264 (GPL, isolated
-> in ffmpeg), libopus is **BSD-licensed**, so it links directly via CGo with no
+> in ffmpeg), libopus is **BSD-licensed**, so it links directly via Rust FFI with no
 > license concern and no subprocess latency. PCM passthrough needs no library.
 
 ---
@@ -144,8 +145,8 @@ capture — same process, same clock.
 
 | Codec | Add-on ID | Library | Bandwidth | On loss | Wire type |
 |-------|-----------|---------|-----------|---------|-----------|
-| **Opus** (default when loaded) | `opus` | libopus (BSD, CGo) | ~96–128 kbps VBR | **FEC + PLC conceals** dropped packets | `FrameTypeAudioOpus` (0x08) |
-| **Raw PCM** (built-in fallback) | — | none | 1.536 Mbps | a lost packet = a ~20 ms gap (no concealment) | `FrameTypeAudioPCM` (0x04) |
+| **Opus** (default when loaded) | `opus` | libopus (BSD, Rust FFI) | ~96–128 kbps VBR | **FEC + PLC conceals** dropped packets | `frame_type::AUDIO_OPUS` (0x08) |
+| **Raw PCM** (built-in fallback) | — | none | 1.536 Mbps | a lost packet = a ~20 ms gap (no concealment) | `frame_type::AUDIO_PCM` (0x04) |
 
 - The server advertises the codec in the **`config`** control-stream message
   (`audioCodec`, `audioSampleRate`, `audioChannels`, `audioLayout`) — the client
@@ -193,18 +194,18 @@ Audio is a **media** datagram type (S→C, unreliable). Like video it carries th
 control" datagram classes.
 
 ```
-DatagramHeader (8 bytes): Version=1, Type=AudioOpus(0x08)|AudioPCM(0x04),
+DatagramHeader (8 bytes): Version=1, Type=AUDIO_OPUS(0x08)|AUDIO_PCM(0x04),
                           FrameID = audio Sequence, FragIndex = 0 | LAST
 FrameHeader (22 bytes):   Version=1, Type=<same>,
                           Sequence  = server audio counter (independent of video),
-                          Timestamp = PCMChunk.Timestamp (CLOCK_MONOTONIC ns, at capture),
+                          Timestamp = PcmChunk.timestamp_ns (CLOCK_MONOTONIC ns, at capture),
                           Width=0, Height=0 (UNUSED — params are in `config`),
-                          PayloadSize = len(payload)
+                          PayloadSize = payload.len()
 Payload:                  Opus packet (≈100–300 B) OR raw S16LE PCM (3840 B @ 20 ms)
 ```
 
 - The **server** assigns the audio `Sequence` (independent counter from video) in
-  `BroadcastAudio`. PCM at 20 ms is ~3840 B → fragmented (~4 datagrams) like video;
+  `broadcast_audio`. PCM at 20 ms is ~3840 B → fragmented (~4 datagrams) like video;
   Opus is one datagram.
 - Audio params (codec, sample rate, channels) are in the `config` message, not the
   per-frame header (resolves old R-AUD-10).
@@ -242,12 +243,12 @@ capture clock (the pre-audio behavior) — there is no master to slave to.
 [capture add-on read loop]
     → read one frame of PCM from the OS device (WASAPI/SCK/PipeWire)
     → normalize to 48k/stereo/S16LE
-    → ts = clock.Now()                 // CLOCK_MONOTONIC ns, AT CAPTURE
-    → PCMChunk{Data, Timestamp:ts}
-    → Chunks() channel  (SMALL: ~3–4 frames ≈ 60–80 ms, drop-OLDEST on overflow)
-[pipeline audio loop]  (separate goroutine, see MODULE_PIPELINE)
-    → enc.Encode(chunk)  → codecType, payload   (Opus packet or PCM passthrough)
-    → server.BroadcastAudio(codecType, payload, chunk.Timestamp)   // assigns audio Sequence
+    → ts = clock.now()                 // CLOCK_MONOTONIC ns, AT CAPTURE
+    → PcmChunk { data, timestamp_ns: ts }
+    → host pumps next_chunk() into mpsc channel  (SMALL: ~3–4 frames ≈ 60–80 ms, drop-OLDEST on overflow)
+[pipeline audio loop]  (separate task, see MODULE_PIPELINE)
+    → enc.encode(chunk)  → payload   (Opus packet or PCM passthrough)
+    → server.broadcast_audio(codec_type, payload, chunk.timestamp_ns)   // assigns audio Sequence
 [server] → fragment if needed → datagrams (sent IMMEDIATELY, not batched)
 ```
 
@@ -311,7 +312,7 @@ audio silently disabled (matches the gamepad/input "needs an add-on" pattern).
 | R-AUD-01 | race in `pw-cat reconnect()` | N/A — no subprocess; native capture add-ons own their lifecycle |
 | R-AUD-02/03 | SIGTERM/backoff for `pw-cat` | N/A — no subprocess |
 | R-AUD-04 | extract to `pkg/audio` | Core `AudioCapturer`/`AudioEncoder` in `pkg/audio`; impls in `internal/audio/<id>/` |
-| R-AUD-05 | custom logger | **Done** — `*slog.Logger` everywhere |
+| R-AUD-05 | custom logger | **Done** — `tracing` everywhere |
 | R-AUD-06 | Opus "future" | **Now the default codec** (`opus` add-on); PCM is the fallback |
 | R-AUD-07 | configurable buffer | Buffers are small + fixed for realtime; `frame_ms` is the only knob |
 | R-AUD-09 | ALSA/Pulse fallback | Lives inside the `pipewire` Linux add-on |

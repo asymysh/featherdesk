@@ -21,7 +21,7 @@ Video, AMF).
 | `libgbm` | MIT | Generic Buffer Management |
 | `libEGL` / `libGL` | proprietary headers, vendor implementations | Ships with GPU driver |
 | Linux DRM kernel subsystem | GPL-2 (kernel) | Userspace calls via ioctl — no GPL contamination of userspace binary |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 The DRM kernel module is GPL-2 but exposes a stable ioctl ABI to userspace.
 Calling that ABI from userspace doesn't pull GPL into our binary, in the same
@@ -67,7 +67,7 @@ After that, the binary runs as a regular user.
 ### Shared library build
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-kms_egl.so ./internal/capture/kms
+cargo build --release -p featherdesk-addon-kms_egl   # cdylib → featherdesk-addon-kms_egl.so
 ```
 
 ### Runtime dependencies
@@ -79,30 +79,37 @@ go build -buildmode=c-shared -o featherdesk-addon-kms_egl.so ./internal/capture/
 
 All universally available on every Linux distro.
 
-### CGo configuration
+### FFI configuration
 
-```go
-/*
-#cgo pkg-config: libdrm gbm egl gl
-#cgo LDFLAGS: -ldl
+The bindings are generated with `bindgen` in `build.rs`, which probes the same
+libraries via `pkg-config` and wraps the C headers:
 
-#include <xf86drm.h>
-#include <xf86drmMode.h>
-#include <gbm.h>
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <drm/drm_fourcc.h>
-*/
-import "C"
+```rust
+// build.rs — link libdrm/gbm/egl/gl (+ -ldl) and generate bindings
+pkg_config::Config::new().probe("libdrm").unwrap();
+pkg_config::Config::new().probe("gbm").unwrap();
+pkg_config::Config::new().probe("egl").unwrap();
+pkg_config::Config::new().probe("gl").unwrap();
+println!("cargo:rustc-link-lib=dl");
+
+bindgen::Builder::default()
+    .header_contents("wrapper.h", "
+        #include <xf86drm.h>
+        #include <xf86drmMode.h>
+        #include <gbm.h>
+        #include <EGL/egl.h>
+        #include <EGL/eglext.h>
+        #include <GLES2/gl2.h>
+        #include <GLES2/gl2ext.h>
+        #include <unistd.h>
+        #include <fcntl.h>
+        #include <drm/drm_fourcc.h>")
+    .generate().unwrap();
 ```
 
 ---
 
-## CGo Implementation Sketch
+## FFI Implementation Sketch
 
 ```c
 // 1. Find a DRM card with active output
@@ -149,12 +156,12 @@ glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
 ## Two Output Paths
 
-The capturer implements both `Capturer` interfaces from `pkg/capture`:
+The capturer implements both `Capturer` traits from `capture`:
 
-| Interface | Method | Output | Use case |
+| Trait | Method | Output | Use case |
 |-----------|--------|--------|----------|
-| `Capturer` (CPU readback) | `NextFrame()` | RGBA `[]byte` | Pair with SW encoder (OpenH264) |
-| `SurfaceCapturer` (zero-copy) | `NextSurface()` | `FBInfo{ DMAFD, W, H, Stride, Format, Modifier, Timestamp }` | Pair with HW encoder (libva, NVENC, Vulkan) |
+| `Capturer` (CPU readback) | `next_frame()` | RGBA `Vec<u8>` | Pair with SW encoder (OpenH264) |
+| `SurfaceCapturer` (zero-copy) | `next_surface()` | `FbInfo { dma_fd, w, h, stride, format, modifier, timestamp }` | Pair with HW encoder (libva, NVENC, Vulkan) |
 
 The pipeline picks the right method based on what encoder add-on is paired.
 
@@ -192,15 +199,15 @@ client-side cursor compositing approach.
 
 ## Probe & Selection
 
-```go
-//go:build linux
+```rust
+// crate: featherdesk-addon-kms_egl  (cfg(target_os = "linux"))
 
-func ProbeKMSEGL() (*KMSEGLCapabilities, error) {
+fn probe_kms_egl() -> Result<KmsEglCapabilities, CaptureError> {
     // 1. Check CAP_SYS_ADMIN / root via geteuid + check effective caps
     // 2. Enumerate /dev/dri/card* devices
     // 3. For each: open, set UNIVERSAL_PLANES, find primary plane with fb_id
     // 4. Get CRTC dimensions + refresh rate
-    // 5. Return per-display dimensions or ErrNoUsableCard
+    // 5. Return per-display dimensions or CaptureError::NoUsableCard
 }
 ```
 
@@ -217,19 +224,19 @@ None?                                 → fatal: no capture add-on configured
 
 ```
 internal/capture/kms/
-├── kms.go                      // KMSCapturer struct, NewKMSCapturer
-├── drm.go                      // DRM card discovery, plane enumeration
-├── egl.go                      // EGL context, DMA-BUF import, glReadPixels
-├── kms_cgo.go                  // CGo binding (built into the add-on shared library)
-├── cursor.go                   // Cursor plane capture
-├── probe.go                    // ProbeKMSEGL()
-├── drm_integration_test.go     // integration test (//go:build integration)
-├── egl_integration_test.go     // integration test (//go:build integration)
-└── kms_integration_test.go     // integration test (//go:build integration)
+├── kms.rs                      // KmsCapturer struct, KmsCapturer::new
+├── drm.rs                      // DRM card discovery, plane enumeration
+├── egl.rs                      // EGL context, DMA-BUF import, glReadPixels
+├── ffi.rs                      // Rust FFI bindings (built into the add-on cdylib)
+├── cursor.rs                   // Cursor plane capture
+├── probe.rs                    // probe_kms_egl()
+├── tests/drm.rs                // integration test (cfg(feature = "integration"))
+├── tests/egl.rs                // integration test (cfg(feature = "integration"))
+└── tests/kms.rs                // integration test (cfg(feature = "integration"))
 ```
 
-Already exists in working form at `internal/capture/{drm,egl,kms,cursor}.go` —
-refactor moves it into the `kms_egl` add-on shared library without changing the
+Already exists in working form at `internal/capture/{drm,egl,kms,cursor}.rs` —
+refactor moves it into the `kms_egl` add-on cdylib without changing the
 underlying code.
 
 ---
@@ -263,10 +270,10 @@ Skip when:
 
 ## Status
 
-✅ **Working** — implemented today in `internal/capture/{drm,egl,kms,cursor}.go`,
+✅ **Working** — implemented today in `internal/capture/{drm,egl,kms,cursor}.rs`,
 verified on Intel HD 630 at 2560×1440 with measured performance numbers. The
 refactor moves it to `internal/capture/kms/`, built as the `kms_egl` add-on
-shared library without changing the underlying capture logic.
+cdylib without changing the underlying capture logic.
 
 ---
 
@@ -285,7 +292,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). KMS+EGL captures at native display resolution; the pipeline handles scaling.
+This add-on implements `stream::ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). KMS+EGL captures at native display resolution; the pipeline handles scaling.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|

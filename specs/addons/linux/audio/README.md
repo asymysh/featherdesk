@@ -29,5 +29,5 @@ Each add-on — capture, encoder, the `pipewire` audio backend, and the `opus`
 codec — is a standalone shared library you drop into the add-ons directory. Build
 one with, e.g.:
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-pipewire.so ./internal/audio/pipewire
+cargo build --release -p featherdesk-addon-pipewire   # cdylib → featherdesk-addon-pipewire.so
 ```

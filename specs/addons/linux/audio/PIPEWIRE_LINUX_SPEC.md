@@ -7,11 +7,11 @@
 
 The `pipewire` add-on is the Linux **system-audio capture** backend for the core
 Audio module ([`../../../media/MODULE_AUDIO.md`](../../../media/MODULE_AUDIO.md)).
-It implements `audio.AudioCapturer` by capturing the default sink's **monitor**
+It implements `AudioCapturer` by capturing the default sink's **monitor**
 via **native libpipewire** — no `pw-cat`/`parec` subprocess, no driver.
 
 > This replaces the old Linux-only `pw-cat` subprocess design. libpipewire is
-> linked directly (CGo); capture runs in-process on the PipeWire thread loop.
+> linked directly (Rust FFI); capture runs in-process on the PipeWire thread loop.
 
 ---
 
@@ -88,7 +88,7 @@ PipeWire is default on modern distros, but the add-on degrades natively:
 |-----------|---------|
 | libpipewire-0.3 | MIT |
 | libpulse (fallback) | LGPL-2.1 (dynamically linked) |
-| Our CGo binding | MIT |
+| Our Rust FFI binding | MIT |
 
 No driver. `snd-aloop` (ALSA fallback) is a stock kernel module.
 
@@ -97,7 +97,7 @@ No driver. `snd-aloop` (ALSA fallback) is a stock kernel module.
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-pipewire.so ./internal/audio/pipewire
+cargo build --release -p featherdesk-addon-pipewire   # cdylib → featherdesk-addon-pipewire.so
 ```
 
 Links `libpipewire-0.3` into the add-on library (plus `libpulse` when the Pulse
@@ -108,16 +108,16 @@ loop in-process; no external tools.
 
 ## Constructor & Probe
 
-```go
-// internal/audio/pipewire/pipewire_linux.go  (//go:build linux)
+```rust
+// crate: featherdesk-addon-pipewire  (cfg(target_os = "linux"))
 
-// Probe returns true if libpipewire initializes and a default sink monitor (or a
+// probe returns true if libpipewire initializes and a default sink monitor (or a
 // Pulse/ALSA fallback) is reachable. Side-effect-free.
-func Probe() bool
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-// New connects the capture stream at [audio] frame_ms and starts the thread
+// new connects the capture stream at [audio] frame_ms and starts the thread
 // loop. Honors [addon_module_pipewire] target (default = default sink monitor).
-func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
+fn new(&self, cfg: AudioConfig) -> Result<Box<dyn AudioCapturer>, AudioError>;
 ```
 
 ---
@@ -137,10 +137,10 @@ func New(cfg audio.AudioConfig) (audio.AudioCapturer, error)
 
 ```
 internal/audio/pipewire/
-├── pipewire_linux.go     // AudioCapturer impl, CGo (built into the add-on shared library)
-├── pulse_fallback.go     // libpulse monitor capture (no subprocess)
-├── resample.go           // graph format → 48k/stereo/S16LE
-└── pipewire_test.go
+├── pipewire.rs           // AudioCapturer impl, Rust FFI (built into the add-on cdylib)
+├── pulse_fallback.rs     // libpulse monitor capture (no subprocess)
+├── resample.rs           // graph format → 48k/stereo/S16LE
+└── tests.rs
 ```
 
 ---

@@ -215,7 +215,7 @@ When multiple add-ons are loaded, the pipeline picks at runtime based on:
 1. `[capture] force_addon` / `[encode] force_addon` in TOML (forces a specific add-on by ID)
 2. Probe order (HEVC HW > H.264 HW > x264 SW > VT SW > OpenH264 SW)
 3. Hardware presence (NVENC only fires if NVIDIA GPU present, etc.)
-4. `ErrFallbackToSoftware` from HW encoder triggers SW fallback for the session
+4. `StreamError::FallbackToSoftware` from HW encoder triggers SW fallback for the session
 
 Per-add-on tuning lives in `[addon_module_<id>]` TOML sections, not
 in code. See [`./core/MODULE_CONFIG.md`](./core/MODULE_CONFIG.md).
@@ -263,11 +263,14 @@ sheet with complete interface contracts, internal architecture, and refactoring 
 > **Encoder, capture, and input implementations are not core modules.**
 > Every encoder (OpenH264 (FFI), x264 subprocess, VideoToolbox, libva, NVENC, AMF,
 > QSV, MediaFoundation HW), every capture backend (KMS+EGL, NvFBC, SCK, DXGI DD),
-> and every input injector (interception, uinput, cgevent, win_touch, vigem,
-> gcvirtual) is an add-on shared library under
+> and the **override** input injectors (interception, uinput, win_touch, vigem,
+> gcvirtual) are add-on shared libraries under
 > [`specs/addons/{platform}/{capture,encoders,input,audio}/`](./addons/).
-> The default binary ships with zero of each — users drop in what they need.
-> A binary with no input add-on is **view-only**. See the index below.
+> The default binary ships with zero capture/encoder add-ons — users drop in what
+> they need. **kb/mouse works by default** via the in-core `enigo` injector (all
+> OS); the binary is view-only only when `[input] enabled = false`. (macOS kb/mouse
+> is the in-core `enigo`/CGEvent default — there is no separate `cgevent` add-on;
+> gamepad still needs `vigem`/`gcvirtual`/`uinput`.) See the index below.
 
 > **Clipboard + File Transfer are core (not add-ons).** Their OS surface is small
 > (clipboard APIs, file I/O) and they are baseline remote-desktop expectations,
@@ -447,19 +450,22 @@ for the full rationale, recommended combinations, and headless install flow.
 
 ### Input add-on specs
 
-Implement `input.KeyMouseInjector` / `input.TouchInjector` / `input.GamepadInjector`.
-The core decodes the binary input protocol; the add-on performs OS injection.
-No input add-on loaded → **view-only** binary. See
+Implement `input::KeyMouseInjector` / `input::TouchInjector` / `input::GamepadInjector`.
+The core decodes the binary input protocol; **kb/mouse is injected by the in-core
+`enigo` default on every OS** — the add-ons below are optional **overrides/extensions**
+(kernel-level kb/mouse, touch, or gamepad). The binary is view-only only when
+`[input] enabled = false`. See
 [`MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md).
 
 | Add-on | Add-on ID | OS | Spec | Capability | Status |
 |--------|-----------|----|----- |------------|--------|
-| Interception | `interception` | Windows | [`windows/input/INTERCEPTION_WINDOWS_SPEC.md`](./addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md) | KeyMouse (filter driver + SendSAS, injects below UIPI) | 📋 Specced |
+| Interception | `interception` | Windows | [`windows/input/INTERCEPTION_WINDOWS_SPEC.md`](./addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md) | KeyMouse **override** (kernel filter driver + SendSAS, below UIPI; ⚠️ anti-cheat risk) | 📋 Specced |
 | Win Touch | `win_touch` | Windows | [`windows/input/WIN_TOUCH_WINDOWS_SPEC.md`](./addons/windows/input/WIN_TOUCH_WINDOWS_SPEC.md) | Touch (`InjectTouchInput`; pen→touch with pressure) | 📋 Specced |
 | ViGEmBus | `vigem` | Windows | [`windows/input/VIGEM_WINDOWS_SPEC.md`](./addons/windows/input/VIGEM_WINDOWS_SPEC.md) | Gamepad (Xbox 360 virtual controller; signed driver install) | 📋 Specced |
-| uinput | `uinput` | Linux | [`linux/input/UINPUT_LINUX_SPEC.md`](./addons/linux/input/UINPUT_LINUX_SPEC.md) | KeyMouse + Gamepad (kernel `/dev/uinput`, X11+Wayland) | 📋 Specced |
-| CGEvent | `cgevent` | macOS | [`macos/input/CGEVENT_MACOS_SPEC.md`](./addons/macos/input/CGEVENT_MACOS_SPEC.md) | KeyMouse (`CGEventPost`; needs Accessibility) | 📋 Specced |
+| uinput | `uinput` | Linux | [`linux/input/UINPUT_LINUX_SPEC.md`](./addons/linux/input/UINPUT_LINUX_SPEC.md) | KeyMouse **override** + Gamepad (kernel `/dev/uinput`, X11+Wayland) | 📋 Specced |
 | GCVirtual | `gcvirtual` | macOS | [`macos/input/GCVIRTUAL_MACOS_SPEC.md`](./addons/macos/input/GCVIRTUAL_MACOS_SPEC.md) | Gamepad (GCVirtualController, macOS 14+; GameController-framework apps only) | 📋 Specced |
+
+(macOS kb/mouse is the in-core `enigo`/CGEvent default — no separate `cgevent` add-on.)
 
 ### Where to register a new add-on
 
@@ -467,7 +473,7 @@ When adding a new vendor-specific encoder:
 1. Write the spec at `specs/addons/{platform}/encoders/{HW,SW}/{NAME}_SPEC.md`
 2. Add a row to the relevant table in **this** section of CENTRAL_SPEC.md
 3. Add a row to the compat matrix in `specs/PLATFORM_COMPAT.md`
-4. Build as a c-shared library from `internal/encode/{name}/`
+4. Build as a cdylib from `internal/encode/{name}/`
 5. Wire the runtime probe order in `MODULE_PIPELINE.md`
 
 ---
@@ -774,7 +780,7 @@ pub trait HardwareEncoder {
 // The pipeline pairs encoder output with the frame's metadata before broadcasting.
 // EncodedFrame lives in the featherdesk-stream crate — shared by SW and HW paths.
 pub struct EncodedFrame {
-    pub data: RVec<u8>,    // Contiguous Annex B (start codes retained), owned. NOT
+    pub data: bytes::Bytes,// Contiguous Annex B (start codes retained), host-side. NOT
                            // split per-NAL. The server prepends the 22-byte
                            // FrameHeader and moves `data` into the per-session
                            // frame-granular out-queue (a task fragments it later).
@@ -782,7 +788,7 @@ pub struct EncodedFrame {
     pub height: u16,
     pub timestamp_ns: u64, // CLOCK_MONOTONIC ns, carried through from capture
     pub keyframe: bool,    // true if this access unit is a keyframe
-    pub codec_type: u8,    // FrameType::VideoH264 or VideoHevc
+    pub codec_type: u8,    // frame_type::VIDEO_H264 or VideoHevc
 }
 
 // The server is a concrete type the pipeline holds via a handle/Arc.
@@ -790,10 +796,10 @@ impl Server {
     // Assembles one access unit and fans it out to per-session queues.
     // The server assigns the video Sequence and uses f.keyframe (encoder-set)
     // for IDR caching + the bootstrap stream.
-    pub async fn broadcast(&self, codec_type: u8, f: EncodedFrame) { /* … */ }
+    pub fn broadcast(&self, codec_type: u8, f: EncodedFrame) { /* … */ } // non-blocking: pushes into per-session queues
     // Already-encoded audio (Opus packet or raw PCM). codec_type = AudioOpus(8)
     // | AudioPcm(4); server assigns the independent audio Sequence + FrameHeader.
-    pub async fn broadcast_audio(&self, codec_type: u8, payload: RVec<u8>, capture_ts_ns: u64) { /* … */ }
+    pub fn broadcast_audio(&self, codec_type: u8, payload: bytes::Bytes, capture_ts_ns: u64) { /* … */ }
 }
 ```
 
@@ -832,13 +838,13 @@ impl Server {
  capture    encode      hwencode     server      config     transport
 ```
 
-> Import edges documented:
-> - `encode -> capture` (Converter takes `*capture.Frame`)
-> - `hwencode -> capture` (`SurfaceHandle = capture.FBInfo`)
-> - `encode, hwencode, capture -> stream` (Params, error sentinels)
-> - `transport -> protocol` (transport references `protocol.Close*`; protocol is the sole owner of the close codes)
+> Crate dependency edges documented:
+> - `encode -> capture` (Converter takes `&capture::Frame`)
+> - `hwencode -> capture` (`SurfaceHandle` / `capture::FbInfo`)
+> - `encode, hwencode, capture -> stream` (Params, `StreamError`)
+> - `transport -> protocol` (transport references `protocol::close::*`; protocol is the sole owner of the close codes)
 > - `server -> {transport, protocol, auth, stream, input, clipboard, filetransfer}` (transport surface + types + auth gate + input dispatch + clipboard/file-transfer stream dispatch)
-> - `pipeline -> transport` (the pipeline builds the QUIC transport via `transport.New` and hands it to the server)
+> - `pipeline -> transport` (the pipeline builds the QUIC transport via `transport::Transport::new` and hands it to the server)
 > - `input` injection add-ons -> `input` core (KeyMouseInjector/TouchInjector + HID table)
 > - `clipboard` is a core leaf (per-OS files); `filetransfer -> transport` (its `ServeStream` takes a `transport.Stream`); `server` calls both
 > - No cycles. `stream` is the shared leaf. `pipeline` is the sole orchestrator.
@@ -940,7 +946,7 @@ client opens control stream (tag 0x00) + auths
 ```
 capturer detects resolution change (monitor hotplug / mode switch)
   → NextFrame/NextSurface returns new Width/Height (pipeline detects by comparison)
-  → pipeline: applyParams on the frame loop — reconfigure/rebuild encoder, call input.Resize(w,h)
+  → pipeline: apply_params on the frame loop — reconfigure/rebuild encoder, call input.Resize(w,h)
   → server: send a fresh {"type":"config"} message (new dims) + force a keyframe
   → client: reconfigure VideoDecoder, update input coordinate scaling
 ```
@@ -998,7 +1004,8 @@ featherdesk/                         # Cargo workspace
     ├── capture/{kms_egl, nvfbc}(Linux)  {sck}(macOS)  {dxgi_dd}(Windows)
     ├── encode/{openh264, x264}  {libva, amf_rocm}(Linux)  {nvenc}  {qsv, mf_hw, amf}(Windows)  {vt}(macOS: vt_sw|vt_hw)
     ├── audio/{pipewire}(Linux)  {wasapi}(Windows)  {sck_audio}(macOS)  {opus}(codec, all)
-    └── input/{uinput}(Linux)  {interception, vigem, win_touch}(Windows)  {cgevent, gcvirtual}(macOS)
+    └── input/{uinput}(Linux)  {interception, vigem, win_touch}(Windows)  {gcvirtual}(macOS)
+          # kb/mouse default = in-core `enigo`; these add-ons are overrides/extensions
 ```
 
 > The old Go `internal/logger/` is **gone** — replaced by the `tracing` crate.

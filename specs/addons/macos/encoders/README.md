@@ -30,9 +30,9 @@ specs/addons/macos/encoders/
 Build each add-on as its own shared library and drop the set into the add-ons
 directory — there is no combined host build. For example:
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-openh264.dylib ./internal/encode/openh264
-go build -buildmode=c-shared -tags vt_hw -o featherdesk-addon-vt_hw.dylib ./internal/encode/vt
-go build -buildmode=c-shared -tags vt_sw -o featherdesk-addon-vt_sw.dylib ./internal/encode/vt
+cargo build --release -p featherdesk-addon-openh264   # cdylib  featherdesk-addon-openh264.dylib
+cargo build --release -p featherdesk-addon-vt_hw   # cdylib  featherdesk-addon-vt_hw.dylib
+cargo build --release -p featherdesk-addon-vt_sw   # cdylib  featherdesk-addon-vt_sw.dylib
 ```
 `vt_sw` and `vt_hw` are two variants of the same `./internal/encode/vt` package,
 selected by an **internal build tag at the add-on's own build step** (not host
@@ -49,7 +49,7 @@ Intel integrated, or Apple Silicon, exposes its hardware encoder through the
 same `VTCompressionSession` API.
 
 The add-on split (`vt_sw` vs `vt_hw`) is purely for packaging modularity — they
-share the same CGo file, just different configuration at runtime.
+share the same Rust FFI module, just different configuration at runtime.
 
 ---
 

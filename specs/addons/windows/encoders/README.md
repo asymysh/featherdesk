@@ -31,10 +31,10 @@ encoders/
 | Intel-only (low power) | `openh264` + `qsv` | `featherdesk-addon-{openh264,qsv}.dll` |
 | Maximum flexibility | `openh264,x264,mf_hw,nvenc,amf,qsv` | drop in all six; probe selects best at runtime |
 
-Build each add-on separately as a C-shared library and drop the resulting `.dll`
+Build each add-on separately as a cdylib and drop the resulting `.dll`
 into the add-ons directory; stack any combination by dropping in more libraries:
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-mf_hw.dll ./internal/encode/mf
+cargo build --release -p featherdesk-addon-mf_hw   # cdylib  featherdesk-addon-mf_hw.dll
 ```
 
 ---
@@ -48,7 +48,7 @@ Both produce H.264 — same codec, different implementations, different licenses
 | License | BSD-2-Clause | GPL-2.0+ (isolated via ffmpeg subprocess) |
 | 1080p P50 @ 12T | 7.4ms | **3.3ms** (2.2× faster) |
 | 1440p P50 @ 12T | 13.4ms | **5.8ms** (2.3× faster) |
-| Integration | CGo in-process | ffmpeg subprocess + pipe |
+| Integration | Rust FFI in-process | ffmpeg subprocess + pipe |
 | Royalties | Cisco pays MPEG-LA | None — patent expired in most regions |
 | Deployment | Commercial-safe | Home / OSS / accept GPL on subprocess |
 | Bundled | ~1 MB DLL | Requires ffmpeg in PATH or bundled |
@@ -78,7 +78,7 @@ Microsoft API that routes to vendor MFTs:
 | Intel Sandy Bridge+ | Quick Sync (via Intel's MFT) |
 | Qualcomm Snapdragon | Qualcomm HW encoder |
 
-One CGo binding (`mf_hw`), one binary, all vendors covered. The trade-off is
+One Rust FFI binding (`mf_hw`), one binary, all vendors covered. The trade-off is
 ~2–4ms higher latency than vendor-direct SDKs (NVENC / AMF / QSV) and lack of
 vendor-specific features (REF_FRAMES_INVALIDATION, AMF PA).
 
@@ -98,7 +98,7 @@ When multiple encoders are loaded, the pipeline probes in this order:
 3. QSV available?                            → use QSV
 4. MF HW (any vendor MFT registered)?        → use MF HW (cross-vendor default)
 5. x264 available (ffmpeg in PATH)?          → use x264 subprocess (x264 add-on only)
-6. OpenH264 CGo?                             → universal SW fallback
+6. OpenH264 (Rust FFI)?                      → universal SW fallback
 7. None?                                     → fatal: no encoder add-on installed
 ```
 

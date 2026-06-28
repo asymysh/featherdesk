@@ -3,25 +3,36 @@
 ## Overview
 
 The Input module is the core, transport-neutral layer that decodes client input
-events from the wire and dispatches them to a loaded **input add-on** which
-performs the actual OS-level injection.
+events from the wire and dispatches them to an injector which performs the actual
+OS-level injection.
 
-Like capture and encode, **input injection is zero-by-default**: the core binary
-ships with NO input add-on and is therefore **view-only** until an injection
-add-on is loaded. The core module owns:
+Unlike capture and encode, **keyboard/mouse injection is built into core, not
+zero-by-default**: the default injector is **`enigo`** (crate `featherdesk-input`),
+a single cross-platform user-space library (SendInput on Windows, XTEST/libei on
+Linux, CGEvent on macOS). It was chosen because it is **anti-cheat-safe like
+Sunshine**. So a default binary is **NOT view-only for kb/mouse** — it injects via
+`enigo` whenever `[input] enabled = true`. Setting `enabled = false` still forces
+view-only. The core module owns:
 
 - The **binary input wire format** (decode + validation).
 - The platform-neutral **event types** (`KeyEvent`, `PointerEvent`, etc.).
 - The **HID-usage keycode** contract (physical-key neutrality across clients).
-- The **dispatcher** that routes decoded events to the active injector add-on(s).
+- The built-in **`enigo` keyboard/mouse injector** (the default `KeyMouseInjector`).
+- The **dispatcher** that routes decoded events to the active injector(s) — the
+  built-in `enigo` default or an opt-in add-on that overrides it.
 
-Each platform's injection mechanism is a separate add-on shared library:
+The kernel-level injectors are **opt-in add-ons that OVERRIDE the `enigo`
+default** when loaded — they beat it on latency or reach but carry tradeoffs:
 
 | Platform | Add-on | Add-on ID | Mechanism | Spec |
 |----------|--------|-----------|-----------|------|
-| Windows | Interception | `interception` | Interception filter driver + `SendSAS` for Ctrl+Alt+Del | [`../addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md) |
-| Linux | uinput | `uinput` | Kernel `/dev/uinput` (X11 + Wayland; keyboard, mouse, scroll) | [`../addons/linux/input/UINPUT_LINUX_SPEC.md`](../addons/linux/input/UINPUT_LINUX_SPEC.md) |
-| macOS | CGEvent | `cgevent` | `CGEventPost` to `kCGHIDEventTap` | [`../addons/macos/input/CGEVENT_MACOS_SPEC.md`](../addons/macos/input/CGEVENT_MACOS_SPEC.md) |
+| Windows | Interception | `interception` | Interception filter driver + `SendSAS` for Ctrl+Alt+Del — faster than `enigo`, but ⚠️ **anti-cheat-risk** (opt-in) | [`../addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md`](../addons/windows/input/INTERCEPTION_WINDOWS_SPEC.md) |
+| Linux | uinput | `uinput` | Kernel `/dev/uinput` (X11 + Wayland + console; keyboard, mouse, scroll, force-feedback) | [`../addons/linux/input/UINPUT_LINUX_SPEC.md`](../addons/linux/input/UINPUT_LINUX_SPEC.md) |
+
+> **macOS `cgevent` add-on is retired/folded.** The former `cgevent` add-on is now
+> **subsumed by the `enigo` default** — `enigo`'s macOS backend **IS** CGEvent, so
+> there is no separate macOS kb/mouse add-on. On macOS the built-in `enigo`
+> injector is the only kb/mouse path (and still needs Accessibility permission).
 
 Touch is a **separate** add-on (Windows only for now):
 
@@ -33,7 +44,8 @@ Touch is a **separate** add-on (Windows only for now):
 > client is downgraded to touch (pressure preserved where the touch add-on
 > supports it; tilt/twist dropped). Gamepad **is** a v1 browser feature via the
 > Gamepad API — see [`MODULE_GAMEPAD.md`](MODULE_GAMEPAD.md) (virtual-controller
-> injection is per-OS add-ons).
+> injection is per-OS add-ons: `vigem` on Windows, `gcvirtual` on macOS, `uinput`
+> on Linux). **`enigo` does NOT cover gamepad** (nor touch), so both remain add-ons.
 
 ---
 
@@ -60,21 +72,23 @@ bidirectional stream, StreamType tag `0x01`).** See [`MODULE_TRANSPORT.md`](../c
 
 Because the input stream is a QUIC byte stream, the core provides a single
 helper that reads exactly one length-prefixed record, used by both the server's
-input-reader goroutine and (symmetrically) the client's InputAck reader:
+input-reader task and (symmetrically) the client's InputAck reader:
 
-```go
-// ReadFrame reads one [u16 RecLen LE][record] message from r and returns the
-// record bytes (without the length prefix). It bounds RecLen at maxRecLen
-// (4 KiB) and returns io.ErrUnexpectedEOF on a short read, so a single Dispatch
-// call always receives one complete, self-delimited record.
-func ReadFrame(r io.Reader) (record []byte, err error)
+```rust
+// crate: featherdesk-input
 
-// WriteFrame writes [u16 RecLen][record]. Used by the client to send records
-// and by the server to send InputAck.
-func WriteFrame(w io.Writer, record []byte) error
+/// read_frame reads one [u16 RecLen LE][record] message from `r` and returns the
+/// record bytes (without the length prefix). It bounds RecLen at MAX_REC_LEN
+/// (4 KiB) and returns Err(InputError::UnexpectedEof) on a short read, so a single
+/// dispatch call always receives one complete, self-delimited record.
+pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, InputError>;
+
+/// write_frame writes [u16 RecLen][record]. Used by the client to send records
+/// and by the server to send InputAck.
+pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, record: &[u8]) -> Result<(), InputError>;
 ```
 
-`Dispatcher.Dispatch` operates on the record bytes that `ReadFrame` returns — it
+`Dispatcher::dispatch` operates on the record bytes that `read_frame` returns — it
 never sees the length prefix. This is what makes input records unambiguous on the
 byte stream (fixes the "records have no delimiter on a QUIC byte stream" hazard).
 
@@ -201,148 +215,169 @@ inject.
 
 ## Public Interface
 
-```go
-package input
+```rust
+// crate: featherdesk-input
 
-// Event is the decoded, platform-neutral input event (tagged union).
-// The protocol layer produces these from binary records; the dispatcher
-// routes them to the active injector add-on(s).
-type Event struct {
-    Kind EventKind
-    Seq  uint32
+/// Event is the decoded, platform-neutral input event (tagged union).
+/// The protocol layer produces these from binary records; the dispatcher
+/// routes them to the active injector (the built-in `enigo` default or an add-on).
+pub struct Event {
+    pub kind: EventKind,
+    pub seq: u32,
 
     // Keyboard
-    HidUsage   uint16 // USB HID usage ID
-    Down       bool
-    Autorepeat bool   // Flags bit1 — informational; injectors typically ignore
+    pub hid_usage: u16, // USB HID usage ID
+    pub down: bool,
+    pub autorepeat: bool, // Flags bit1 — informational; injectors typically ignore
 
     // Mouse
-    X, Y     int    // absolute, stream-pixel space
-    Dx, Dy   int    // relative (move) or scroll delta
-    Button   uint8  // W3C button index
-    ScrollUnit uint8 // 0=pixel, 1=line, 2=page
+    pub x: i32,
+    pub y: i32, // absolute, stream-pixel space
+    pub dx: i32,
+    pub dy: i32, // relative (move) or scroll delta
+    pub button: u8, // W3C button index
+    pub scroll_unit: u8, // 0=pixel, 1=line, 2=page
 
     // Touch
-    Contacts []TouchContact
+    pub contacts: Vec<TouchContact>,
 
     // Gamepad (types 0x40-0x4F; see MODULE_GAMEPAD.md for GamepadState layout).
     // The dispatcher decodes the record and routes it to the GamepadInjector.
-    GamepadIndex uint8         // controller slot 0..3
-    Gamepad      *GamepadState // non-nil for KindGamepadState; carries buttons/axes
-    GamepadID    string        // KindGamepadConnect only — browser gamepad id
+    pub gamepad_index: u8,             // controller slot 0..3
+    pub gamepad: Option<GamepadState>, // Some for KindGamepadState; carries buttons/axes
+    pub gamepad_id: String,            // KindGamepadConnect only — browser gamepad id
 }
 
-type EventKind uint8
-const (
-    KindKeyDownUp EventKind = iota
-    KindPointerAbs
-    KindPointerRel
-    KindButton
-    KindScroll
-    KindTouch
-    KindGamepadState      // 0x40 — full button/axis snapshot
-    KindGamepadConnect    // 0x41
-    KindGamepadDisconnect // 0x42
-)
-
-type TouchContact struct {
-    PointerID uint16
-    Phase     uint8 // 0=down, 1=move, 2=up, 3=cancel
-    X, Y      int   // absolute, stream-pixel space
+#[repr(u8)]
+pub enum EventKind {
+    KeyDownUp = 0,
+    PointerAbs,
+    PointerRel,
+    Button,
+    Scroll,
+    Touch,
+    GamepadState,      // 0x40 — full button/axis snapshot
+    GamepadConnect,    // 0x41
+    GamepadDisconnect, // 0x42
 }
 
-// KeyMouseInjector is the base contract every keyboard/mouse input add-on
-// implements (interception, uinput, cgevent).
-type KeyMouseInjector interface {
-    // InjectKey injects a key press/release. hidUsage is a USB HID usage ID;
-    // the add-on maps it to the platform keycode (Linux KEY_*, Windows scan
-    // code, macOS virtual key).
-    InjectKey(hidUsage uint16, down bool) error
-
-    // InjectPointerAbs moves the pointer to an absolute stream-pixel position.
-    InjectPointerAbs(x, y int) error
-
-    // InjectPointerRel applies a relative pointer delta (pointer-lock mode).
-    InjectPointerRel(dx, dy int) error
-
-    // InjectButton presses/releases a mouse button (W3C index).
-    InjectButton(button uint8, down bool) error
-
-    // InjectScroll scrolls. unit is 0=pixel, 1=line, 2=page.
-    InjectScroll(dx, dy int, unit uint8) error
-
-    // Resize updates the absolute-coordinate range to match new stream dims.
-    Resize(width, height int) error
-
-    Close() error
+pub struct TouchContact {
+    pub pointer_id: u16,
+    pub phase: u8, // 0=down, 1=move, 2=up, 3=cancel
+    pub x: i32,
+    pub y: i32, // absolute, stream-pixel space
 }
 
-// TouchInjector is the optional contract a touch add-on (win_touch)
-// implements. The dispatcher type-asserts for it; touch events are dropped
-// if no TouchInjector is loaded.
-type TouchInjector interface {
-    InjectTouch(contacts []TouchContact) error
-    Close() error
+/// KeyMouseInjector is the base contract every keyboard/mouse injector implements.
+/// The **built-in `enigo` default** implements it (core, all OS); the opt-in
+/// kernel add-ons (`interception`, `uinput`) implement it too and override the
+/// default when loaded. Cleanup is RAII (`Drop`) — no Close().
+pub trait KeyMouseInjector {
+    /// inject_key injects a key press/release. hid_usage is a USB HID usage ID;
+    /// the injector maps it to the platform keycode (Linux KEY_*, Windows scan
+    /// code, macOS virtual key).
+    fn inject_key(&mut self, hid_usage: u16, down: bool) -> Result<(), InputError>;
+
+    /// inject_pointer_abs moves the pointer to an absolute stream-pixel position.
+    fn inject_pointer_abs(&mut self, x: i32, y: i32) -> Result<(), InputError>;
+
+    /// inject_pointer_rel applies a relative pointer delta (pointer-lock mode).
+    fn inject_pointer_rel(&mut self, dx: i32, dy: i32) -> Result<(), InputError>;
+
+    /// inject_button presses/releases a mouse button (W3C index).
+    fn inject_button(&mut self, button: u8, down: bool) -> Result<(), InputError>;
+
+    /// inject_scroll scrolls. unit is 0=pixel, 1=line, 2=page.
+    fn inject_scroll(&mut self, dx: i32, dy: i32, unit: u8) -> Result<(), InputError>;
+
+    /// resize updates the absolute-coordinate range to match new stream dims.
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), InputError>;
 }
 
-// SecureAttention is an optional capability implemented by Windows input
-// add-ons (interception) for delivering Ctrl+Alt+Del via SendSAS. The
-// dispatcher type-asserts the active KeyMouseInjector for this and routes
-// the locked CAD chord here instead of injecting three KeyEvents. On
-// platforms / add-ons that don't implement it, the chord is dropped with
-// a one-time warning.
-type SecureAttention interface {
-    // SendSAS triggers the Secure Attention Sequence (Ctrl+Alt+Del).
-    // Returns ErrSASUnavailable when the policy / privileges don't permit it.
-    SendSAS() error
+/// TouchInjector is the optional contract a touch add-on (win_touch) implements.
+/// The dispatcher checks for it at runtime; touch events are dropped if no
+/// TouchInjector is loaded. Cleanup is RAII (`Drop`) — no Close().
+pub trait TouchInjector {
+    fn inject_touch(&mut self, contacts: &[TouchContact]) -> Result<(), InputError>;
 }
 
-var ErrSASUnavailable = errors.New("input: SAS unavailable (policy or privilege)")
-
-// InjectorConfig is passed to an add-on's constructor.
-type InjectorConfig struct {
-    Width  int          // initial stream width (absolute-coordinate range)
-    Height int          // initial stream height
-    Logger *slog.Logger
+/// SecureAttention is an optional capability implemented by Windows input
+/// add-ons (interception) for delivering Ctrl+Alt+Del via SendSAS. The
+/// dispatcher checks the active KeyMouseInjector for this and routes the locked
+/// CAD chord here instead of injecting three KeyEvents. On platforms / injectors
+/// that don't implement it (including the `enigo` default), the chord is dropped
+/// with a one-time warning.
+pub trait SecureAttention {
+    /// send_sas triggers the Secure Attention Sequence (Ctrl+Alt+Del).
+    /// Returns Err(InputError::SasUnavailable) when policy / privileges don't permit it.
+    fn send_sas(&mut self) -> Result<(), InputError>;
 }
 
-// Dispatcher decodes binary input records and routes Events to injectors.
-// Owned by the server; created with whichever add-ons were loaded.
-type Dispatcher interface {
-    // Dispatch decodes one binary input record (the record bytes from
-    // input.ReadFrame — no length prefix) and injects it. Returns the record
-    // Seq (for InputAck) and any injection error. Performs validation +
-    // clamping before injection, and records each key/button down in a
-    // pressed-set for ReleaseAll.
-    Dispatch(frame []byte) (seq uint32, err error)
-
-    // Resize propagates a resolution change to all injectors.
-    Resize(width, height int) error
-
-    // ReleaseAll injects an up-event for every key/button/touch currently held,
-    // then clears the pressed-set. The Dispatcher OWNS held-input state — the
-    // server calls ReleaseAll when the controller slot is released or seized
-    // (takeover), and Close calls it too. This prevents a disconnect mid-keypress
-    // from leaving a key stuck down on the host. Injector add-ons may ALSO
-    // release defensively in their own Close, but the authoritative owner is the
-    // Dispatcher (it alone knows the cross-injector pressed-set).
-    ReleaseAll() error
-
-    Close() error
+/// InputError — stable error enum for the input crate (replaces Go sentinels).
+#[derive(thiserror::Error, Debug)]
+pub enum InputError {
+    #[error("input: SAS unavailable (policy or privilege)")]
+    SasUnavailable, // was ErrSASUnavailable
+    #[error("input: unexpected EOF on input stream")]
+    UnexpectedEof,
+    #[error("input: malformed record")]
+    Malformed,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
-// NewDispatcher builds the routing layer from whichever injectors the
-// pipeline probed. km is required (view-only mode passes a no-op stub
-// or omits the dispatcher entirely); touch + gamepad are optional.
-func NewDispatcher(km KeyMouseInjector, touch TouchInjector, gp GamepadInjector,
-    cfg InjectorConfig) (Dispatcher, error)
+/// InjectorConfig is passed to an injector's constructor. (Logging is via the
+/// global `tracing` subscriber — no per-injector logger handle.)
+pub struct InjectorConfig {
+    pub width: u32,  // initial stream width (absolute-coordinate range)
+    pub height: u32, // initial stream height
+}
+
+/// Dispatcher decodes binary input records and routes Events to injectors.
+/// Owned by the server; created with the built-in `enigo` default (or an add-on
+/// that overrode it) plus whichever optional add-ons were loaded.
+/// Cleanup is RAII (`Drop`) — Drop releases all held input (see release_all).
+pub trait Dispatcher {
+    /// dispatch decodes one binary input record (the record bytes from
+    /// `read_frame` — no length prefix) and injects it. Returns the record
+    /// Seq (for InputAck) and any injection error. Performs validation +
+    /// clamping before injection, and records each key/button down in a
+    /// pressed-set for release_all.
+    fn dispatch(&mut self, frame: &[u8]) -> Result<u32, InputError>;
+
+    /// resize propagates a resolution change to all injectors.
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), InputError>;
+
+    /// release_all injects an up-event for every key/button/touch currently held,
+    /// then clears the pressed-set. The Dispatcher OWNS held-input state — the
+    /// server calls release_all when the controller slot is released or seized
+    /// (takeover), and `Drop` calls it too. This prevents a disconnect mid-keypress
+    /// from leaving a key stuck down on the host. Injectors may ALSO release
+    /// defensively in their own `Drop`, but the authoritative owner is the
+    /// Dispatcher (it alone knows the cross-injector pressed-set).
+    fn release_all(&mut self) -> Result<(), InputError>;
+}
+
+/// new_dispatcher builds the routing layer. `km` is the keyboard/mouse injector —
+/// the **built-in `enigo` default** unless a kernel add-on (interception/uinput)
+/// overrode it; in view-only mode (`[input] enabled = false`) the server passes a
+/// no-op stub or omits the dispatcher entirely. `touch` + `gp` are optional add-ons.
+pub fn new_dispatcher(
+    km: Box<dyn KeyMouseInjector>,
+    touch: Option<Box<dyn TouchInjector>>,
+    gp: Option<Box<dyn GamepadInjector>>,
+    cfg: InjectorConfig,
+) -> Result<Box<dyn Dispatcher>, InputError>;
 ```
 
-**Capability composition.** On Windows, the `interception` add-on provides a
-`KeyMouseInjector` and the `win_touch` add-on provides a `TouchInjector` — two
-independent add-ons. On Linux, `uinput` provides `KeyMouseInjector` (and may
-later add `TouchInjector`). The dispatcher holds one `KeyMouseInjector` and an
-optional `TouchInjector`, routing by event kind.
+**Capability composition.** By default the dispatcher's `KeyMouseInjector` is the
+built-in **`enigo`** injector (core, all OS). On Windows, loading the
+`interception` add-on **overrides** that default with the kernel injector, and the
+`win_touch` add-on adds a `TouchInjector` — independent add-ons. On Linux, loading
+`uinput` overrides the `enigo` default for `KeyMouseInjector` (and may later add a
+`TouchInjector`). On macOS the `enigo` default (CGEvent backend) is the only
+kb/mouse path. The dispatcher holds one `KeyMouseInjector` and an optional
+`TouchInjector`, routing by event kind.
 
 **InputAck / latency.** After injecting, the **server** (not this module) sends a
 13-byte `InputAck` (type 14) — `[Type=14][Seq u32][RecvTimestampNs u64]`,
@@ -364,16 +399,20 @@ Keyboard/Keypad usage IDs** (HID Usage Tables §10), not browser key strings.
 
 - **Client** maps `KeyboardEvent.code` (physical position, e.g. `"KeyA"`) to a
   HID usage (`0x04`) via a static table. This is layout-independent.
-- **Add-on** maps HID usage → platform keycode:
+- **Injector** maps HID usage → platform keycode (the built-in `enigo` default
+  and every add-on do this from the same table):
   - Linux: HID → `KEY_*` (input-event-codes.h).
-  - Windows: HID → scan code (set 1), injected via the Interception driver.
-  - macOS: HID → virtual key code, via `CGEventCreateKeyboardEvent`.
+  - Windows: HID → scan code (set 1), injected via SendInput (`enigo`) or the
+    Interception driver (add-on).
+  - macOS: HID → virtual key code, via `CGEventCreateKeyboardEvent` (`enigo`'s
+    CGEvent backend).
 
-The HID usage table is **shared core code** (`internal/input/hid/hid.go`), so
-every add-on translates from the same neutral source. (Both the core dispatcher
-and all add-ons live under `internal/input/...`; the table is a single-direction
-import, no cycle. Public re-export to `pkg/input` is deferred until the native
-client lands and needs to share the table.) This is the platform-neutral input
+The HID usage table is **shared core code** (module `hid` in the
+`featherdesk-input` crate), so the built-in `enigo` injector and every add-on
+translate from the same neutral source. (The core dispatcher, the `enigo` default,
+and the add-on crates all depend on `featherdesk-input`; the table is a
+single-direction dependency, no cycle. A public re-export for the v2 native client
+is deferred until it lands and needs to share the table.) This is the platform-neutral input
 encoding required by
 [`MODULE_NATIVE_CLIENT.md`](../client/MODULE_NATIVE_CLIENT.md) — the v2 native client
 sends the same HID usages (byte-identical records).
@@ -388,8 +427,9 @@ editing, numpad, lock/system, media keys, international keys.
 
 Ctrl+Alt+Del cannot be injected as ordinary keys — Windows intercepts the
 hardware combination in winlogon/csrss before any filter driver. The core
-dispatcher detects the chord and routes it to `SecureAttention.SendSAS()`
-on the active `KeyMouseInjector` (only `interception` implements this).
+dispatcher detects the chord and routes it to `SecureAttention::send_sas()`
+on the active `KeyMouseInjector` (only `interception` implements this — the
+`enigo` default does not).
 
 **Algorithm (pinned):**
 
@@ -399,10 +439,10 @@ on the active `KeyMouseInjector` (only `interception` implements this).
    `(LCtrl || RCtrl) && (LAlt || RAlt)`.
 3. If true, this is the SAS chord:
    a. **Swallow** the Delete down record entirely (do not inject as a key).
-   b. Type-assert the injector for `SecureAttention`. If absent: log
+   b. Downcast the injector to `SecureAttention`. If absent: log
       `"CAD chord ignored: no SecureAttention capability"` once and drop.
-   c. Call `SendSAS()`. On `ErrSASUnavailable` (policy/privilege), log a clear
-      warning once and drop. **Do not** inject the chord as ordinary keys
+   c. Call `send_sas()`. On `Err(InputError::SasUnavailable)` (policy/privilege),
+      log a clear warning once and drop. **Do not** inject the chord as ordinary keys
       as a fallback — that would deliver Ctrl+Alt+Del to the foreground app
       instead of the system, which is misleading.
    d. Also swallow the subsequent Delete **up** record so the OS's key state
@@ -422,25 +462,25 @@ normal key (their `SecureAttention` is absent, step 3b drops with a log).
 Input stream binary record (client → server)
     → byte[1] (Type):
         0x50            → reserved for future webcam — current binaries drop
-        0x01-0x4F       → input.Dispatcher.Dispatch(frame):
+        0x01-0x4F       → Dispatcher::dispatch(frame):
             decode record (zero-alloc, bounds-checked)
             validate: Version==1, len matches Type, ranges in bounds
             clamp:    X∈[0,W-1], Y∈[0,H-1]
             route by kind:
-                KindKeyDownUp  → keyMouse.InjectKey(hid, down)
-                KindPointerAbs → keyMouse.InjectPointerAbs(x, y)
-                KindPointerRel → keyMouse.InjectPointerRel(dx, dy)
-                KindButton     → keyMouse.InjectButton(btn, down)
-                KindScroll     → keyMouse.InjectScroll(dx, dy, unit)
-                KindTouch      → if touch != nil { touch.InjectTouch(contacts) }
-                                 else drop
-                KindGamepadState      → if gp != nil { gp.Update(state) } else drop
-                KindGamepadConnect    → if gp != nil { gp.Connect(index, id) } else drop
-                KindGamepadDisconnect → if gp != nil { gp.Disconnect(index) } else drop
+                EventKind::KeyDownUp  → key_mouse.inject_key(hid, down)
+                EventKind::PointerAbs → key_mouse.inject_pointer_abs(x, y)
+                EventKind::PointerRel → key_mouse.inject_pointer_rel(dx, dy)
+                EventKind::Button     → key_mouse.inject_button(btn, down)
+                EventKind::Scroll     → key_mouse.inject_scroll(dx, dy, unit)
+                EventKind::Touch      → if let Some(t) = &mut touch { t.inject_touch(contacts) }
+                                        else drop
+                EventKind::GamepadState      → if let Some(g) = &mut gp { g.update(state) } else drop
+                EventKind::GamepadConnect    → if let Some(g) = &mut gp { g.connect(index, id) } else drop
+                EventKind::GamepadDisconnect → if let Some(g) = &mut gp { g.disconnect(index) } else drop
                   // Co-op: a `player` client's reader remaps the record's local
                   // gamepad index → that client's assigned global slot before
                   // injection (server-side; see MODULE_GAMEPAD/MODULE_SERVER).
-            track pressed keys/buttons (for ReleaseAll on controller change/Close)
+            track pressed keys/buttons (for release_all on controller change/Drop)
             return Seq
     → server emits InputAck(Seq, recvTimestamp) as [u16 RecLen=13][13-byte ack]
 ```
@@ -453,8 +493,9 @@ and [`MODULE_AUTH.md`](../core/MODULE_AUTH.md)).
 
 ## Security Considerations
 
-- **Injection privilege.** An input add-on can inject ANY OS input event. Only
-  the designated **controller** client reaches the dispatcher; viewers never do.
+- **Injection privilege.** An injector (the built-in `enigo` default or a kernel
+  add-on) can inject ANY OS input event. Only the designated **controller** client
+  reaches the dispatcher; viewers never do.
 - **Binary bounds.** Every record is validated to an exact length and field
   range before injection. A frame that is not exactly the expected size for its
   Type is rejected before any work — fixed-size = inherently bounded (no
@@ -468,10 +509,13 @@ and [`MODULE_AUTH.md`](../core/MODULE_AUTH.md)).
   policy can reject dangerous usages. The Secure Attention Sequence
   (Ctrl+Alt+Del) is never synthesizable from ordinary input on Windows — it is
   handled out-of-band by the `interception` add-on via `SendSAS` (see its spec).
-- **Privilege of the injector.** On Windows, injection into elevated apps
-  requires the Interception driver (kernel-level), avoiding the UIPI silent-fail
-  that `SendInput` suffers. On Linux, `/dev/uinput` needs `input`-group/root. On
-  macOS, Accessibility permission is mandatory and checked at startup.
+- **Privilege of the injector.** On Windows, the default `enigo` injector uses
+  `SendInput`, which suffers UIPI silent-fail against elevated apps; injecting into
+  elevated apps requires the opt-in Interception add-on (kernel-level), which
+  avoids it (and carries the anti-cheat-risk warning). On Linux, the `enigo`
+  default uses XTEST/libei in user space; the opt-in `uinput` add-on needs
+  `input`-group/root but reaches Wayland + console. On macOS, the `enigo` default
+  (CGEvent backend) requires Accessibility permission, mandatory and checked at startup.
 
 ---
 
@@ -483,7 +527,9 @@ its own `[addon_module_<id>]` section. See
 
 ```toml
 [input]
-enabled        = true     # master switch; false = view-only even if an add-on is loaded
+enabled        = true     # master switch; true = kb/mouse via the built-in `enigo`
+                          # default (or a kernel add-on if one overrode it).
+                          # false = view-only, even with the `enigo` default or an add-on.
 relative_mouse = true     # honor pointer-lock relative-mode frames
 ```
 
@@ -497,7 +543,7 @@ relative_mouse = true     # honor pointer-lock relative-mode frames
 | Unit | HID-usage → platform keycode mapping (all keys, unknown usage) | No |
 | Unit | Coordinate clamping, scroll unit conversion | No |
 | Unit | InputBatch unpacking (nested records, unknown inner Type skip) | No |
-| Integration | Full inject lifecycle per add-on (create, inject, close) | Yes (per OS) |
+| Integration | Full inject lifecycle (built-in `enigo` + each add-on: create, inject, drop) | Yes (per OS) |
 | Integration | Linux: events visible in `evtest` | Yes (/dev/uinput) |
 | Integration | Windows: events visible to a raw-input test app + Ctrl+Alt+Del via SendSAS | Yes |
 | Mock | Fake injector for dispatcher/server tests | No |
@@ -527,6 +573,8 @@ input now matches that discipline.
 ## Status
 
 📋 **Specced — un-deferred.** Replaces the previous Linux-only JSON design. The
-core module (wire decode + dispatcher + HID table) plus at least one injection
-add-on must be implemented for a binary to accept input. Default binary remains
-view-only.
+core module (wire decode + dispatcher + HID table + the built-in `enigo`
+kb/mouse injector) is all a default binary needs to accept keyboard/mouse input —
+it is **NOT view-only by default** (only `[input] enabled = false` forces that).
+The kernel add-ons (interception/uinput), touch (win_touch), and gamepad
+(vigem/gcvirtual/uinput) remain opt-in overrides/extensions.

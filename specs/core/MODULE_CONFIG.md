@@ -18,7 +18,7 @@ no config file") for context.
 | Comments | Operations team can annotate the file without breaking it |
 | Sections | Natural grouping (`[server]`, `[log]`, `[metrics]`) maps to module boundaries |
 | Single canonical encoding | No YAML-style anchor footguns, no JSON trailing-comma errors |
-| Go support | `github.com/BurntSushi/toml` is BSD-3, mature, zero-allocation parse |
+| Rust support | the `toml` crate (+ `serde`) is mature, MIT/Apache, with strict `deny_unknown_fields` parsing |
 
 ---
 
@@ -30,7 +30,7 @@ no config file") for context.
    - Linux: `/etc/featherdesk/config.toml`, then `$XDG_CONFIG_HOME/featherdesk/config.toml`, then `./featherdesk.toml`
    - macOS: `/Library/Application Support/featherdesk/config.toml`, then `~/Library/Application Support/featherdesk/config.toml`, then `./featherdesk.toml`
    - Windows: `%PROGRAMDATA%\featherdesk\config.toml`, then `%APPDATA%\featherdesk\config.toml`, then `.\featherdesk.toml`
-2. Read the file. Parse into typed Go struct.
+2. Read the file. Parse into typed Rust struct (serde `Deserialize`).
 3. Validate. Reject unknown keys (strict mode — typo guard).
 4. Apply defaults for any section that's absent.
 5. Bind subsystems with the parsed config.
@@ -465,8 +465,10 @@ enable_sas      = true # allow Ctrl+Alt+Del via SendSAS (requires SYSTEM service
 device_name   = "FeatherDesk Virtual Input"
 hi_res_scroll = true   # use REL_WHEEL_HI_RES if the kernel supports it
 
-[addon_module_cgevent]
-# macOS CGEventPost. Requires Accessibility permission.
+[input.macos]
+# macOS kb/mouse is the in-core `enigo` default (CGEventPost) — NOT a separate
+# add-on, so this is a core [input] subsection, not [addon_module_*].
+# Requires Accessibility permission.
 prompt_accessibility = true   # auto-open the Accessibility pane if not trusted
 
 [addon_module_win_touch]
@@ -528,9 +530,9 @@ target = ""                # "" = auto-detect the default sink's .monitor
 | `log.output` | `stderr` / `stdout` / writable file path | startup error |
 | `metrics.port` | 1–65535, must differ from the port in `server.bind` | startup error |
 | `capture.mode` | `auto` or `forced` | startup error |
-| `capture.force_addon` | required if `mode = "forced"` (phase A); must name a loaded add-on ID (phase B, in `pipeline.New` after the add-ons dir is scanned) | startup error |
+| `capture.force_addon` | required if `mode = "forced"` (phase A); must name a loaded add-on ID (phase B, in `pipeline::new` after the add-ons dir is scanned) | startup error |
 | `encode.mode` | `auto` or `forced` | startup error |
-| `encode.force_addon` | required if `mode = "forced"` (phase A); must name a loaded add-on ID (phase B, in `pipeline.New` after the add-ons dir is scanned) | startup error |
+| `encode.force_addon` | required if `mode = "forced"` (phase A); must name a loaded add-on ID (phase B, in `pipeline::new` after the add-ons dir is scanned) | startup error |
 | `encode.cursor.mode` | `separate` or `embedded` | startup error |
 | `stream.fps` | 1–240 | startup error |
 | `stream.bitrate_bps` | 0 (QP mode) or ≥ 100000 (100 kbps minimum) | startup error |
@@ -598,87 +600,96 @@ config still in effect.
 
 ## Implementation outline
 
-```go
-package config
+```rust
+// crate: featherdesk-config
+use serde::Deserialize;
+use std::{collections::HashMap, path::Path};
 
-type Config struct {
-    Server    ServerSection    `toml:"server"`
-    Transport TransportSection `toml:"transport"`  // QUIC tunables — MUST exist as a
-                                                    // struct field, else DisallowUnknownFields
-                                                    // rejects every config that has a [transport]
-                                                    // section (the schema ships one by default).
-    Log       LogSection       `toml:"log"`
-    Metrics   MetricsSection   `toml:"metrics"`
-    Capture   CaptureSection   `toml:"capture"`
-    Encode    EncodeSection    `toml:"encode"`
-    Stream    StreamSection    `toml:"stream"`     // dynamic params: width/height/fps/bitrate/qp/hdr
-    Auth      AuthSection      `toml:"auth"`       // mode, password_hash, token, pin_*
-    Reconnect ReconnectSection `toml:"reconnect"`  // cache_ttl_seconds, require_same_auth
-    Input        InputSection        `toml:"input"`         // enabled, relative_mouse
-    Clipboard    ClipboardSection    `toml:"clipboard"`     // enabled, direction, max_bytes, formats
-    FileTransfer FileTransferSection `toml:"filetransfer"`  // enabled, dirs, caps
-    Gamepad      GamepadSection      `toml:"gamepad"`       // enabled, max_controllers, allow_rumble
-    Audio        AudioSection        `toml:"audio"`         // enabled, frame_ms (design locked; impl deferred)
-    // Per-addon sections ([addon_module_*]) are parsed dynamically by each
-    // add-on's init config reader -- they do not appear as static struct fields.
+#[derive(Deserialize)]
+pub struct Config {
+    pub server: ServerSection,
+    pub transport: TransportSection, // QUIC tunables — MUST exist as a struct
+                                     // field, else (with the per-section
+                                     // deny_unknown_fields below) every config
+                                     // carrying a [transport] section is rejected
+                                     // (the schema ships one by default).
+    pub log: LogSection,
+    pub metrics: MetricsSection,
+    pub capture: CaptureSection,
+    pub encode: EncodeSection,
+    pub stream: StreamSection,        // dynamic params: width/height/fps/bitrate/qp/hdr
+    pub auth: AuthSection,            // mode, password_hash, token, pin_*
+    pub reconnect: ReconnectSection,  // cache_ttl_seconds, require_same_auth
+    pub input: InputSection,          // enabled, relative_mouse
+    pub clipboard: ClipboardSection,  // enabled, direction, max_bytes, formats
+    pub filetransfer: FileTransferSection, // enabled, dirs, caps
+    pub gamepad: GamepadSection,      // enabled, max_controllers, allow_rumble
+    pub audio: AudioSection,          // enabled, frame_ms (design locked; impl deferred)
+    // Per-addon sections ([addon_module_*]) are captured RAW here as toml::Value
+    // (serde flatten collects every remaining table) and strict-decoded
+    // per-add-on in phase B — they do not appear as static struct fields.
+    #[serde(flatten)]
+    pub addon_modules: HashMap<String, toml::Value>,
 }
 
-// TransportSection maps the [transport] schema. Duration + byte-size values are
-// written as TOML strings ("15s", "10MiB"), so the fields use small wrapper
-// types implementing encoding.TextUnmarshaler — BurntSushi/toml will not decode
-// "15s" into a bare time.Duration or "10MiB" into an int64 on its own.
-type TransportSection struct {
-    KeepalivePeriod         Duration `toml:"keepalive_period"`
-    MaxIdleTimeout          Duration `toml:"max_idle_timeout"`
-    InitialMaxData          ByteSize `toml:"initial_max_data"`
-    InitialMaxStreamData    ByteSize `toml:"initial_max_stream_data"`
-    MaxStreamsBidi          int      `toml:"max_streams_bidi"`
-    MaxStreamsUni           int      `toml:"max_streams_uni"`
-    EnableDatagrams         bool     `toml:"enable_datagrams"`
-    FragmentReassemblyMs    int      `toml:"fragment_reassembly_ms"`
-    DatagramSendQueueFrames int      `toml:"datagram_send_queue_frames"`
-    AuthDeadline            Duration `toml:"auth_deadline"`
+/// TransportSection maps the [transport] schema. Duration + byte-size values are
+/// written as TOML strings ("15s", "10MiB"), so the fields use small wrapper
+/// types whose Deserialize impl parses the string — serde/`toml` will not decode
+/// "15s" into a bare std::time::Duration or "10MiB" into a u64 on its own.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportSection {
+    pub keepalive_period: Duration,
+    pub max_idle_timeout: Duration,
+    pub initial_max_data: ByteSize,
+    pub initial_max_stream_data: ByteSize,
+    pub max_streams_bidi: u32,
+    pub max_streams_uni: u32,
+    pub enable_datagrams: bool,
+    pub fragment_reassembly_ms: u32,
+    pub datagram_send_queue_frames: u32,
+    pub auth_deadline: Duration,
 }
 
-// Duration and ByteSize wrap their underlying values and implement
-// encoding.TextUnmarshaler ("15s" → time.Duration; "10MiB" → bytes).
-type Duration struct{ time.Duration }
-type ByteSize int64
+/// Duration and ByteSize wrap their underlying values and implement Deserialize
+/// via a string parse ("15s" → std::time::Duration; "10MiB" → bytes).
+pub struct Duration(pub std::time::Duration);
+pub struct ByteSize(pub u64);
 
-// Load does PHASE-A validation only (syntax, defaults, intra-section rules). It
-// captures unknown [addon_module_*] sections RAW (as toml.Primitive) instead of
-// failing on them — their strict decode is deferred to phase B, when the loaded
-// add-on set is known. Errors are clear and actionable (file + line + key).
-func Load(path string) (*Config, error)
+/// load does PHASE-A validation only (syntax, defaults, intra-section rules). It
+/// captures unknown [addon_module_*] sections RAW (as toml::Value) instead of
+/// failing on them — their strict decode is deferred to phase B, when the loaded
+/// add-on set is known. Errors are clear and actionable (file + line + key).
+pub fn load(path: &Path) -> Result<Config, ConfigError> { /* … */ }
 
-// Validate does PHASE-B (load-aware) validation: force_addon must name a loaded
-// add-on ID, and each captured [addon_module_<id>] primitive is strict-decoded
-// iff its add-on is loaded (else silently ignored). Called from pipeline.New
-// after the add-ons directory has been scanned.
-func Validate(cfg *Config, loaded AddonSet) error
+/// validate does PHASE-B (load-aware) validation: force_addon must name a loaded
+/// add-on ID, and each captured [addon_module_<id>] value is strict-decoded iff
+/// its add-on is loaded (else silently ignored). Called from pipeline::new after
+/// the add-ons directory has been scanned.
+pub fn validate(cfg: &Config, loaded: &AddonSet) -> Result<(), ConfigError> { /* … */ }
 
-// Watch sets up signal handling for hot reload. Calls fn on every successful
-// reload. fn must not block — apply changes asynchronously.
-func Watch(ctx context.Context, path string, fn func(*Config)) error
+/// watch sets up signal handling for hot reload. Calls `f` on every successful
+/// reload. `f` must not block — apply changes asynchronously.
+pub fn watch(cancel: CancellationToken, path: &Path, f: impl Fn(&Config) + Send + 'static) -> Result<(), ConfigError> { /* … */ }
 ```
 
-The TOML parser is `github.com/BurntSushi/toml` with strict mode
-(`Decoder.DisallowUnknownFields()`) for known sections; `[addon_module_*]`
-sections are decoded as `toml.Primitive` and strict-validated per-add-on in
-phase B (so a misspelled add-on id in a section name is silently ignored, not
-flagged — verify the add-on logged its loaded config).
+The TOML parser is the `toml` crate (+ `serde`) with strict mode
+(`#[serde(deny_unknown_fields)]`) on each known section; `[addon_module_*]`
+sections are captured as `toml::Value` (via `#[serde(flatten)]`) and
+strict-validated per-add-on in phase B (so a misspelled add-on id in a section
+name is silently ignored, not flagged — verify the add-on logged its loaded config).
 
 ---
 
 ## Status
 
 📋 **Specced — not yet implemented.** Existing code reads CLI flags in
-`cmd/server/main.go`. Migration:
-1. Add `internal/config/` package with the types above.
-2. Replace flag parsing in `main.go` with `config.Load`.
+`src/main.rs`. Migration:
+1. Add the `featherdesk-config` crate with the types above.
+2. Replace flag parsing in `main.rs` with `config::load`.
 3. Update probe + selection logic to honor `capture.force_addon` / `encode.force_addon` when set.
 4. Wire `SIGHUP` handler (Linux/macOS) and Service Control (Windows).
-5. Delete legacy flags from main.go.
+5. Delete legacy flags from `main.rs`.
 
 Implementation lands in the same sprint that wires the first cross-platform
 binary (after the Foundation stage in the implementation plan).

@@ -116,7 +116,7 @@ runtime probe order, and rationale.
      → Config codec string: "avc1.42E01F"
      → Status: 📋 Specced — encoders/HW/LIBVA_LINUX_SPEC.md
 
-3. H.264 software (OpenH264 CGo)
+3. H.264 software (OpenH264, Rust FFI)
      → No GPU present, or GPU has no VA-API encode support
      → Works on every machine including no-GPU ARM/x86 (Graviton etc.)
      → Config codec string: "avc1.42E01F"
@@ -139,24 +139,24 @@ Advance, Velos Media). If HEVC hardware is unavailable, fall straight to H.264.
 | NVIDIA *(via nvidia-vaapi-driver)* | unofficial | ✅ | ✅ | ❌ |
 | No GPU / CPU-only | — | ❌ | ❌ | ❌ → OpenH264 SW |
 
-### Software Fallback — OpenH264 CGo
+### Software Fallback — OpenH264 (Rust FFI)
 
 **Status: ✅ Working. Current default (hardware path not yet built).**
 
-Same CGo file as Windows and macOS. No subprocess. No ffmpeg. BSD-2 licensed.
+Same Rust crate as Windows and macOS. No subprocess. No ffmpeg. BSD-2 licensed.
 
 | Resolution | FPS ceiling | p50 latency | CPU (1 core) |
 |-----------|------------|------------|-------------|
 | 1920×1080 | ~125 fps | ~8ms | ~25% |
 | 2560×1440 | ~65 fps | ~15ms | ~25% |
 
-**File:** `internal/encode/openh264.go`
+**File:** `internal/encode/openh264.rs`
 
-### Hardware Path — libva CGo
+### Hardware Path — libva (Rust FFI)
 
 **Status: 📋 Specced in `encoders/HW/LIBVA_LINUX_SPEC.md`. Not yet built.**
 
-No ffmpeg. `libva` MIT licensed. Direct CGo. Zero-copy path when combined with
+No ffmpeg. `libva` MIT licensed. Direct Rust FFI. Zero-copy path when combined with
 KMS DMA-BUF capture:
 
 ```
@@ -182,8 +182,11 @@ GPU↔CPU copies: **1** (~30KB compressed NALs vs ~36MB raw pixels in software p
 
 ## Audio + Input
 
-**Input is no longer deferred** — it has a full design and a Linux add-on:
-`uinput` (kernel `/dev/uinput`, X11 + Wayland). See
+**Input is no longer deferred.** Keyboard + mouse injection is **built into core**
+via the default `enigo` `KeyMouseInjector` (Linux backend: XTEST/libei), so a
+default binary is not view-only for kb/mouse. The **`uinput` add-on is an opt-in
+override** of that `enigo` default for power users — a kernel-level injector
+(kernel `/dev/uinput`, X11 + Wayland + console, plus gamepad force-feedback). See
 [`input/UINPUT_LINUX_SPEC.md`](./input/UINPUT_LINUX_SPEC.md).
 
 **Audio design is LOCKED, implementation deferred** behind the video trigger.
@@ -234,9 +237,9 @@ Verified results from `review/kms_capture_software_encode/`:
 | Component | Current code | Target (refactor) |
 |-----------|-------------|------------------|
 | Capture | KMS+EGL (working) + X11grab subprocess | `kms_egl` add-on only (X11grab deleted) |
-| SW encode (default) | VP8 libvpx → **OpenH264 CGo** ✅ | `openh264` add-on (BSD, Cisco) |
+| SW encode (default) | VP8 libvpx → **OpenH264 (Rust FFI)** ✅ | `openh264` add-on (BSD, Cisco) |
 | SW encode (opt-in) | — | `x264` subprocess add-on (GPL-isolated, 2× faster) |
-| HW encode | ffmpeg pipe → h264_vaapi (CPU copies) | `libva` add-on (CGo direct, zero-copy, no ffmpeg) |
+| HW encode | ffmpeg pipe → h264_vaapi (CPU copies) | `libva` add-on (Rust FFI direct, zero-copy, no ffmpeg) |
 | HW encode (vendor-specific) | — | `nvenc`, `amf_rocm` add-ons |
 | Protocol | 17-byte header | 22-byte header v1 (versioned, sequenced) |
 

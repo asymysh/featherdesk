@@ -23,7 +23,7 @@ preferred encoder.
 |-----------|---------|-------|
 | AMD AMF SDK | **Apache 2.0** ✅ | Cleanest of the vendor SDK licenses |
 | `libamf` runtime | proprietary AMD | Ships with AMD GPU driver (no separate install) |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 Apache 2.0 is genuinely the friendliest license of the three vendor encoder SDKs
 (NVIDIA's is a custom license, Intel's is MIT, AMD's is Apache 2.0). Headers can
@@ -50,69 +50,75 @@ Probe via `AMFCreateContext` + `InitDX11` + enumerate available codec components
 ## Build & Distribution
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-amf.dll ./internal/encode/amf
+cargo build --release -p featherdesk-addon-amf   # cdylib  featherdesk-addon-amf.dll
 ```
 
-CGo config:
+FFI link config (in `build.rs`):
 
-```go
-/*
-#cgo CFLAGS: -I${SRCDIR}/amf/include
-#cgo LDFLAGS: -lole32 -loleaut32 -ld3d11 -ldxgi
-
-#include <core/Factory.h>
-#include <core/Context.h>
-#include <components/VideoEncoderVCE.h>
-#include <components/VideoEncoderHEVC.h>
-#include <components/VideoEncoderAV1.h>
-#include <d3d11.h>
-*/
-import "C"
+```rust
+// build.rs — link the interop libs; the AMF runtime (amfrt64.dll) is loaded
+// dynamically at runtime (see below), not at link time:
+//   println!("cargo:rustc-link-lib=dylib=ole32");
+//   println!("cargo:rustc-link-lib=dylib=oleaut32");
+//   println!("cargo:rustc-link-lib=dylib=d3d11");
+//   println!("cargo:rustc-link-lib=dylib=dxgi");
+//
+// The AMF SDK headers (Factory.h / Context.h / VideoEncoderVCE.h / HEVC / AV1)
+// are vendored and bound via bindgen into an `amf-sys` module.
 ```
 
 `amf.lib` is loaded dynamically via `LoadLibrary` (the AMF SDK doesn't ship a
-static import library). SDK headers vendored under `internal/encode/amf/amf/`.
+static import library). SDK headers vendored under `addons/amf/amf/`.
 
 ---
 
-## CGo Implementation Sketch
+## FFI Implementation Sketch
 
-```c
+```rust
+// Raw FFI to amfrt64.dll (an `amf-sys`-style binding). AMF is a C vtable API,
+// so each call goes through the object's `vtbl`.
 // 1. Load AMF DLL and get factory
-HMODULE amfModule = LoadLibraryW(L"amfrt64.dll");
-typedef AMF_RESULT (AMF_CDECL_CALL *AMFInit_Fn)(amf_uint64 version, AMFFactory** factory);
-AMFInit_Fn amfInit = (AMFInit_Fn)GetProcAddress(amfModule, "AMFInit");
-AMFFactory *factory = NULL;
-amfInit(AMF_FULL_VERSION, &factory);
+let amf_module = unsafe { LoadLibraryW(w!("amfrt64.dll"))? };
+type AmfInitFn = unsafe extern "C" fn(version: u64, factory: *mut *mut AMFFactory) -> AMF_RESULT;
+let amf_init: AmfInitFn = unsafe { std::mem::transmute(GetProcAddress(amf_module, s!("AMFInit"))) };
+let mut factory: *mut AMFFactory = std::ptr::null_mut();
+unsafe { amf_init(AMF_FULL_VERSION, &mut factory); }
 
 // 2. Create context bound to D3D11 device (shared with DXGI capture)
-AMFContext *ctx = NULL;
-factory->lpVtbl->CreateContext(factory, &ctx);
-ctx->lpVtbl->InitDX11(ctx, d3d11Device, AMF_DX11_0);
+let mut ctx: *mut AMFContext = std::ptr::null_mut();
+unsafe {
+    ((*(*factory).vtbl).CreateContext)(factory, &mut ctx);
+    ((*(*ctx).vtbl).InitDX11)(ctx, d3d11_device, AMF_DX11_0);
+}
 
 // 3. Create encoder
-AMFComponent *encoder = NULL;
-factory->lpVtbl->CreateComponent(factory, ctx, AMFVideoEncoderVCE_AVC, &encoder);
+let mut encoder: *mut AMFComponent = std::ptr::null_mut();
+unsafe { ((*(*factory).vtbl).CreateComponent)(factory, ctx, AMFVideoEncoderVCE_AVC, &mut encoder); }
 
 // 4. Configure for ultra low latency
-encoder->lpVtbl->SetProperty(encoder, AMF_VIDEO_ENCODER_USAGE, AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY);
-encoder->lpVtbl->SetProperty(encoder, AMF_VIDEO_ENCODER_PROFILE, AMF_VIDEO_ENCODER_PROFILE_BASELINE);
-encoder->lpVtbl->SetProperty(encoder, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR);
-encoder->lpVtbl->SetProperty(encoder, AMF_VIDEO_ENCODER_TARGET_BITRATE, bitrate);
-encoder->lpVtbl->SetProperty(encoder, AMF_VIDEO_ENCODER_B_PIC_PATTERN, 0);
-encoder->lpVtbl->SetProperty(encoder, AMF_VIDEO_ENCODER_IDR_PERIOD, 0);
-encoder->lpVtbl->SetProperty(encoder, AMF_VIDEO_ENCODER_PRE_ANALYSIS_ENABLE, true);   // PA!
-encoder->lpVtbl->Init(encoder, AMF_SURFACE_NV12, W, H);
+unsafe {
+    let e = &*(*encoder).vtbl;
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_USAGE, AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_PROFILE, AMF_VIDEO_ENCODER_PROFILE_BASELINE);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_TARGET_BITRATE, bitrate);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_B_PIC_PATTERN, 0);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_IDR_PERIOD, 0);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_PRE_ANALYSIS_ENABLE, true); // PA!
+    (e.Init)(encoder, AMF_SURFACE_NV12, W, H);
+}
 
 // 5. Per frame: wrap D3D11 texture as AMFSurface, submit
-AMFSurface *surface = NULL;
-ctx->lpVtbl->CreateSurfaceFromDX11Native(ctx, d3d11Texture, &surface, NULL);
-encoder->lpVtbl->SubmitInput(encoder, (AMFData*)surface);
+let mut surface: *mut AMFSurface = std::ptr::null_mut();
+unsafe {
+    ((*(*ctx).vtbl).CreateSurfaceFromDX11Native)(ctx, d3d11_texture, &mut surface, std::ptr::null_mut());
+    ((*(*encoder).vtbl).SubmitInput)(encoder, surface as *mut AMFData);
+}
 
 // 6. Read output
-AMFData *output = NULL;
-while (encoder->lpVtbl->QueryOutput(encoder, &output) == AMF_OK) {
-    AMFBuffer *buf = AMFBufferFromData(output);
+let mut output: *mut AMFData = std::ptr::null_mut();
+while unsafe { ((*(*encoder).vtbl).QueryOutput)(encoder, &mut output) } == AMF_OK {
+    let buf: *mut AMFBuffer = amf_buffer_from_data(output);
     // buf bytes = encoded NALs (Annex B)
 }
 ```
@@ -153,19 +159,20 @@ encode latency cost — often worth it for bandwidth-constrained scenarios.
 ## File Structure
 
 ```
-internal/encode/amf/
-├── amf.go
-├── amf_cgo_windows.go    // built into the amf add-on's shared library (//go:build windows)
-├── amf_cgo_linux.go      // built into the amf_rocm add-on's shared library, Linux ROCm variant (//go:build linux)
-├── d3d11_interop.go      // CreateSurfaceFromDX11Native wrapping
-├── probe.go
+addons/amf/               // Rust source shared by the amf (Windows) + amf_rocm (Linux) crates
+├── src/
+│   ├── lib.rs            // encoder impl
+│   ├── windows.rs        // Windows AMF FFI (cfg(windows))
+│   ├── linux_rocm.rs     // Linux ROCm variant (cfg(target_os = "linux"))
+│   ├── d3d11_interop.rs  // CreateSurfaceFromDX11Native wrapping
+│   └── probe.rs
 ├── amf/                  // AMF SDK headers (Apache 2.0)
-└── amf_test.go
+└── tests.rs
 ```
 
-No `!amf` / `!amf_rocm` stub files are needed — each variant is its own shared library
-(`amf` on Windows, `amf_rocm` on Linux); an absent add-on is simply a `.dll`/`.so`
-that isn't in the add-ons directory.
+No conditional-compilation stub files are needed — each variant is its own cdylib
+crate (`amf` on Windows, `amf_rocm` on Linux); an absent add-on is simply a
+`.dll`/`.so` that isn't in the add-ons directory.
 
 ---
 
@@ -203,7 +210,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
+This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
 
 | Param change | AMF API | Hot? |
 |--------------|---------|------|
@@ -211,6 +218,6 @@ This add-on implements `stream.ConfigurableHardwareEncoder` (see [`../../../../c
 | `BitrateBps` | `SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, b)` | yes |
 | `QP` | `SetProperty(AMF_VIDEO_ENCODER_QP_I/QP_P, qp)` | yes |
 | `KeyframeInterval` | `SetProperty(AMF_VIDEO_ENCODER_IDR_PERIOD, ki)` | yes |
-| `Width`, `Height` | `Terminate` + `ReInit` (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 -- `AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires session-start negotiation (returns `stream.ErrRequiresRestart`) | no |
+| `Width`, `Height` | `Terminate` + `ReInit` (returns `stream::Error::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 -- `AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires session-start negotiation (returns `stream::Error::RequiresRestart`) | no |
 | `NetworkRTTMs`, `PacketLossPct` | Feeds `HQVBR_QVBR` quality boost | yes |

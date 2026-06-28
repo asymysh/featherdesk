@@ -20,7 +20,7 @@
 | | **Browser client (v1)** | **Native client (v2)** |
 |---|---|---|
 | Install | none (open a URL) | per-OS app (signed/notarized) |
-| Transport | WebTransport (QUIC) | **`quic-go` directly** (no HTTP/3/WebTransport layer) |
+| Transport | WebTransport (QUIC) | **`quinn` directly** (no HTTP/3/WebTransport layer) |
 | Input latency | ~15 ms (DOM → WebTransport) | **sub-ms** (raw HID → QUIC datagram) |
 | Decode | WebCodecs → canvas | direct platform decoder → surface (~10 ms lower) |
 | Gamepad | casual (Gamepad API, dual-rumble) | **full HID** — gyro/accel, touchpad, adaptive triggers, LED, battery |
@@ -39,7 +39,7 @@ is the **power-user** path. Neither replaces the other.
 
 The native client speaks the **exact** protocol in [`MODULE_PROTOCOL.md`](../core/MODULE_PROTOCOL.md)
 (22-byte media `FrameHeader`, 8-byte `DatagramHeader`, the StreamType-tagged
-streams, binary input records, the `config` handshake). It just uses **`quic-go`
+streams, binary input records, the `config` handshake). It just uses **`quinn`
 directly** instead of the browser's HTTP/3 + WebTransport convenience layer —
 leaner stack, same channels (datagrams for media, reliable streams for
 control/input/clipboard/file, bootstrap stream for the join IDR).
@@ -47,6 +47,17 @@ control/input/clipboard/file, bootstrap stream for the join IDR).
 > This is exactly the "transport addition, not a rewrite" the architecture was
 > built for: the server already serves QUIC; a native client is another QUIC
 > peer. Nothing in `pkg/protocol` is browser-specific.
+
+> **Roadmap — v2 control-message format (protobuf/`prost`).** v1's browser client
+> constrains control messages to **JSON** (`serde_json`) and media to the
+> **fixed-binary** 22-byte `FrameHeader`, because the browser speaks JS with no
+> protobuf runtime. The v2 native client has **no browser-JS constraint**, so its
+> typed/versioned control messages are slated to adopt **protobuf (`prost`)** —
+> schema-checked, versioned, and cheaper to evolve than hand-rolled JSON — while
+> the **fixed-binary media framing stays byte-identical** (protobuf never touches
+> the 60 fps hot path). This is a **forward-looking indicator, not a v1 redesign**:
+> the wire protocol shared with the browser stays JSON + fixed-binary media;
+> protobuf is reserved for v2-only control surfaces where both peers are native.
 
 ---
 

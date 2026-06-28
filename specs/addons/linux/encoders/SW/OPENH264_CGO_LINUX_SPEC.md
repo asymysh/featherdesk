@@ -1,9 +1,9 @@
-# Linux SW Encoder Add-On: OpenH264 CGo
+# Linux SW Encoder Add-On: OpenH264 (Rust FFI)
 
 ## Purpose
 
-Software H.264 Baseline encoder via Cisco's OpenH264 library, called from Go through
-CGo. The cross-platform fallback encoder — the same Go file compiles on Linux, Windows,
+Software H.264 Baseline encoder via Cisco's OpenH264 library, called through
+Rust FFI. The cross-platform fallback encoder — the same Rust crate compiles on Linux, Windows,
 and macOS without changes.
 
 When the system has no GPU at all (containers, headless ARM, Graviton-class instances,
@@ -17,7 +17,7 @@ broken drivers, etc.), this is the encoder that runs.
 |-----------|---------|-------|
 | OpenH264 library (Cisco) | **BSD-2-Clause** | Permissive, embeddable |
 | MPEG-LA H.264 patent royalties | **Cisco pays** | Cisco operates the binary distribution and pays MPEG-LA on behalf of all users |
-| Our CGo binding | MIT | We own this code |
+| Our Rust FFI binding | MIT | We own this code |
 
 This is the entire reason OpenH264 exists as a project — Cisco wants free H.264 in
 WebRTC and pays the patent pool so downstream users don't have to. Zero royalty
@@ -45,7 +45,7 @@ both architectures.
 ### Shared library build
 
 ```bash
-go build -buildmode=c-shared -o featherdesk-addon-openh264.so ./internal/encode/openh264
+cargo build --release -p featherdesk-addon-openh264   # cdylib → featherdesk-addon-openh264.so
 ```
 
 ### Runtime dependencies
@@ -56,19 +56,23 @@ go build -buildmode=c-shared -o featherdesk-addon-openh264.so ./internal/encode/
 Most distros ship OpenH264 prebuilt. If absent, building from source is straightforward
 (MIT-licensed NASM assembler required for SIMD optimisations).
 
-### CGo configuration
+### FFI configuration
 
-```go
-/*
-#cgo pkg-config: openh264
+The bindings are generated with `bindgen` in `build.rs`, which probes `openh264`
+via `pkg-config` and wraps the C headers:
 
-#include <wels/codec_api.h>
-#include <wels/codec_app_def.h>
-#include <wels/codec_def.h>
-#include <stdlib.h>
-#include <string.h>
-*/
-import "C"
+```rust
+// build.rs
+pkg_config::Config::new().probe("openh264").unwrap();
+
+bindgen::Builder::default()
+    .header_contents("wrapper.h", "
+        #include <wels/codec_api.h>
+        #include <wels/codec_app_def.h>
+        #include <wels/codec_def.h>
+        #include <stdlib.h>
+        #include <string.h>")
+    .generate().unwrap();
 ```
 
 > **macOS 26 note (for reference, irrelevant on Linux):** when building on macOS,
@@ -77,7 +81,7 @@ import "C"
 
 ---
 
-## CGo Implementation Sketch
+## FFI Implementation Sketch
 
 ```c
 // Session setup
@@ -140,10 +144,10 @@ ultrafast (~4ms vs 4.3ms) but eliminates GPL contamination and ffmpeg subprocess
 
 ## Probe & Selection
 
-```go
-//go:build linux
+```rust
+// crate: featherdesk-addon-openh264  (cfg(target_os = "linux"))
 
-func ProbeOpenH264() (*OpenH264Capabilities, error) {
+fn probe_openh264() -> Result<OpenH264Capabilities, EncodeError> {
     // 1. dlopen libopenh264.so (verify present)
     // 2. Create + destroy a test encoder (verify functional)
     // 3. Return version, max resolution
@@ -153,7 +157,7 @@ func ProbeOpenH264() (*OpenH264Capabilities, error) {
 Pipeline probes (Linux, with this add-on loaded):
 ```
 NVENC / AMF / libva HW add-ons available? → use HW
-None available?                              → use OpenH264 CGo (this add-on)
+None available?                              → use OpenH264 (Rust FFI, this add-on)
 This add-on not loaded either?               → fatal: no encoder
 ```
 
@@ -163,10 +167,10 @@ This add-on not loaded either?               → fatal: no encoder
 
 ```
 internal/encode/openh264/
-├── openh264.go           // Encoder struct, NewOpenH264Encoder
-├── openh264_cgo.go       // CGo binding (built into the add-on shared library)
-├── probe.go              // ProbeOpenH264()
-└── openh264_test.go      // Unit + benchmark tests
+├── openh264.rs           // Encoder struct, OpenH264Encoder::new
+├── ffi.rs                // Rust FFI bindings (built into the add-on cdylib)
+├── probe.rs              // probe_openh264()
+└── tests.rs              // Unit + benchmark tests
 ```
 
 ---
@@ -188,8 +192,8 @@ Skip when:
 ## Status
 
 ✅ **Working** — implemented today as the default SW encoder in featherdesk
-(`internal/encode/openh264.go`). The refactor moves it to `internal/encode/openh264/`,
-built as the `openh264` add-on shared library, but the encode code stays the same.
+(`internal/encode/openh264.rs`). The refactor moves it to `internal/encode/openh264/`,
+built as the `openh264` add-on cdylib, but the encode code stays the same.
 
 ---
 
@@ -207,7 +211,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream.ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `UpdateStreamParams(p stream.Params)`.
+This add-on implements `stream::ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `update_stream_params(p: stream::Params)`.
 
 | Param change | OpenH264 API | Hot? |
 |--------------|--------------|------|
@@ -215,5 +219,5 @@ This add-on implements `stream.ConfigurableEncoder` (see [`../../../../core/MODU
 | `BitrateBps` | `ISVCEncoder::SetOption(ENCODER_OPTION_BITRATE, &b)` | yes |
 | `QP` | `ISVCEncoder::SetOption(ENCODER_OPTION_SVC_ENCODE_PARAM_EXT, &param)` | yes |
 | `KeyframeInterval` | `param.uiIntraPeriod` via `ENCODER_OPTION_SVC_ENCODE_PARAM_EXT` | yes |
-| `Width`, `Height` | requires teardown + `Initialize` (returns `stream.ErrRequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | rejected with `stream.ErrHDRUnsupported` (OpenH264 is 8-bit only -- pipeline switches to HEVC encoder) | n/a |
+| `Width`, `Height` | requires teardown + `Initialize` (returns `StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | rejected with `StreamError::HdrUnsupported` (OpenH264 is 8-bit only -- pipeline switches to HEVC encoder) | n/a |

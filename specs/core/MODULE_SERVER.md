@@ -9,10 +9,10 @@ that connects all other modules to external consumers.
 Transport-layer concerns (UDP listener, QUIC handshake, stream multiplexing,
 datagram delivery, auth handshake on the control stream) live in
 [`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md). The server module **consumes**
-the `transport.Transport` + `transport.Session` interfaces and adds:
+the `transport::Transport` + `transport::Session` traits and adds:
 
 - Session bookkeeping (controller slot, viewer list, max-clients enforcement).
-- Per-session goroutines (read control stream, read input stream, accept
+- Per-session tasks (read control stream, read input stream, accept
   clipboard + file-transfer streams, pump frames out).
 - Broadcast fan-out (one assembled access unit goes to every session's
   **frame-granular** out-queue; the pump fragments at send time).
@@ -23,90 +23,91 @@ the `transport.Transport` + `transport.Session` interfaces and adds:
 
 ## Public Interface
 
-```go
-package server
+```rust
+// crate: featherdesk-server
 
-// Server manages WebTransport sessions and frame distribution.
-type Server interface {
-    // Start begins listening for connections. Blocks until ctx is cancelled.
-    Start(ctx context.Context) error
+/// Server manages WebTransport sessions and frame distribution.
+#[async_trait::async_trait]
+pub trait Server: Send + Sync {
+    /// Begins listening for connections. Blocks until `cancel` fires.
+    async fn start(&self, cancel: CancellationToken) -> Result<(), ServerError>;
 
-    // Broadcast assembles ONE access unit (22-byte FrameHeader || Annex B
-    // payload) and fans it out to every session's frame-granular out-queue.
-    // The server assigns the video Sequence and, when f.Keyframe is set BY THE
-    // ENCODER (the server does NOT re-scan the bitstream), caches the assembled
-    // access unit for bootstrap-stream fast-join. codecType is
-    // FrameTypeVideoH264 / FrameTypeVideoHEVC (VP8 was rejected; slot 5 reserved).
-    Broadcast(codecType uint8, f EncodedFrame)
+    /// Assembles ONE access unit (22-byte FrameHeader || Annex B payload) and
+    /// fans it out to every session's frame-granular out-queue. The server
+    /// assigns the video Sequence and, when f.keyframe is set BY THE ENCODER
+    /// (the server does NOT re-scan the bitstream), caches the assembled access
+    /// unit for bootstrap-stream fast-join. codec_type is
+    /// frame_type::VIDEO_H264 / VIDEO_HEVC (VP8 was rejected; slot 5 reserved).
+    fn broadcast(&self, codec_type: u8, f: EncodedFrame);
 
-    // BroadcastAudio sends one already-encoded audio payload (Opus packet or raw
-    // PCM) to all clients. codecType is FrameTypeAudioOpus (0x08) or
-    // FrameTypeAudioPCM (0x04); captureTs is the chunk's capture-time Timestamp.
-    // The server assigns the independent audio Sequence, marshals the 22-byte
-    // FrameHeader (Width=Height=0; codec/rate/channels are in the config message),
-    // and enqueues it frame-granular (single datagram for Opus, fragmented for PCM).
-    BroadcastAudio(codecType uint8, payload []byte, captureTs uint64)
+    /// Sends one already-encoded audio payload (Opus packet or raw PCM) to all
+    /// clients. codec_type is frame_type::AUDIO_OPUS (0x08) or AUDIO_PCM (0x04);
+    /// capture_ts is the chunk's capture-time timestamp. The server assigns the
+    /// independent audio Sequence, marshals the 22-byte FrameHeader
+    /// (width=height=0; codec/rate/channels are in the config message), and
+    /// enqueues it frame-granular (single datagram for Opus, fragmented for PCM).
+    fn broadcast_audio(&self, codec_type: u8, payload: bytes::Bytes, capture_ts_ns: u64);
 
-    // SendConfig pushes a Config (handshake / capability change) to all clients,
-    // or to a single client on connect.
-    SendConfig(cfg ConfigPayload)
+    /// Pushes a Config (handshake / capability change) to all clients, or to a
+    /// single client on connect.
+    fn send_config(&self, cfg: ConfigPayload);
 
-    // SendCursor pushes a CursorUpdate (client-side cursor mode).
-    SendCursor(c CursorUpdate)
+    /// Pushes a CursorUpdate (client-side cursor mode).
+    fn send_cursor(&self, c: CursorUpdate);
 
-    // ClientCount returns the current number of connected clients.
-    ClientCount() int32
+    /// Returns the current number of connected clients.
+    fn client_count(&self) -> u32;
 
-    // SetConfigProvider supplies the current Config to send to each new client
-    // on connect (BEFORE any video frame).
-    SetConfigProvider(fn func() ConfigPayload)
+    /// Supplies the current Config to send to each new client on connect
+    /// (BEFORE any video frame).
+    fn set_config_provider(&self, f: Box<dyn Fn() -> ConfigPayload + Send + Sync>);
 
-    // SetNewClientCallback fires when a new client connects. The pipeline uses it
-    // to force a keyframe ONLY when no cached keyframe is available.
-    SetNewClientCallback(fn func())
+    /// Fires when a new client connects. The pipeline uses it to force a
+    /// keyframe ONLY when no cached keyframe is available.
+    fn set_new_client_callback(&self, f: Box<dyn Fn() + Send + Sync>);
 
-    // SetInputCallback fires for each BINARY input frame from the controller.
-    // The callback (input.Dispatcher.Dispatch) decodes + injects the event and
-    // returns its seq; the server then emits an InputAck(seq) so the client can
-    // measure round-trip latency. Input is binary, not JSON — see MODULE_INPUT.md.
-    SetInputCallback(fn func(frame []byte) (seq uint32, err error))
+    /// Fires for each BINARY input frame from the controller. The callback
+    /// (input::Dispatcher::dispatch) decodes + injects the event and returns its
+    /// seq; the server then emits an InputAck(seq) so the client can measure
+    /// round-trip latency. Input is binary, not JSON — see MODULE_INPUT.md.
+    fn set_input_callback(&self, f: Box<dyn Fn(&[u8]) -> Result<u32, input::InputError> + Send + Sync>);
 
-    // SetClipboardCallback fires for a clipboard message (C→H) read off the
-    // clipboard stream as [u32 Len][JSON].
-    SetClipboardCallback(fn func(content clipboard.Content) error)
+    /// Fires for a clipboard message (C→H) read off the clipboard stream as
+    /// [u32 Len][JSON].
+    fn set_clipboard_callback(&self, f: Box<dyn Fn(clipboard::Content) -> Result<(), clipboard::ClipboardError> + Send + Sync>);
 
-    // SetFileTransferService hands the file-transfer service to the server so
-    // newly-accepted bidirectional streams whose first message identifies them
-    // as file-transfer streams get routed into it. nil disables file transfer.
-    SetFileTransferService(svc filetransfer.Service)
+    /// Hands the file-transfer service to the server so newly-accepted
+    /// bidirectional streams whose first message identifies them as
+    /// file-transfer streams get routed into it. `None` disables file transfer.
+    fn set_file_transfer_service(&self, svc: Option<filetransfer::Service>);
 
-    // SetKeyframeRequestCallback fires when a client requests a keyframe
-    // (JSON {"type":"keyframe"}). The server rate-limits before invoking.
-    SetKeyframeRequestCallback(fn func())
+    /// Fires when a client requests a keyframe (JSON {"type":"keyframe"}). The
+    /// server rate-limits before invoking.
+    fn set_keyframe_request_callback(&self, f: Box<dyn Fn() + Send + Sync>);
 
-    // SendGamepadRumble frames + sends a FrameTypeGamepadRumble (type 15) to the
-    // client that OWNS gamepad slot `index` (the controller for slot 0; a player
-    // client for slots 1…N in co-op — see Controller Model). Called by the
-    // pipeline when the active gamepad add-on gets a vibration request from the
-    // host game (MODULE_GAMEPAD.md). No-op if [gamepad] allow_rumble = false or
-    // no client owns that slot.
-    SendGamepadRumble(index uint8, weak, strong uint16, durationMs uint32)
+    /// Frames + sends a GAMEPAD_RUMBLE (type 15) to the client that OWNS gamepad
+    /// slot `index` (the controller for slot 0; a player client for slots 1…N in
+    /// co-op — see Controller Model). Called by the pipeline when the active
+    /// gamepad add-on gets a vibration request from the host game
+    /// (MODULE_GAMEPAD.md). No-op if [gamepad] allow_rumble = false or no client
+    /// owns that slot.
+    fn send_gamepad_rumble(&self, index: u8, weak: u16, strong: u16, duration_ms: u32);
 }
 
-// Config holds server configuration.
-type Config struct {
-    Transport      transport.Transport // built by MODULE_TRANSPORT; bound to UDP port
-    Log            *slog.Logger
-    ClientFS       fs.FS               // Embedded web client filesystem (served from /)
-    Authenticator  auth.Authenticator  // see MODULE_AUTH.md — validates control-stream auth
-    SessionCache   SessionCache        // for resume (see "Resume Path")
-    AllowTakeover  bool                // controller takeover policy
-    StreamMgr      stream.Manager      // applies client-driven parameter changes
-    MaxClients     int                 // hard cap; rejects via CloseAuthFailed on overflow
+/// Config holds server configuration.
+pub struct Config {
+    pub transport: Box<dyn transport::Transport>, // built by MODULE_TRANSPORT; bound to UDP port
+    pub client_fs: ClientFs,                      // Embedded web client filesystem (served from /; e.g. rust-embed)
+    pub authenticator: Box<dyn auth::Authenticator>, // MODULE_AUTH.md — validates control-stream auth
+    pub session_cache: Box<dyn SessionCache>,     // for resume (see "Resume Path")
+    pub allow_takeover: bool,                     // controller takeover policy
+    pub stream_mgr: Box<dyn stream::Manager>,     // applies client-driven parameter changes
+    pub max_clients: u32,                         // hard cap; rejects via close::AUTH_FAILED on overflow
+    // Logging is via the `tracing` crate (replaces the old *slog.Logger field).
 }
 ```
 
-**Sequence ownership:** the Server is the SOLE owner of the video and audio sequence counters (independent `atomic.Uint32` per type). They are assigned inside `Broadcast`/`BroadcastAudio`. The pipeline never sets sequence numbers.
+**Sequence ownership:** the Server is the SOLE owner of the video and audio sequence counters (independent `AtomicU32` per type). They are assigned inside `broadcast`/`broadcast_audio`. The pipeline never sets sequence numbers.
 
 ---
 
@@ -160,8 +161,9 @@ Sources, in order:
      / restrictive ACL (Windows). Verified on startup — if permissions
      are too open, server refuses to start with a clear error.**
 
-The cert is loaded into both the `tls.Config` and `quic.Config` (they share the
-same `*tls.Certificate`). One cert, one private key, one HTTP/3 server.
+The cert is loaded into the rustls `ServerConfig` that backs the QUIC endpoint
+(quinn + wtransport share the one rustls config). One cert, one private key,
+one HTTP/3 server.
 
 There is no Let's Encrypt integration — front the server with a reverse
 proxy (Caddy, nginx, traefik) for ACME if needed. NOTE: many ACME-issuing
@@ -175,8 +177,8 @@ your proxy's QUIC support before deploying.
    No credentials, role, or takeover flag in the URL or HTTP headers (browsers
    can't set them) — they all travel in the control-stream auth message (step 7).
 2. Transport handler upgrades to WebTransport (TLS 1.3, Origin checked per R-SRV-06).
-3. transport.Transport surfaces the new Session on its SessionsChan.
-4. Server-side: spawn a per-session goroutine. The session has NO privileges yet.
+3. transport::Transport surfaces the new Session on its sessions() receiver.
+4. Server-side: spawn a per-session task. The session has NO privileges yet.
 5. Server starts a 5-second auth timer ON SESSION ACCEPT (covers a client that
    never opens any stream — it is closed at +5s).
 6. streamAcceptor reads the StreamType tag (first byte) of each accepted bidi
@@ -189,9 +191,9 @@ your proxy's QUIC support before deploying.
        skip new-session setup, mark "resumed", jump to step 12.
      - Fresh auth: validate token according to mode (token/password/pin/none).
      - Failure: server writes {"type":"auth_failed"} on the control stream,
-       then CloseWithError(CloseAuthFailed=4401). Session ends.
-     - 5-second timer expired without auth: CloseWithError(CloseAuthTimeout=4408).
-9. Check cfg.MaxClients → CloseWithError(CloseAuthFailed) if full (overloaded
+       then close_with_error(close::AUTH_FAILED=4401). Session ends.
+     - 5-second timer expired without auth: close_with_error(close::AUTH_TIMEOUT=4408).
+9. Check cfg.max_clients → close_with_error(close::AUTH_FAILED) if full (overloaded
    variant: distinguishable via reason string "max_clients").
 10. Issue new session_token (32-byte random, base64url) → SessionCache.Put.
 11. role check + controller slot:
@@ -199,7 +201,7 @@ your proxy's QUIC support before deploying.
        omits `"takeover":true` become viewers.
      - Explicit takeover (auth message `"takeover":true`) honored only when
        AllowTakeover is true. Displaced controller is closed with
-       CloseControllerTakeover (4410).
+       close::CONTROLLER_TAKEOVER (4410).
 12. Send the config message on the control stream as a JSON line (NOT a binary
     frame): {"type":"config","codec":…,"width":…,…,"session_token":…,
     "session_ttl_sec":…,"resumed":true|false}.
@@ -208,32 +210,32 @@ your proxy's QUIC support before deploying.
     keyframe is cached yet (very first client), invoke onNewClient → pipeline
     forces a keyframe; the first encoded IDR is then sent on the bootstrap stream.
 14. INPUT stream: the stream tagged 0x01 (controller role only). Spawn an
-    input-reader goroutine that reads [u16 RecLen]-prefixed records and forwards
-    each to input.Dispatcher.Dispatch; it writes InputAck back length-prefixed.
+    input-reader task that reads [u16 RecLen]-prefixed records and forwards
+    each to input::Dispatcher::dispatch; it writes InputAck back length-prefixed.
 15. The same streamAcceptor loop dispatches the remaining tags: 0x02 → clipboard
     handler (a [u32 Len][JSON] reader/writer; direction+role gated), 0x03 → a new
-    file-transfer stream handed to filetransfer.Service. An unknown tag, or an
-    0x01/0x02 from a view-role client, → CancelRead+CancelWrite(CloseProtocolError).
+    file-transfer stream handed to filetransfer::Service. An unknown tag, or an
+    0x01/0x02 from a view-role client, → cancel_read+cancel_write(close::PROTOCOL_ERROR).
 16. Frame-out queue: per-session bounded channel of WHOLE access units
     (cap = datagram_send_queue_frames, default 8; drop-OLDEST on overflow).
-    Broadcast() pushes one assembled access unit per frame; the datagramPump
-    goroutine pulls one frame, fragments it, and calls session.SendDatagram per
+    broadcast() pushes one assembled access unit per frame; the datagram_pump
+    task pulls one frame, fragments it, and calls session.send_datagram per
     fragment. NEVER a fragment-granular channel (would corrupt frames mid-send —
     see MODULE_TRANSPORT "Datagram Fragmentation", fixes T-1).
 17. Control-stream reader loop dispatches JSON lines (controller only for
     role-gated ones):
-        resize/set_*           → stream.Manager (drop for viewers)
+        resize/set_*           → stream::Manager (drop for viewers)
         {"type":"keyframe"}    → rate-limited keyframe-request callback
         {"type":"pong"}        → record RTT
         {"type":"stats"}       → record client telemetry
-        {"type":"chroma_unsupported"} → stream.Manager downgrades chroma to "420";
+        {"type":"chroma_unsupported"} → stream::Manager downgrades chroma to "420";
                                  server re-sends config + forces a keyframe
     (Clipboard is NOT here — it rides the clipboard stream from step 15.)
 18. Datagram-in loop: ReadDatagram blocks until the client sends one.
     In v1 there are no C→S datagrams (reserved); any datagram received is
     counted in a metric and dropped.
 19. Session close (either side, or context cancel):
-    - Cancel all per-session goroutines via session.Context().
+    - Cancel all per-session tasks via session.cancelled() (CancellationToken).
     - Release controller slot (if was controller).
     - Drain in-flight file-transfer streams.
     - Update SessionCache entry: keep state cached for reconnect.cache_ttl_seconds.
@@ -246,7 +248,7 @@ your proxy's QUIC support before deploying.
 
 - **Control-stream message size limit:** the control reader bounds each
   JSON message at `server.max_message_bytes` (default 4096). Any larger
-  message → close the stream with `CloseProtocolError (4400)`. Legitimate
+  message → close the stream with `close::PROTOCOL_ERROR (4400)`. Legitimate
   JSON control messages stay well under 4 KB.
 - **Datagram size limit:** QUIC enforces the per-datagram MTU (~1200 bytes)
   natively; the receiver discards any datagram whose 8-byte DatagramHeader
@@ -257,33 +259,34 @@ your proxy's QUIC support before deploying.
 - **Input rate limit:** per-client token bucket at `server.input_rate_limit`
   events/sec (default 1000). `mousemove` events are coalesced (only the latest
   position is kept). Excess events are silently dropped at the input-reader
-  goroutine.
+  task.
 - **Keyframe rate limit:** max 1 forced keyframe per 500 ms (coalesced across
   all clients).
 - **Session limit:** `server.max_clients` (default 25). Excess sessions are
-  closed at the post-auth check with `CloseAuthFailed (4401)` and a clear
+  closed at the post-auth check with `close::AUTH_FAILED (4401)` and a clear
   log line.
 
 ### Session Cache (Reconnect)
 
-```go
-// SessionCache stores ephemeral per-session state across short disconnects.
-// Implementation lives in internal/server; interface in pkg/server.
-type SessionCache interface {
-    // Put stores session state under the given token with the configured TTL.
-    Put(token string, st SessionState)
-    // Get fetches state and refreshes TTL on hit; returns ok=false on miss/expiry.
-    Get(token string) (st SessionState, ok bool)
-    // Delete revokes a token (e.g., /logout).
-    Delete(token string)
+```rust
+/// SessionCache stores ephemeral per-session state across short disconnects.
+/// Implementation lives in the server crate's internal module; the trait is in
+/// featherdesk-server.
+pub trait SessionCache: Send + Sync {
+    /// Stores session state under the given token with the configured TTL.
+    fn put(&self, token: String, st: SessionState);
+    /// Fetches state and refreshes TTL on hit; returns None on miss/expiry.
+    fn get(&self, token: &str) -> Option<SessionState>;
+    /// Revokes a token (e.g., /logout).
+    fn delete(&self, token: &str);
 }
 
-type SessionState struct {
-    UserID      string         // identifier from auth (empty for token mode)
-    Role        string         // "control" | "view"
-    CreatedAt   time.Time
-    ExpiresAt   time.Time      // refreshed on each WebTransport connect
-    LastParams  stream.Params  // snapshot of resolution/bitrate/HDR at disconnect
+pub struct SessionState {
+    pub user_id: String,                // identifier from auth (empty for token mode)
+    pub role: String,                   // "control" | "view"
+    pub created_at: std::time::Instant,
+    pub expires_at: std::time::Instant, // refreshed on each WebTransport connect
+    pub last_params: stream::Params,    // snapshot of resolution/bitrate/HDR at disconnect
 }
 ```
 
@@ -296,56 +299,57 @@ TTL comes from `[reconnect] cache_ttl_seconds` (default 300s). The cache is in-m
 
 ### Session State
 
-```go
-type Session struct {
-    wt        transport.Session   // underlying WebTransport session
-    control   transport.Stream    // bidi control stream (tag 0x00)
-    input     transport.Stream    // bidi input stream (tag 0x01; nil for viewers)
-    clip      transport.Stream    // bidi clipboard stream (tag 0x02; nil until opened)
-    frameOut  chan []byte         // bounded queue of WHOLE access units
-                                  // (cap datagram_send_queue_frames=8; drop-OLDEST)
-    role      string              // "control" | "view"
-    identity  auth.Identity
-    log       *slog.Logger
+```rust
+pub struct Session {
+    wt: Box<dyn transport::Session>,            // underlying WebTransport session
+    control: Box<dyn transport::Stream>,        // bidi control stream (tag 0x00)
+    input: Option<Box<dyn transport::Stream>>,  // bidi input stream (tag 0x01; None for viewers)
+    clip: Option<Box<dyn transport::Stream>>,   // bidi clipboard stream (tag 0x02; None until opened)
+    frame_out: tokio::sync::mpsc::Sender<bytes::Bytes>, // bounded queue of WHOLE access units
+                                                // (cap datagram_send_queue_frames=8; drop-OLDEST)
+    role: String,                               // "control" | "view"
+    identity: auth::Identity,
+    // Per-session logging is a `tracing` span (replaces the old *slog.Logger field).
 }
 ```
 
-**Per-session goroutines:**
-- `datagramPump()`: pulls one whole access unit from `frameOut`, fragments it
-  into ≤~1192-byte datagrams, and calls `wt.SendDatagram()` per fragment. Loss
+**Per-session tasks:**
+- `datagram_pump()`: pulls one whole access unit from `frame_out`, fragments it
+  into ≤~1192-byte datagrams, and calls `wt.send_datagram()` per fragment. Loss
   is whole-frame, never mid-frame. QUIC has its own keepalive (configured via
   `[transport] keepalive_period`).
 - `controlReader()`: reads newline-JSON messages on the control stream →
   dispatches keyframe/pong/stats/resize/set_* (NOT clipboard — see below).
 - `inputReader()` (controller only): reads `[u16 RecLen]`-prefixed binary
-  records on the input stream → `input.Dispatcher.Dispatch`; writes `InputAck`
+  records on the input stream → `input::Dispatcher::dispatch`; writes `InputAck`
   back length-prefixed on the same stream.
 - `clipboardReader()` (started when a 0x02 stream is accepted): reads
   `[u32 Len][JSON]` clipboard messages → `clipboard.Monitor.Set`
   (direction+role gated); writes host→client clipboard the same way.
 - `streamAcceptor()`: `wt.AcceptStream` loop; reads each stream's StreamType tag
-  and dispatches (0x01 input, 0x02 clipboard, 0x03 → `filetransfer.Service.ServeStream`).
+  and dispatches (0x01 input, 0x02 clipboard, 0x03 → `filetransfer::Service::serve_stream`).
 
 ### Broadcasting (frame-granular fan-out; pump fragments at send)
 
-```go
-func (s *Server) Broadcast(codecType uint8, f stream.EncodedFrame) {
-    // 1. Marshal 22-byte FrameHeader: Version=1, Type=codecType,
-    //    Sequence=s.videoSeq++ (atomic), Timestamp=f.Timestamp,
-    //    Width=f.W, Height=f.H, PayloadSize=len(f.Data).
-    // 2. Build header || f.Data into one contiguous []byte = the access unit.
-    // 3. If f.Keyframe (set by the ENCODER — the server does NOT re-scan NALs),
-    //    store this assembled access unit under idrMu as the bootstrap seed.
-    // 4. Range over the sessions list: push the WHOLE access unit into each
-    //    session's frameOut channel. If the channel is full, drop the OLDEST
+```rust
+fn broadcast(&self, codec_type: u8, f: stream::EncodedFrame) {
+    // 1. Marshal 22-byte FrameHeader: version=1, kind=codec_type,
+    //    sequence=self.video_seq.fetch_add(1, Ordering::Relaxed) (atomic),
+    //    timestamp_ns=f.timestamp_ns, width=f.width, height=f.height,
+    //    payload_size=f.data.len().
+    // 2. Build header || f.data into one contiguous Bytes = the access unit.
+    // 3. If f.keyframe (set by the ENCODER — the server does NOT re-scan NALs),
+    //    store this assembled access unit under idr_mu as the bootstrap seed.
+    // 4. Iterate the sessions list: push the WHOLE access unit into each
+    //    session's frame_out channel. If the channel is full, drop the OLDEST
     //    queued frame and enqueue this one (a slow client thus skips stale
     //    frames cleanly), and increment a per-session drop metric.
-    //    Fragmentation happens later, in datagramPump — NOT here. The queue is
+    //    Fragmentation happens later, in datagram_pump — NOT here. The queue is
     //    frame-granular so a slow client never receives a half-sent frame.
 }
 ```
 
-`datagramPump` turns one access unit into N datagrams (N ≈ frame_bytes / 1192)
+`datagram_pump` turns one access unit into N datagrams (N ≈ frame_bytes / 1192)
 with the 8-byte DatagramHeader; fragment 0 starts with the 22-byte FrameHeader,
 later fragments carry only raw payload bytes (see MODULE_PROTOCOL "Datagram
 Fragmentation"). NALs are never split across access units.
@@ -356,7 +360,7 @@ Fragmentation"). NALs are never split across access units.
   `VPS, SPS, PPS, IDR` (HEVC). The cache stores **the assembled access unit**
   (`FrameHeader || Annex B`), NOT pre-fragmented datagrams — because it is
   delivered over the reliable **bootstrap stream**, not as datagrams.
-- On `Broadcast`, if `f.Keyframe` (encoder-set), the access unit is stored under `idrMu`.
+- On `broadcast`, if `f.keyframe` (encoder-set), the access unit is stored under `idr_mu`.
 - On new client connect/resume, the server sends, in order: **config (JSON line
   on the control stream) → cached IDR (on the bootstrap stream) → live datagrams**.
 - If NO keyframe is cached yet (very first client), the server invokes the
@@ -379,15 +383,15 @@ transition (see protocol "Fast-Join").
 
 ### Controller Model (+ gamepad co-op)
 
-- **Single keyboard/mouse controller.** One controller slot (`atomic.Pointer[Client]`);
+- **Single keyboard/mouse controller.** One controller slot (`ArcSwapOption<Client>`);
   the first client whose auth message carries `"role":"control"` claims it via CAS.
   It receives all keyboard/mouse/wheel input and gamepad **slot 0**. When it
   disconnects the slot reopens for the next `"role":"control"` client.
 - **Player slots (co-op, `[gamepad] allow_coop`).** Additional `"role":"player"`
   clients each claim one **gamepad slot** (1…`max_controllers-1`). The server keeps
-  a `playerSlots map[*Session]int` (client → global pad index), reads each player's
+  a `player_slots: HashMap<SessionId, u32>` (client → global pad index), reads each player's
   **input stream for gamepad records only** (keyboard/mouse/touch from players are
-  dropped), and routes them to `input.Dispatcher` for that slot. Rumble for slot N
+  dropped), and routes them to `input::Dispatcher` for that slot. Rumble for slot N
   is sent back to the owning client. On disconnect the slot is freed and the virtual
   pad `Disconnect`ed.
 - `view` clients send no input. KB/mouse co-op (multiple cursors) is out of scope.
@@ -400,10 +404,11 @@ transition (see protocol "Fast-Join").
 Authentication is mandatory for all non-`none` modes. See [`MODULE_AUTH.md`](./MODULE_AUTH.md) for modes (token / password / pin / oauth-deferred), the Authenticator interface, session token issuance, and the `/auth` + `/pair` + `/logout` HTTP handlers. The server's only job here is calling `cfg.Authenticator.Authenticate` on the first control-stream message and routing to the appropriate session-cache lookup based on the bearer token contained in that message.
 
 ### R-SRV-02: Fix Codec Type Constant (folded into interface)
-`Broadcast(codecType uint8, f EncodedFrame)` now carries the codec type; the server emits `FrameTypeVideoH264` (and future codec frame types as added). The codec is also advertised in the Config handshake so the client configures the matching decoder.
+`broadcast(&self, codec_type: u8, f: EncodedFrame)` now carries the codec type; the server emits `frame_type::VIDEO_H264` (and future codec frame types as added). The codec is also advertised in the Config handshake so the client configures the matching decoder.
 
 ### R-SRV-03: Remove Custom itoa()
-Replace the hand-rolled `itoa()` function (lines 286-306) with `strconv.Itoa()`.
+Replace any hand-rolled integer-to-string helper with standard formatting
+(`u32::to_string()` / `format!` / the `itoa` crate for hot paths).
 
 ### R-SRV-04: Add Client Metrics Per-Connection
 Track per-client: frames sent, frames dropped, bytes sent, connection duration, latency (via ping/pong RTT).
@@ -412,13 +417,13 @@ Track per-client: frames sent, frames dropped, bytes sent, connection duration, 
 Before shutting down, send a control frame to all clients indicating "server shutting down" so the client can show appropriate UI.
 
 ### R-SRV-06: Origin Validation
-Replace `InsecureSkipVerify` with configurable origin checking. Default to same-host only; allow override via `server.allow_origin` in the TOML config (see MODULE_CONFIG.md).
+Replace any insecure skip-verify default with configurable origin checking. Default to same-host only; allow override via `server.allow_origin` in the TOML config (see MODULE_CONFIG.md).
 
 ### R-SRV-07: Extract Interface to `pkg/server`
 Move the `Server` interface and `Config` to a public package. Keep the WebTransport server implementation in `internal/server/`.
 
-### R-SRV-08: Bandwidth Estimation (now base feature — flows into stream.Manager)
-The server derives RTT from the QUIC connection's **`SmoothedRTT`** (quic-go exposes it via `ConnectionState`), augmented by an app-level `{"type":"ping"}`/`{"type":"pong"}` on the control stream for an end-to-end sample. The fast-path congestion signal is the **server's own datagram-drop rate** (frames dropped from `frameOut` on overflow), NOT the result of `SendDatagram` (which is fire-and-forget and never reports loss), plus the client's `{"type":"stats"}` `dropped` delta. It feeds these signals to `stream.Manager` every 100ms (per `[stream.adaptive] interval_ms`); the Manager applies the adaptive policy from `[stream.adaptive]` and hands the effective `stream.Params` to the **pipeline's `paramCh`**. The pipeline's frame loop is the sole path that calls `UpdateStreamParams` on the encoder/capturer (M-6: encode and param-update never run concurrently) — the Manager does **not** mutate the encoder or capturer directly. See [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md).
+### R-SRV-08: Bandwidth Estimation (now base feature — flows into stream::Manager)
+The server derives RTT from the QUIC connection's **smoothed RTT** (quinn exposes it via the connection's path stats), augmented by an app-level `{"type":"ping"}`/`{"type":"pong"}` on the control stream for an end-to-end sample. The fast-path congestion signal is the **server's own datagram-drop rate** (frames dropped from `frame_out` on overflow), NOT the result of `send_datagram` (which is fire-and-forget and never reports loss), plus the client's `{"type":"stats"}` `dropped` delta. It feeds these signals to `stream::Manager` every 100ms (per `[stream.adaptive] interval_ms`); the Manager applies the adaptive policy from `[stream.adaptive]` and hands the effective `stream::Params` to the **pipeline's `param_ch`**. The pipeline's frame loop is the sole path that calls `update_stream_params` on the encoder/capturer (M-6: encode and param-update never run concurrently) — the Manager does **not** mutate the encoder or capturer directly. See [`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md).
 
 ### R-SRV-09: Health Check Endpoint
 `/healthz` endpoint returns 200 `{"status":"ok"}` for load balancer probes. Detailed counters (uptime, clients, frames, bytes/sec, drop rates) live on the Prometheus endpoint (separate port — see MODULE_CONFIG `[metrics]`).
@@ -434,7 +439,7 @@ Allow configurable number of controllers (for pair programming). Input events wo
 |-------|------|-------------------|
 | Unit | `/healthz` response format | No |
 | Unit | StreamType tag dispatch (0x00/0x01/0x02/0x03, unknown tag, duplicate 0x00) | No |
-| Unit | frameOut drop-oldest under overflow (no mid-frame fragment drop) | No |
+| Unit | frame_out drop-oldest under overflow (no mid-frame fragment drop) | No |
 | Integration | WebTransport handshake + datagram + stream delivery | No |
 | Integration | Client disconnect cleanup (no panic, count=0) | No |
 | Integration | New client receives bootstrap-stream IDR before live datagrams | No |
