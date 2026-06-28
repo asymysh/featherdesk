@@ -73,7 +73,7 @@ session_ttl_minutes = 60             # successful auth lifetime before re-auth
   WebTransport control stream** (the first bidirectional stream opened after
   the WebTransport session is established):
   ```json
-  {"type":"auth","token":"<bearer>","role":"control|view"}
+  {"type":"auth","token":"<bearer>","role":"control|view|player"}
   ```
   Browsers cannot set arbitrary headers (e.g. `Authorization`) on the
   `WebTransport()` constructor; first-frame auth on the control stream is the
@@ -345,7 +345,7 @@ pub trait Authenticator: Send + Sync {
 pub struct Identity {
     pub user_id: String,   // empty for token/none modes; populated for password/OAuth
     pub device_id: String, // populated for PIN mode (paired device)
-    pub role: String,      // "control" | "view" | "" (auto)
+    pub role: String,      // "control" | "view" | "player" (gamepad co-op) | "" (auto)
 }
 
 pub struct Session {
@@ -353,7 +353,7 @@ pub struct Session {
     pub created: std::time::Instant,
     pub last_seen: std::time::Instant,
     pub user_id: String,   // empty for token/PIN modes; populated for password/OAuth
-    pub role: String,      // "control" | "view"
+    pub role: String,      // "control" | "view" | "player" (gamepad co-op)
     pub device_id: String, // populated for PIN mode
 }
 

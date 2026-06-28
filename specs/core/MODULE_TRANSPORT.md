@@ -500,12 +500,15 @@ key          = ""                  # CA-trusted mode: path to PEM private key
                                    # See MODULE_SERVER "Browser certificate trust".
 extra_sans   = []                  # self-signed mode: extra SANs (e.g. ["host.lan","10.0.0.5"])
 rotate_before = "3d"               # self-signed mode: regenerate when < this remains
-min_version  = "1.3"               # TLS 1.3 mandatory under QUIC; field is informational
+# (No min_version knob — TLS 1.3 is mandatory under QUIC; config uses
+#  deny_unknown_fields, so a min_version key would be rejected. See MODULE_SERVER.)
 
 [transport]
 # Tunables for the QUIC transport. Defaults are good; expose for ops debugging.
-keepalive_period         = "15s"   # idle keepalive
-max_idle_timeout         = "30s"   # close after this much silence
+keepalive_period         = "15s"   # QUIC keepalive PINGs (transport-level liveness)
+max_idle_timeout         = "30s"   # QUIC closes after this much silence (must be > keepalive_period)
+ping_interval            = "2s"    # app-level Ping datagram cadence (RTT sampling, NOT liveness;
+                                   # 0 disables). See MODULE_SERVER "Keepalive, liveness & timeouts".
 initial_max_data         = "10MiB" # initial connection-level flow control window
 initial_max_stream_data  = "1MiB"  # per-stream flow control
 max_streams_bidi         = 16      # cap on concurrent bidi streams per session

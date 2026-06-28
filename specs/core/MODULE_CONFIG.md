@@ -156,10 +156,15 @@ path    = "/metrics"
 [addons]
 # Directory the host scans at startup for add-on shared libraries
 # (featherdesk-addon-<id>.{so,dylib,dll}). Each is dlopen'd, its ABIVersion
-# checked, and its capability descriptor registered. Default is per-OS:
-#   Linux:   $XDG_DATA_HOME/featherdesk/addons  (or ~/.local/share/featherdesk/addons)
-#   macOS:   ~/Library/Application Support/FeatherDesk/addons
-#   Windows: %PROGRAMDATA%\FeatherDesk\addons
+# checked, and its capability descriptor registered. Default is per-OS and MUST
+# be an admin-owned location (loading a library runs native code at startup, and
+# the host often runs elevated — a user-writable add-ons dir is a local
+# privilege-escalation vector). The loader verifies the dir is writable only by
+# the host's privilege level and refuses a world-writable dir. See CENTRAL_SPEC
+# "Security — add-on directory trust".
+#   Linux:   /usr/lib/featherdesk/addons                  (admin-owned; NOT $XDG_DATA_HOME)
+#   macOS:   /Library/Application Support/FeatherDesk/addons   (admin-owned; NOT ~/Library)
+#   Windows: %PROGRAMDATA%\FeatherDesk\addons              (admin-owned)
 dir          = ""                 # "" = per-OS default above (restart required)
 abi_strict   = false              # true = a single ABI-mismatched library aborts startup
                                   # false = skip incompatible libraries with a warning

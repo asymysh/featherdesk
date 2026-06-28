@@ -188,7 +188,7 @@ size for its Type **before any field is read**.
 
 | Type | Total bytes | Notes |
 |------|-------------|-------|
-| `0x01` InputBatch | 8 .. 4096 (cap) | 7-byte minimum (header + Count=0); strict cap to bound work |
+| `0x01` InputBatch | 7 .. 4096 (cap) | 7-byte minimum (6-byte header + Count=0); strict cap to bound work |
 | `0x10` KeyEvent | 9 | exact |
 | `0x20` MouseMoveAbs | 10 | exact |
 | `0x21` MouseMoveRel | 10 | exact |
@@ -300,6 +300,14 @@ pub trait KeyMouseInjector {
 pub trait TouchInjector {
     fn inject_touch(&mut self, contacts: &[TouchContact]) -> Result<(), InputError>;
 }
+
+/// `Injector` is the umbrella name (used by CENTRAL_SPEC and the add-on loader,
+/// e.g. `InputAddon::new -> Box<dyn input::Injector>`) for whichever concrete
+/// injector trait object an input add-on exports. An input add-on implements
+/// exactly ONE of `KeyMouseInjector`, `TouchInjector`, or `GamepadInjector`
+/// (see MODULE_GAMEPAD); the add-on's capability descriptor declares which, and
+/// the `Dispatcher` routes events to it. There is no separate `Injector` trait
+/// with its own methods — it is the abi-level tagged object, not an extra API.
 
 /// SecureAttention is an optional capability implemented by Windows input
 /// add-ons (interception) for delivering Ctrl+Alt+Del via SendSAS. The

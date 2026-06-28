@@ -24,7 +24,7 @@ the `transport::Transport` + `transport::Session` traits and adds:
 ## Public Interface
 
 ```rust
-// crate: featherdesk-server
+// module: featherdesk-host::server  (NOT a separate crate — see R-SRV-07)
 
 /// Server manages WebTransport sessions and frame distribution.
 #[async_trait::async_trait]
@@ -251,7 +251,7 @@ noted in the browser-compat matrix in `MODULE_WEB_CLIENT.md` and `PLATFORM_COMPA
    stream. The CONTROL stream is the one tagged 0x00 (StreamControl); a second
    0x00 is a protocol error.
 7. Server reads the first JSON line on the control stream:
-       {"type":"auth","token":"<bearer>","role":"control|view","resume":bool}
+       {"type":"auth","token":"<bearer>","role":"control|view|player","resume":bool}
 8. Authenticator.Authenticate validates the token. See MODULE_AUTH.md.
      - Resume path: if resume=true AND SessionCache.Get(token) hits within TTL,
        skip new-session setup, mark "resumed", jump to step 12.
@@ -336,8 +336,8 @@ noted in the browser-compat matrix in `MODULE_WEB_CLIENT.md` and `PLATFORM_COMPA
 
 ```rust
 /// SessionCache stores ephemeral per-session state across short disconnects.
-/// Implementation lives in the server crate's internal module; the trait is in
-/// featherdesk-server.
+/// Implementation + trait live in the host's server module
+/// (featherdesk-host::server), not a separate crate (R-SRV-07).
 pub trait SessionCache: Send + Sync {
     /// Stores session state under the given token with the configured TTL.
     fn put(&self, token: String, st: SessionState);
@@ -349,7 +349,7 @@ pub trait SessionCache: Send + Sync {
 
 pub struct SessionState {
     pub user_id: String,                // identifier from auth (empty for token mode)
-    pub role: String,                   // "control" | "view"
+    pub role: String,                   // "control" | "view" | "player" (gamepad co-op)
     pub created_at: std::time::Instant,
     pub expires_at: std::time::Instant, // refreshed on each WebTransport connect
     pub last_params: stream::Params,    // snapshot of resolution/bitrate/HDR at disconnect
@@ -373,7 +373,7 @@ pub struct Session {
     clip: Option<Box<dyn transport::Stream>>,   // bidi clipboard stream (tag 0x02; None until opened)
     frame_out: tokio::sync::mpsc::Sender<bytes::Bytes>, // bounded queue of WHOLE access units
                                                 // (cap datagram_send_queue_frames=8; drop-OLDEST)
-    role: String,                               // "control" | "view"
+    role: String,                               // "control" | "view" | "player" (gamepad co-op)
     identity: auth::Identity,
     // Per-session logging is a `tracing` span (replaces the old *slog.Logger field).
 }

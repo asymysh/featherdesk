@@ -341,8 +341,10 @@ rate_limit_bps = 0                    # 0 = unlimited; else throttle to protect 
 - **Integrity.** Every transfer is verified by an end-to-end SHA-256; a mismatch
   discards the received file.
 - **Per-chunk CRC32C** catches corruption early (before the full-file hash).
-- **Resource caps.** `max_file_bytes`, `max_concurrent`, and the 32-chunk window
-  bound memory and disk usage; reject transfers that would exceed them.
+- **Resource caps.** `max_file_bytes`, `max_concurrent` (overflow is FIFO-queued,
+  depth 64), and QUIC's per-stream flow-control window bound memory and disk
+  usage; reject transfers that would exceed them. (There is no app-level
+  unacked-chunk window — see "Chunk size, back-pressure & resume".)
 - **No execution.** Uploaded files are written, never executed or opened by the
   host. The fixed folder should not be an auto-run / startup location.
 - **TLS.** File-transfer streams inherit the main session's TLS 1.3 channel (mandatory under QUIC).

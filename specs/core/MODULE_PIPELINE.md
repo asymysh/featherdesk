@@ -9,7 +9,8 @@ The Pipeline module is the runtime wiring layer that connects all other modules 
 ## Public Interface
 
 ```rust
-// crate: featherdesk-pipeline
+// module: featherdesk-host::pipeline  (NOT a separate crate — the orchestrator
+// lives in the host binary; see CENTRAL_SPEC "File Structure")
 
 /// Pipeline connects capture, encode, server, input, clipboard, file transfer,
 /// and audio (deferred) into a streaming system.
@@ -242,12 +243,27 @@ fn run_hardware_frame(&mut self) -> Result<Option<stream::EncodedFrame>, stream:
         Err(e) => return Err(e),
     };
 
+    // Capture metadata BEFORE the move (encode_surface consumes fb). Output dims
+    // come from the active params (the HW encoder scaled to them per the scaling
+    // invariant), NOT fb's native capture dims — mirrors the SW path.
+    let (out_w, out_h) = (self.params.width as u16, self.params.height as u16);
+    let ts_ns = fb.timestamp_ns;
+    let codec_type = video_codec_type(self.hw_encoder.as_ref().unwrap().codec()); // "avc1.*"→H264, "hvc1.*"→HEVC
+
     // encode_surface CONSUMES fb (moved in → FbInfo's Drop releases it exactly
     // once on EVERY path: success, error, FallbackToSoftware). The pipeline never
-    // releases it — RAII replaces the Go `fb.Release()` discipline.
+    // releases it — RAII replaces the Go `fb.Release()` discipline. It returns ONE
+    // EncodedUnit (no Option — the HW path never "skips"; the only skip is
+    // next_surface() → Ok(None) above), or StreamError::FallbackToSoftware.
     match self.hw_encoder.as_mut().unwrap().encode_surface(fb) {
-        Ok(Some(encoded)) => Ok(Some(encoded)), // `encoded` is the EncodedFrame
-        Ok(None) => Ok(None),                   // skip frame
+        Ok(unit) => Ok(Some(stream::EncodedFrame {
+            data: unit.data.into_vec().into(), // owned RVec<u8> → bytes::Bytes
+            width: out_w,
+            height: out_h,
+            timestamp_ns: ts_ns,
+            keyframe: unit.keyframe,           // encoder-set (M-2); no NAL re-scan
+            codec_type,                        // VIDEO_H264 or VIDEO_HEVC
+        })),
         Err(stream::StreamError::FallbackToSoftware) => {
             self.degrade_to_software();
             Ok(None)
@@ -449,7 +465,7 @@ pub trait EncoderAddon {
     fn kind(&self) -> &str; // "hw" or "sw"
     fn probe(&self) -> Result<ProbeResult, PipelineError>;
     fn new_sw(&self, cfg: encode::EncoderConfig) -> Result<Box<dyn encode::Encoder>, PipelineError>;          // SW add-ons only
-    fn new_hw(&self, cfg: hwencode::HwEncoderConfig) -> Result<Box<dyn hwencode::HardwareEncoder>, PipelineError>; // HW add-ons only
+    fn new_hw(&self, cfg: hwencode::HWEncoderConfig) -> Result<Box<dyn hwencode::HardwareEncoder>, PipelineError>; // HW add-ons only
 }
 
 pub trait InputAddon {

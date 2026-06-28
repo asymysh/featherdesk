@@ -111,8 +111,11 @@ per-deployment rebuild of the host.
   conceptually `FeatherDeskAddonOpen`) exposing **(1)** the ABI version
   (`abi_stable` checks this *and* a structural layout hash automatically),
   **(2)** a capability descriptor (kind = capture / encode / hwencode / audio /
-  input; codec(s); os+arch), and **(3)** the add-on's `#[sabi_trait]` object
-  (`Capturer`, `Encoder`, `HardwareEncoder`, `AudioCapturer`, `Injector`).
+  input; codec(s); os+arch), and   **(3)** the add-on's `#[sabi_trait]` object
+  (`Capturer`, `Encoder`, `HardwareEncoder`, `AudioCapturer`, `AudioEncoder`, or
+  an injector — `KeyMouseInjector` / `TouchInjector` / `GamepadInjector`, which
+  `MODULE_INPUT` groups under the umbrella name `Injector`), selected by the
+  capability descriptor's `kind`.
 - At startup the host **scans the add-ons directory**, loads each library
   (`dlopen` / `LoadLibraryW` under the hood, via `abi_stable`'s loader), verifies
   the ABI version + layout (by default a mismatch is skipped with a warning;
@@ -389,7 +392,7 @@ be the only capture option.
 
 | Add-on | Add-on ID | Spec | Hardware | Status |
 |--------|-----------|------|---------|--------|
-| ScreenCaptureKit | `sck` | [`specs/addons/macos/capture/SCK_MACOS_SPEC.md`](./addons/macos/capture/SCK_MACOS_SPEC.md) | All Macs (macOS 12.3+) | 📋 Specced |
+| ScreenCaptureKit | `sck` | [`specs/addons/macos/capture/SCK_MACOS_SPEC.md`](./addons/macos/capture/SCK_MACOS_SPEC.md) | All Macs (macOS 12.3+) | 📋 Specced; Hackintosh-benchmarked |
 
 See [`specs/addons/macos/capture/README.md`](./addons/macos/capture/README.md)
 for the full rationale.
@@ -924,7 +927,7 @@ discipline-by-comment (the Go footguns here — borrowed slices held too long,
 
 ### Cursor Model
 - `Config.cursorMode` tells the client how the cursor is delivered:
-  - `"embedded"` — cursor is alpha-blended into the video frame server-side (software path default).
+  - `"embedded"` — cursor is alpha-blended into the video frame server-side (an option on the software path; the global config default is `separate` — see `[encode.cursor] mode` in MODULE_CONFIG).
   - `"separate"` — cursor is NOT in the video; the server sends `CursorUpdate` (position every frame, image only on change) and the client renders it as an overlay. Required for the zero-copy hardware path (frame never touches CPU); lowest latency.
 - The client MUST handle both modes based on the handshake.
 
@@ -1013,6 +1016,15 @@ featherdesk/                         # Cargo workspace
 > `featherdesk-host`. Add-on `cdylib` crates depend only on `featherdesk-abi`
 > (+ their native FFI), never on the host. Per-OS code uses `#[cfg(target_os =
 > "…")]`, not Go build tags.
+
+> **Crate-list clarifications (read with the tree above):**
+> - `featherdesk-auth` (auth modes + session tokens + role gating) and
+>   `featherdesk-audio` (host→client audio; **impl deferred**) are also library
+>   crates — omitted from the art above only for brevity. The dependency graph
+>   already shows `auth`.
+> - `server` and `pipeline` are **not** separate crates. They are modules inside
+>   the `featherdesk-host` binary (`src/server/`, `src/pipeline/`) — see
+>   MODULE_SERVER R-SRV-07. Module specs use them as headings, not crate names.
 
 ---
 

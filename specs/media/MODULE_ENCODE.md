@@ -135,7 +135,8 @@ The Encode module does **not** decide which encoder to use. That dispatch lives
 in [`MODULE_PIPELINE.md`](../core/MODULE_PIPELINE.md), which:
 
 1. Reads `[encode]` config (mode = "auto" | "forced", force_addon if forced)
-2. Probes each loaded HW encoder add-on (NVENC, AMF, libva, MF HW, QSV, VT HW)
+2. Probes each loaded HW encoder add-on, in the order defined authoritatively in
+   MODULE_PIPELINE: NVENC, AMF, libva, QSV, MF HW, VT HW
 3. Falls through to loaded SW encoder add-ons (x264 > VT SW > OpenH264)
 4. Calls the chosen add-on's constructor with `EncoderConfig`
 5. Passes the resulting `Encoder` to the frame loop

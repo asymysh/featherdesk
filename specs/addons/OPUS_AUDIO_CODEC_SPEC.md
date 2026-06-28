@@ -51,9 +51,9 @@ Audio → Server" and MODULE_AUDIO "Public Interface"):
 pub trait AudioEncoder {
     /// Encode one canonical PCM chunk (48 kHz, S16LE, interleaved) into one wire
     /// payload. Ownership of the returned buffer transfers to the host (RVec<u8>
-    /// across the ABI). Returns Ok(None) only if the encoder intentionally
-    /// produced no packet (e.g. DTX — not enabled by default).
-    fn encode(&mut self, chunk: &PcmChunk) -> Result<Option<RVec<u8>>, u32>;
+    /// across the ABI). Matches `AudioEncoder::encode` in MODULE_AUDIO (always a
+    /// payload; the error crosses the ABI as a u32 the host maps to AudioError).
+    fn encode(&mut self, chunk: &PcmChunk) -> Result<RVec<u8>, u32>;
     /// "opus" — advertised by the host in the `config` message as audioCodec.
     fn codec(&self) -> &str;
 }

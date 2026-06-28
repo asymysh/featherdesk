@@ -260,7 +260,7 @@ input-coordinate range** without the capturer and encoder both trying to scale.
 |--------|--------|
 | KMS+EGL DMA-BUF | ✅ Working (the original Linux capture path; refactor moves into `addons/capture/kms_egl/`) |
 | NvFBC | 📋 Specced; Rust FFI bindings pending |
-| ScreenCaptureKit | ✅ Working (Hackintosh benchmark: 91 FPS @ 1080p, P50 10.5ms) |
+| ScreenCaptureKit | 📋 Specced; Hackintosh-benchmarked (91 FPS @ 1080p, P50 10.5ms). macOS not yet a built/shipped platform. |
 | DXGI Desktop Duplication | ✅ Working — **VALIDATED on this hardware: ~7 ms p50 acquire, ~2.4× better than GDI BitBlt** (also benchmarked sub-microsecond raw copy overhead on GTX 1080 Ti + RX 6800 XT). The virtual-display `DXGI_ERROR_UNSUPPORTED` case is handled by the IddCx virtual-display fallback (capture stays add-on-based). |
 
 The old Go `internal/capture/x11grab.go` (subprocess-based X11 capture) and
