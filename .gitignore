@@ -23,3 +23,5 @@ Cargo.lock
 /tmp/
 *.db
 .DS_Store
+/bench_dxgi_*.csv
+/*.csv
