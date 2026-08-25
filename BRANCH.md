@@ -10,7 +10,7 @@ This branch is the **architectural redesign** of FeatherDesk, targeting a **Rust
 
 ## Why the Refactor Is Needed
 
-The current codebase has these confirmed issues (tracked as TD-01 through TD-34 in `specs/CENTRAL_SPEC.md`):
+The current codebase has these confirmed issues (tracked as TD-01 through TD-40 in `specs/CENTRAL_SPEC.md` — TD-35 through TD-40 were added following a second round of implementation-history review across all five original tracks):
 
 **High severity (bugs, crashes, data loss):**
 - `kms.go` — DMA-BUF file descriptor leak on EGL import failure (TD-01)
@@ -54,8 +54,7 @@ specs/
 | Decision | Choice | Reason |
 |----------|--------|--------|
 | NAL framing | Annex B per-frame (start codes retained) | WebCodecs consumes whole access units; length-prefix adds AVCC complexity for no benefit |
-| Default software encoder | OpenH264 (H.264 Baseline) | Better browser compat, in-process CGo (no subprocess), better quality/bit than VP8 |
-| Software fallback order | OpenH264 → VP8 → FFmpeg libx264 | VP8 is fallback, not default |
+| Software encoder priority | `x264` subprocess → VideoToolbox SW (macOS only) → OpenH264 (universal fallback) | Order defined by `MODULE_PIPELINE` dispatch (see `MODULE_ENCODE.md`); OpenH264 is the last resort because it's pure in-process FFI with no external dependency. VP8 is rejected outright — no add-on exists for it |
 | Hardware path | Zero-copy DMA-BUF → VA-API (no glReadPixels) | Eliminates ~36MB/frame GPU↔CPU copies |
 | Encoder tiers | Two only: hardware OR software (no ffmpeg-vaapi middle tier) | Clean separation; ffmpeg-vaapi still did CPU copies |
 | A/V sync clock | CLOCK_MONOTONIC nanoseconds, stamped at capture | Single epoch across all capturers and audio; wall-clock ms is broken |
@@ -69,7 +68,7 @@ specs/
 ## How to Use These Specs
 
 Each spec file is self-contained with:
-- **Public interface** — Go interface definition the module must implement
+- **Public interface** — Rust trait definition the module must implement
 - **Internal architecture** — data flow, components, system interactions
 - **Refactoring directives** — numbered `R-XXX-NN` items, each a concrete task
 - **Testing strategy** — unit/integration/benchmark breakdown
@@ -77,15 +76,37 @@ Each spec file is self-contained with:
 
 **For an agent starting implementation:**
 
-1. Read `CENTRAL_SPEC.md` first — it defines all cross-module contracts and the dependency graph.
-2. Pick a leaf module (Logger, Protocol, or Input — they have no internal dependencies).
-3. Implement the module's `pkg/` interface and `internal/` implementation.
-4. Write tests against the interface, not the implementation.
-5. The Pipeline module is last — it wires everything together.
+1. Read `CENTRAL_SPEC.md` first — it defines all cross-module contracts and the Module Dependency Graph.
+2. Pick a leaf module: `featherdesk-stream` (the shared foundation — `Params`/`EncodedFrame`/`StreamError` — every other module depends on it) is the natural starting point, followed by `protocol` (pure data, shared with the client, no logic deps) or `clipboard` (core, per-OS, minimal surface). There is no dedicated Logger module — every module uses the `tracing` crate directly (see `CENTRAL_SPEC.md` "Removed from the module map").
+3. Implement the module's crate: the public `trait` plus its internal implementation (e.g. `featherdesk-<module>`).
+4. Write tests against the trait, not the implementation.
+5. The Pipeline module is last — it wires everything together (the sole crate that imports all others).
 
-**Codec expansion (minimum required set):**  
-The refactor must support at minimum: H.264, H.265 (libx265 + hardware HEVC), VP8, VP9, AV1.  
+**Codec set (final — reconciled with `MODULE_ENCODE.md` / `MODULE_HARDWARE_ENCODE.md` / `PLATFORM_COMPAT.md`):**
+
+| Codec | Tier | Status |
+|-------|------|--------|
+| H.264 | Hardware (all platforms) + Software (`x264`, `openh264`) | ✅ Fully specced, universal default |
+| HEVC (H.265) | Hardware only — no software encoder (`libx265` has triple patent-pool exposure, see `PLATFORM_COMPAT.md`) | ✅ Fully specced, used for HDR |
+| AV1 | Hardware only (NVENC Ada Lovelace+, AMD RDNA3+, Intel Arc/QSV; **no Apple Silicon has AV1 HW encode**) | 🚧 Per-vendor capability detection already specced (see `specs/addons/*/encoders/HW/`); wire `frame_type` now reserved (`VIDEO_AV1 = 16`, see `CENTRAL_SPEC.md`) — add-on *implementation* is future work |
+| VP8 | — | ❌ Rejected — legacy codec, no demand, superseded by AV1 (no add-on exists; wire slot 5 permanently retired, do not reuse) |
+| VP9 | — | ❌ Never adopted — AV1 supersedes it with better compression, and every hardware vendor converged on AV1 rather than VP9 for the royalty-free tier |
+
+AV1 is the deliberate modern replacement for the old VP8 slot — VP8 was dropped for its age and because no current-generation encode silicon targets it, not swapped for another aging codec.
+
 Encoder selection is driven by the `feature-benchmark` output file (`.featherdesk-bench.json`) when present.
+
+---
+
+## Migration Strategy (Go → Rust Cutover)
+
+This is a full rewrite of working software (`feature-libav-vp8s8`), not an incremental patch, so it needs an explicit cutover plan rather than an implicit "swap it in when done":
+
+1. **Parallel existence, not a hard cutover.** `feature-libav-vp8s8` (Go) remains the production branch and rollback target for the entire duration of the Rust rewrite — it is not touched, deprecated, or feature-frozen until the Rust implementation reaches parity (step 3).
+2. **Module-by-module validation, not one big-bang merge.** The dependency graph in `CENTRAL_SPEC.md` guarantees no cycles, so crates land and get reviewed independently — starting from `featherdesk-stream` outward — well before `pipeline` wires them into a runnable binary.
+3. **Parity gate before cutover.** The existing `feature-benchmark` tooling (`.featherdesk-bench.json`) is the acceptance bar: the Rust `pipeline` binary must match or beat the recorded Go encode latency/CPU/memory numbers, not just "compiles and runs."
+4. **Cutover trigger.** `master` only points at the Rust implementation once (a) all core + media modules pass their module-spec Testing Strategy, (b) the parity gate in step 3 passes, and (c) a manual end-to-end session (capture → encode → transport → browser client) has run on each platform currently marked "Working" in `PLATFORM_COMPAT.md` (Linux only, today).
+5. **Rollback.** Until step 4's criteria are met, `feature-libav-vp8s8` stays deployable at any time — the Go implementation is never deleted or made non-functional as a fallback.
 
 ---
 
@@ -105,9 +126,15 @@ The refactored code should eventually replace `feature-libav-vp8s8` as the main 
 
 | | |
 |-|-|
-| Specs written | ✅ 15 module specs + per-OS add-ons |
-| Specs reviewed | ✅ Two full review passes (all 34 issues addressed) |
+| Specs written | ✅ 19 module specs + per-OS add-ons |
+| Specs reviewed | ✅ All 5 tracks — see below |
 | Code written | ❌ None yet |
 | Tests written | ❌ None yet |
 
-The specs went through two rigorous review rounds: all cross-module contracts were verified against the actual source code, confirmed source-level bugs were incorporated, and four architectural decisions were made with the project owner.
+All 40 catalogued TD issues have a traced fix mapped to a specific module/decision in `CENTRAL_SPEC.md` — no row still reads "GAP" — and cross-module contracts were verified against the actual Go source on `feature-libav-vp8s8`; the architectural decisions in the Key Design Decisions table above were finalized with the project owner.
+
+All five original tracks now have review + summary artifacts on disk under `PROJECT_ARTIFACTS/review/<track>/` and `PROJECT_ARTIFACTS/summaries/<track>/`: `kms_capture_software_encode` (the original three-phase pass), plus `input_injection_uinput`, `multiclient_metrics_polish`, `pipewire_audio_capture`, and `vaapi_hardware_encoding` (commit-level audits of the implementation history, which is where TD-35–TD-40 came from).
+
+Implementation-readiness analyses — per-feature clarity and wiring assessments — are in `PROJECT_ARTIFACTS/IMPLEMENTATION_READINESS_CORE_MEDIA.md` and `PROJECT_ARTIFACTS/IMPLEMENTATION_READINESS_INTERACTION_CLIENT_ADDONS.md`, each with a **Final Review Pass addendum** recording what was found and fixed afterwards. The QA acceptance suite (81 user stories across 8 areas, no open `GAP` citations) is in `PROJECT_ARTIFACTS/user_stories/`, indexed by `INDEX.md`.
+
+**Final cross-module review.** The last pass audited *across* module boundaries rather than within them — for every consumer, asking who produces it. That is a different question from "is this module internally consistent", and it found three defects the per-module passes structurally could not: the cursor overlay had a wire type, a `send_cursor` method, and a client renderer but **no producer** (`send_cursor` had zero callers anywhere); the host→client clipboard direction had **no `Server` method and no drainer** despite two specs each describing the other's half; and the ABI had **no mechanism** for the host to learn which optional traits an add-on implements, since a `#[sabi_trait]` object cannot be downcast. All three are fixed (`CursorCapturer` + Contract 8, `send_clipboard` + Contract 9, `ProbeReport.caps`). Mechanical invariants now verified green: all 175 docs' relative links resolve, every `Server` trait method has a pipeline caller, every `server::Config` field has a named constructor, `StreamError` ↔ `AbiErr` is 1:1, and all 81 user stories cite a real spec heading.

@@ -286,6 +286,15 @@ capture clock (the pre-audio behavior) — there is no master to slave to.
 5. The worklet plays gaplessly; its playout position drives the video sync clock
    (see "A/V Sync"). On a genuine gap with no Opus FEC recovery, the worklet
    outputs PLC/silence for that 20 ms rather than stalling.
+6. **Teardown and backgrounding** are specified in
+   [`MODULE_WEB_CLIENT.md`](../client/MODULE_WEB_CLIENT.md) **R-CLI-14**. In
+   short: the worklet node is disconnected *before* `audioContext.close()` (never
+   the reverse — a closing context can still run `process()`), teardown is
+   idempotent and hangs off `pagehide` rather than `unload` (so the page stays
+   bfcache-eligible and it fires reliably on mobile), and a **backgrounded tab
+   keeps playing audio gaplessly** while video decoding stops. That asymmetry is
+   deliberate: audio is the master clock here, so pausing it would desync the
+   stream on return, and browsers throttle timers but not `AudioWorklet`.
 
 ---
 
@@ -336,6 +345,8 @@ audio silently disabled (matches the gamepad/input "needs an add-on" pattern).
 | Unit | PCM normalization (device format → 48k/stereo/S16LE) | No |
 | Unit | S16LE ↔ Float32 conversion | No |
 | Unit | Back-pressure drop-oldest behavior | No |
+| Unit | **Buffer conservation (TD-40 regression guard)** — feed N seconds of synthetic samples through the capture→normalize→frame-assembly path with back-pressure disabled; assert `samples_out == samples_in` exactly, with zero silent drop. The historical `PCMProcessor.process()` bug discarded ~83 % of samples (kept 128 of every 960) and shipped undetected because nothing counted. Any drop must be *explicit* (a back-pressure event with a counter), never a consequence of a buffer-size mismatch | No |
+| Unit | **Client-side ring-buffer conservation** — the browser `AudioWorklet` processor is the exact site of the original bug: push chunks of the server's `frame_ms` size into it and pull 128-sample render quanta out; assert the total pulled equals the total pushed (modulo the tail still resident in the ring) and that a chunk size that is *not* a multiple of 128 loses nothing at the boundary | No |
 | Unit | Opus encode/decode round-trip + FEC framing | No (libopus) |
 | Unit | A/V sync: video frame selection against a synthetic audio clock | No |
 | Integration | Full capture→encode→broadcast (5 s) per OS add-on | Yes (per OS) |

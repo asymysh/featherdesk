@@ -657,6 +657,7 @@ stream). Config and Clipboard are NOT FrameHeader types anymore.
 | _(retired)_ | 12 | — | Was Clipboard — now `[u32 Len][JSON]` on the **clipboard stream** |
 | InputAck | 14 | input stream | 13-byte echo of client input seq + server timestamp (RTT) |
 | GamepadRumble | 15 | datagram | 9-byte rumble payload (index + magnitudes + duration; see [`./interaction/MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md)) |
+| VideoAV1 | 16 | datagram + bootstrap | One AV1 temporal unit (raw low-overhead OBU stream — **not** Annex B; keyframe = OBU_SEQUENCE_HEADER + key OBU_FRAME). Reserved for the `av1` HW add-on tier (see `PLATFORM_COMPAT.md`); no add-on implements it yet (impl deferred) |
 
 One datagram fragment-chain carries exactly one access unit; fragmentation is purely byte-level within that AU (NALs are never reordered or dropped individually).
 
@@ -806,6 +807,79 @@ impl Server {
 - The pipeline carries `width/height/timestamp_ns` from the capture step through encode to here (they are NOT recomputed).
 - The server owns the per-type sequence counters; the pipeline never sets them.
 - `f.keyframe` (set by the encoder) lets the server cache the keyframe access unit (SPS+PPS+IDR / VPS+SPS+PPS+IDR) for the bootstrap stream. The server does **not** re-parse NALs (M-2).
+
+---
+
+### Contract 8: Cursor -> Server (client-side cursor overlay)
+
+The producer half of the `cursorMode = "separate"` design decision. Until this
+contract existed, every module *consumed* `CursorUpdate` (server `send_cursor`,
+wire type 11, the client's `cursor.js`) but **nothing produced it**.
+
+```rust
+// OPTIONAL trait on a capture add-on (MODULE_CAPTURE). Advertised at probe time
+// via ProbeReport.caps & AddonCaps::CURSOR — a sabi object cannot be downcast,
+// so the flag is the only way the host knows this is real.
+pub trait CursorCapturer: Capturer {
+    /// Ok(Some(u)) = the cursor changed; Ok(None) = unchanged. Non-blocking.
+    fn next_cursor(&mut self) -> Result<Option<protocol::CursorUpdate>, StreamError>;
+}
+```
+
+**Data Flow:** frame loop step (0b) → `cursor_cap.next_cursor()` →
+`server.send_cursor(u)` → datagram `frame_type::CURSOR_UPDATE` (11) →
+client `cursor.js` overlay.
+
+**Contract Rules:**
+- Polled **before** the frame-skip check, so the pointer keeps moving while video
+  is skipped, dropped, or static. This is the entire latency argument for
+  `"separate"`; polling it after capture would freeze the cursor precisely when
+  the stream is already degraded.
+- `image_changed` is set only on a **shape** change; a position move carries an
+  empty `rgba` and stays a 10-byte datagram. The add-on decides — the pipeline
+  does not diff bitmaps on the hot loop.
+- Latest-wins: `CursorUpdate` is an unreliable datagram with no retransmit. A
+  dropped update is superseded by the next one; the client never requests one.
+- Never fatal. A `next_cursor` error disables cursor polling, flips the session
+  to `"embedded"`, and pushes a fresh `config` — it does not touch the
+  capture-error escalation ladder and never stops video.
+- If no loaded capture add-on reports `CURSOR`, the pipeline resolves to
+  `"embedded"` rather than shipping a stream with no visible pointer.
+
+---
+
+### Contract 9: Clipboard <-> Server (bidirectional)
+
+Clipboard is the one module with a **symmetric** contract, and the two halves are
+wired differently — which is why the host→client half was missing until now.
+
+```rust
+// C→H (client copies → host clipboard): a CALLBACK the server invokes.
+server.set_clipboard_callback(Box::new(move |c| monitor.set(c)));
+
+// H→C (host copies → client clipboard): a PUSH the pipeline's clipboard task makes.
+while let Some(c) = monitor.changes().recv().await {
+    server.send_clipboard(c);
+}
+```
+
+**Data Flow (H→C):** OS clipboard event → `Monitor::changes()` → pipeline
+clipboard task → `server.send_clipboard` → `[u32 Len][JSON]` on the clipboard
+stream (tag `0x02`) → client.
+**Data Flow (C→H):** client → clipboard stream → server → `set_clipboard_callback`
+→ `Monitor::set` → OS clipboard.
+
+**Contract Rules:**
+- **The server gates, not the caller.** `[clipboard] direction`, controller-only
+  delivery, and HTML sanitization all happen inside `send_clipboard` / the
+  callback dispatch. The pipeline task pushes unconditionally and stays dumb.
+- Viewers never receive host clipboard pushes (host-secret leakage), regardless
+  of `direction`.
+- `send_clipboard` is non-blocking and infallible to the caller: a slow or
+  unopened clipboard stream drops that push for that session and bumps a metric.
+  A clipboard stall must never back-pressure the monitor task.
+- Clipboard never rides the control stream — payloads reach 1 MiB, far past the
+  4 KiB control-line cap.
 
 ---
 
@@ -1094,9 +1168,9 @@ each crate gets a 3-line `README` that **links** to its spec here — never a co
 
 | ID | Severity | Location | Issue | Resolution |
 |----|----------|----------|-------|------------|
-| TD-23 | High | `server.go:149-178` | Broadcast sends ONE message PER NAL → multi-NAL H.264 yields partial access units; breaks WebCodecs | One message per frame, concatenate NALs (Annex B) |
+| TD-23 | High | `server.go:149-178` | Broadcast sends ONE message PER NAL → multi-NAL H.264 yields partial access units; breaks WebCodecs. **Addendum (confirmed via `vaapi_hardware_encoding` track review, `internal/encode/ffmpeg.go`):** the same bug class shipped independently in the ffmpeg/VA-API encoder path (commit `3507455`) and was patched same-day (`99648f2`) by draining every NAL currently queued on the channel before returning — a timing heuristic, not true access-unit-boundary detection, so it could still resplit under bursty I/O. | One message per frame, concatenate NALs (Annex B). The new `Encoder::encode()`/`HardwareEncoder::encode_surface()` contract (`MODULE_ENCODE.md`/`MODULE_HARDWARE_ENCODE.md`) closes this **structurally**, not heuristically: an add-on MUST return exactly one complete `EncodedUnit` per call — there is no "whatever's in the channel right now" path available to a conforming add-on. |
 | TD-24 | High | `server.go:164-168` | IDR cache stores only the IDR NAL; SPS/PPS (separate messages) lost → undecodable | Cache whole per-frame keyframe message (contains SPS+PPS+IDR) |
-| TD-25 | High | `main.go:295` (video timestamping in main loop) | Video + Audio stamped at consumption with wall-ms; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; the audio PCMChunk carries the capture timestamp (audio design locked; impl deferred) |
+| TD-25 | High | `main.go:295` (video timestamping in main loop); **also `main.go`'s audio goroutine → `Server.BroadcastAudio(pcm, uint64(time.Now().UnixMilli()))`, confirmed via the `pipewire_audio_capture` track review** | Video + Audio stamped at consumption with wall-ms; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; the audio PCMChunk carries the capture timestamp (audio design locked; impl deferred) |
 | TD-26 | High | `main.go:249-252` | New-client handler forces keyframe + `capturer.Restart()` (respawns capture) → storm for all viewers | Serve cached IDR; conditional keyframe; never restart capture; rate-limit |
 | TD-27 | Med | `main.go:158` | Input device hardcoded 2560×1440 ≠ stream dims → cursor offset | Resolved by MODULE_INPUT — input dims = stream dims; Dispatcher.Resize on resolution change |
 | TD-28 | Med | Protocol/round-1 | Length-prefix NAL framing added client AVCC complexity for no browser benefit | Reverted to Annex B per-frame concatenation |
@@ -1106,3 +1180,14 @@ each crate gets a 3-line `README` that **links** to its spec here — never a co
 | TD-32 | Med | Protocol/Input | InputAck had nothing to echo (no input seq) | Input messages carry `seq`; server echoes in 13-byte InputAck |
 | TD-33 | Low | Protocol | KeyframeReq/Resize as binary types vs JSON client channel | Keyframe via control-stream JSON; Resize via a fresh `config` message |
 | TD-34 | Low | Pipeline (round-1 spec) | `FramesCaptures` typo; unused `minInterval`; undefined Stats methods | Corrected in MODULE_PIPELINE |
+
+### Round-3 Review Findings (verified against source, via conductor-track reviews)
+
+| ID | Severity | Location | Issue | Resolution |
+|----|----------|----------|-------|------------|
+| TD-35 | Medium | `compositor.js` keydown/keyup handlers (input_injection_uinput track) | No `blur`/`visibilitychange` listener and no tracked pressed-key set; a key held down when the tab loses focus is never released, leaving it stuck down on the host via the uinput device indefinitely | Resolved by MODULE_INPUT — `release_all()` injects an up-event for every key/button/touch currently held, specifically "to prevent a client disconnect (or, by extension, a focus-loss event routed the same way) from leaving a key stuck down on the host" |
+| TD-36 | Low | `compositor.js` `pointermove`/`wheel` handlers (input_injection_uinput track) | No throttling: every raw `pointermove` (plan specified 8ms) and `wheel` (plan specified 16ms batching) event is sent individually; a high-polling-rate mouse can flood the transport well beyond the specced rate | Resolved by MODULE_INPUT — server-side per-client rate limit (`server.input_rate_limit`, default 1000 ev/s) with `mousemove` coalescing |
+| TD-37 | Low | `internal/input/keymap.go` `browserToLinux` map (input_injection_uinput track) | Only F1-F12 are mapped despite the plan explicitly requiring F1-F24; F13-F24 silently fail to inject (fall through the unmapped-code path, no crash but no input) | Resolved — MODULE_INPUT's keymap explicitly covers "letters, digits, F1-F24, modifiers..." |
+| TD-38 | Medium | `internal/input/protocol.go` wheel handling, calling `InjectWheel` (input_injection_uinput track) | Browser `deltaY` magnitude is discarded entirely — only its sign survives, collapsed to a fixed `±1` `REL_WHEEL` step regardless of actual scroll speed (mouse notch vs. fast trackpad fling are indistinguishable on the host) | Resolved by MODULE_INPUT — the new Scroll message (type `0x23`) carries high-resolution signed `i16` `Dx`/`Dy` deltas end-to-end, magnitude-preserving by design |
+| TD-39 | Medium | `internal/encode/ffmpeg.go` `restart()` (vaapi_hardware_encoding track) | No backoff on repeated subprocess crashes: a flat kill+50ms-sleep+respawn loop with no attempt counter or circuit breaker — a persistently crashing encoder (e.g. driver fault) restart-loops roughly every ~250ms indefinitely, burning CPU and spamming logs instead of degrading gracefully | **Fixed.** `MODULE_PIPELINE.md` "Add-On Crash Recovery" is now the normative two-level policy for every restartable add-on: **Level 1** (inside the add-on) is a bounded exponential ladder — 100/200/400/800/1600 ms ±20 % jitter, counter decaying after 60 s healthy, give up on the 6th failure; **Level 2** (inside the pipeline) never retries an add-on that reported the new `StreamError::Unrecoverable` (`AbiErr` code `7`, `MODULE_ABI.md`) — it poisons that add-on for the session, walks the startup probe order to the next candidate, forces an IDR + fresh `config` on a successful swap, and shuts down cleanly if none remain. `X264_SUBPROCESS_LINUX_SPEC.md` "Crash Recovery" binds it for the ffmpeg child (reaper task, stderr ring buffer for diagnostics, NAL-accumulator reset across the restart, drop-never-buffer during the gap, missing binary caught at `probe()`). Four integration test rows in `MODULE_PIPELINE.md` guard the ladder, the decay, the fall-through, and the no-candidate-left terminal case. |
+| TD-40 | Low | `compositor.js` `PCMProcessor.process()`, historical (pipewire_audio_capture track) | The original per-chunk audio queue discarded ~83% of incoming samples per callback (128 of 960); shipped before being caught, fixed same development cycle in commit `523d108`. The regression existed in working code for some period without an automated test catching it. | **Fixed.** `MODULE_AUDIO.md`'s Testing Strategy gained two conservation rows: a server-side one (N seconds of synthetic samples through capture→normalize→frame-assembly with back-pressure disabled must yield `samples_out == samples_in`; any drop must be an explicit counted back-pressure event, never a buffer-size mismatch) and a client-side one covering the exact bug site — pushing `frame_ms`-sized chunks into the `AudioWorklet` ring buffer and pulling 128-sample render quanta, asserting nothing is lost when the chunk size is not a multiple of 128. |

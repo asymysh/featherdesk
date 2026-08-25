@@ -13,7 +13,7 @@ The client is a single-page application embedded in the server binary via `rust-
 **Files (post-refactor, R-CLI-10):**
 | File | Purpose |
 |------|---------|
-| `index.html` | HTML shell: canvas, cursor overlay, status overlay, `<script type="module">` |
+| `index.html` | HTML shell: canvas, cursor overlay, status overlay (connection state — see R-CLI-13), `<script type="module">` |
 | `main.js` | Entry point, reads role, wires modules |
 | `connection.js` | WebTransport connect/reconnect, StreamType-tagged control/input/clipboard stream setup, bootstrap + datagram reassembly, control dispatch |
 | `protocol.js` | 22-byte media FrameHeader parse, 8-byte DatagramHeader parse, control/clipboard JSON helpers |
@@ -21,11 +21,11 @@ The client is a single-page application embedded in the server binary via `rust-
 | `renderer.js` | Canvas rendering |
 | `cursor.js` | Client-side cursor overlay (CursorUpdate) |
 | `audio.js` | AudioContext + Worklet, A/V sync |
-| `input.js` | Binary input encode (DataView), HID-usage map, pointer-lock, InputAck latency |
+| `input.js` | Binary input encode (DataView), HID-usage map, pointer-lock, InputAck latency, focus-loss release (R-CLI-12) |
 | `clipboard.js` | clipboardchange / copy / paste interception; host-update apply |
 | `files.js` | Drag-drop upload + Files panel for downloads — opens per-transfer QUIC streams on the main session |
 | `gamepad.js` | rAF poll of getGamepads, diff-send 0x40, connect/disconnect 0x41/0x42, rumble apply |
-| `stats.js` | FPS/bandwidth/latency display |
+| `stats.js` | Outbound telemetry to server (R-CLI-06); on-screen FPS/latency/quality HUD (R-CLI-13) |
 
 ---
 
@@ -141,7 +141,8 @@ BOOTSTRAP STREAM (incoming UNI; first byte tag 0x10, then [u32 Len][FrameHeader�
 CONTROL STREAM (newline-delimited JSON, both directions — NO FrameHeader)
     → S → C lines: auth_ok, auth_failed, config, hdr_unavailable, resize_suppressed, server_shutdown
         config:  configure decoder (ONLY if codec/width/height changed), set cursorMode
-    → C → S lines: auth, keyframe, pong, stats, resize, set_* (NOT clipboard)
+    → C → S lines: auth, keyframe, pong, stats, resize, set_*, chroma_unsupported
+                   (NOT clipboard, NOT input — those have their own streams)
 
 CLIPBOARD STREAM (bidi; first byte tag 0x02, then [u32 Len][JSON] both ways)
     → S → C: clipboard.applyHostUpdate(json)
@@ -279,12 +280,21 @@ function send(len) {                                   // inpW = input-stream wr
     inpW.write(out).catch(() => {});
 }
 
+// R-CLI-12 (fixes a confirmed old-code bug — see "Held-Input Release on
+// Focus Loss" below): every key/button the controller is currently holding
+// down, so a synthetic "up" can be sent for each without waiting for the
+// browser to ever fire a real keyup/pointerup (it won't, once focus is gone).
+const heldKeys = new Set();     // HID usage codes currently down
+const heldButtons = new Set();  // pointer button indices currently down
+
 if (isController) {
     // Key: HID usage from code; Flags bit0 = down
     document.addEventListener('keydown', (e) => { e.preventDefault();
-        header(0x10); dv.setUint16(6, hidFromCode(e.code), true); dv.setUint8(8, 1); send(9); });
+        const hid = hidFromCode(e.code); heldKeys.add(hid);
+        header(0x10); dv.setUint16(6, hid, true); dv.setUint8(8, 1); send(9); });
     document.addEventListener('keyup', (e) => { e.preventDefault();
-        header(0x10); dv.setUint16(6, hidFromCode(e.code), true); dv.setUint8(8, 0); send(9); });
+        const hid = hidFromCode(e.code); heldKeys.delete(hid);
+        header(0x10); dv.setUint16(6, hid, true); dv.setUint8(8, 0); send(9); });
 
     // Mouse: absolute (or relative when pointer-locked)
     canvas.addEventListener('pointermove', (e) => {
@@ -297,11 +307,26 @@ if (isController) {
             header(0x20); dv.setUint16(6, x, true); dv.setUint16(8, y, true); send(10);
         }
     });
-    canvas.addEventListener('pointerdown', (e) => { header(0x22); dv.setUint8(6, e.button); dv.setUint8(7, 1); send(8); });
-    canvas.addEventListener('pointerup',   (e) => { header(0x22); dv.setUint8(6, e.button); dv.setUint8(7, 0); send(8); });
+    canvas.addEventListener('pointerdown', (e) => { heldButtons.add(e.button);
+        header(0x22); dv.setUint8(6, e.button); dv.setUint8(7, 1); send(8); });
+    canvas.addEventListener('pointerup',   (e) => { heldButtons.delete(e.button);
+        header(0x22); dv.setUint8(6, e.button); dv.setUint8(7, 0); send(8); });
     canvas.addEventListener('wheel', (e) => { e.preventDefault();
         const unit = e.deltaMode;       // 0=pixel,1=line,2=page
         header(0x23); dv.setInt16(6, e.deltaX, true); dv.setInt16(8, e.deltaY, true); dv.setUint8(10, unit); send(11); });
+
+    // Focus-loss release: the browser only fires keyup/pointerup for events
+    // it sees. Alt-tabbing away, or the tab going to a hidden/backgrounded
+    // state, produces NEITHER — without this, whatever was held stays
+    // pressed on the HOST indefinitely (confirmed bug in the pre-refactor
+    // client; see "Held-Input Release on Focus Loss").
+    function releaseAllHeld() {
+        for (const hid of heldKeys) { header(0x10); dv.setUint16(6, hid, true); dv.setUint8(8, 0); send(9); }
+        for (const btn of heldButtons) { header(0x22); dv.setUint8(6, btn); dv.setUint8(7, 0); send(8); }
+        heldKeys.clear(); heldButtons.clear();
+    }
+    window.addEventListener('blur', releaseAllHeld);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAllHeld(); });
 }
 
 // InputAck (binary type 14) → latency
@@ -440,7 +465,7 @@ client/
 ├── clipboard.js     // clipboardchange/copy/paste interception
 ├── files.js         // Drag-drop + Files panel (QUIC streams on the main session)
 ├── gamepad.js       // Gamepad-API poll + rumble apply
-└── stats.js         // FPS/bandwidth display
+└── stats.js         // Outbound telemetry (R-CLI-06) + on-screen HUD (R-CLI-13)
 ```
 Use ES modules (`import`/`export`) since all target browsers support them.
 
@@ -449,6 +474,94 @@ Carry the session token in the **first JSON message on the WebTransport
 control stream** — `{"type":"auth","token":"<bearer>","role":"control|view|player"}`
 — NOT as a URL query parameter (which leaks to proxy logs / Referer / browser
 history). See [`MODULE_AUTH.md`](../core/MODULE_AUTH.md).
+
+### R-CLI-12: Held-Input Release on Focus Loss (fixes a confirmed bug)
+
+The pre-refactor client had no `blur`/`visibilitychange` handling: alt-tabbing
+away from the tab (or the OS switching windows) fires neither `keyup` nor
+`pointerup` for whatever was held at that moment, because the browser simply
+stops delivering events to a backgrounded page — the WebTransport session
+stays open, so nothing tells the host those inputs were released. The result:
+a key or mouse button can stay "pressed" on the host indefinitely. See the
+`heldKeys`/`heldButtons`/`releaseAllHeld()` code above (Internal Architecture)
+for the fix — every currently-held key/button gets a synthetic release the
+moment `window.blur` fires or `document.visibilityState` becomes `hidden`.
+This is a client-only fix; no wire format or server change is needed since
+`releaseAllHeld()` just sends ordinary up-events through the existing binary
+input records.
+
+### R-CLI-13: On-Screen Connection/Stats HUD
+
+`stats.js` and the `index.html` "status overlay" were previously named in
+this doc's file listing (see Public Interface above) but never actually
+specced beyond `stats.js`'s outbound telemetry role (R-CLI-06) — there was no
+spec for anything shown **to the user**, which is also why bandwidth/RTT
+visibility was never built pre-refactor (see
+`PROJECT_ARTIFACTS/summaries/multiclient_metrics_polish/phase2.md`). This
+closes that gap:
+
+- A toggleable HUD (default hidden; **F9** or a small on-canvas icon toggles
+  it — pick one consistently, doesn't need to be configurable) overlays:
+  - **FPS** — `framesPresentedThisWindow` from the same rolling window R-CLI-06
+    already computes for outbound `stats` telemetry (no new measurement, just
+    render the existing number instead of only sending it).
+  - **Input latency** — `inputLatencyMs`, already computed in `recordAck()`
+    (Internal Architecture above) but never consumed until now.
+  - **Stream quality** — current resolution + codec + bitrate, read from the
+    last `{"type":"config"}` message (see MODULE_STREAM_PARAMS.md) — no new
+    signal needed, the client already receives this on every param change.
+  - **Connection state** — `connecting` / `connected` / `reconnecting` /
+    `disconnected`, driven by the WebTransport session's own state transitions
+    and the resume flow (see MODULE_TRANSPORT.md "Connection Lifecycle").
+- This is a passive display of numbers the client already has, not a new
+  active "bandwidth test" (no extra probe traffic, no new server endpoint) —
+  deliberately the minimal fix that gives the user real-time connection
+  visibility without introducing an unspecced new feature.
+
+### R-CLI-14: Deterministic Teardown and Backgrounded-Tab Behavior
+
+The client allocates OS-backed resources the GC does not promptly reclaim —
+an `AudioContext` (a real audio device handle), an `AudioWorklet` node, a
+`VideoDecoder`, in-flight `VideoFrame`s, and the WebTransport session itself.
+Nothing previously specified when they are released, which is how you get sound
+continuing after the viewer navigates away, or a "this tab is using your
+microphone/audio" indicator that never clears.
+
+**Teardown — one idempotent `teardown()`, called from every exit path**
+(`pagehide`, `beforeunload`, an explicit Disconnect, `server_shutdown`, and the
+session's own closed promise). Use **`pagehide`, not `unload`** — `unload`
+prevents the page from entering the browser's back/forward cache and does not
+fire reliably on mobile. Order matters, and it is the reverse of setup:
+
+1. `releaseAllHeld()` (R-CLI-12) **first**, while the session is still open —
+   otherwise the host keeps the held keys. This is the one step that must
+   happen before the transport goes away.
+2. `videoDecoder.close()`; `close()` every `VideoFrame` still in the present
+   queue. An unclosed `VideoFrame` pins a GPU buffer and will log a browser
+   warning.
+3. Disconnect the worklet node, then `await audioContext.close()` — node first,
+   or the worklet's `process()` can run against a closing context.
+4. `wt.close()` with an application close code, then clear the reassembly map
+   and the `sentAt` latency map (both hold references that would otherwise
+   outlive the session).
+
+Every step is wrapped so one failure does not skip the rest, and `teardown()`
+sets a flag so a second call is a no-op — `pagehide` and the session-closed
+promise routinely both fire.
+
+**Backgrounded tab — audio continues, video stops decoding.** This is
+deliberate, not an oversight:
+
+| Resource | Backgrounded (`visibilitychange` → hidden) | Why |
+|----------|--------------------------------------------|-----|
+| Held inputs | Released immediately (R-CLI-12) | A stuck key on the host is the worst outcome |
+| Audio | **Keeps playing, gaplessly** | Audio is the master clock (MODULE_AUDIO); pausing it would break A/V sync on return, and a backgrounded remote session is a normal "listen while I work" case. Browsers throttle timers but not `AudioWorklet`. |
+| Video decode | Stops presenting; `requestAnimationFrame` does not fire in a hidden tab | Continuing to decode frames nobody sees burns CPU and battery for nothing |
+| Incoming video datagrams | Still reassembled, but the present queue is capped and drops oldest | Keeps the reassembler's state coherent without growing unboundedly across a long background period |
+| On return (`visible`) | Send `{"type":"keyframe"}` and reset `lastSeq` from the next decoded frame | The decoder's reference chain is stale after dropping frames; ask for a fresh IDR rather than decoding garbage. Suppress gap-detection on that transition exactly as the fast-join rule does. |
+
+With audio disabled the same rules apply minus the audio row; video presents on
+its own capture clock on return.
 
 ---
 
@@ -462,6 +575,8 @@ history). See [`MODULE_AUTH.md`](../core/MODULE_AUTH.md).
 | Unit | S16LE → Float32 conversion | Jest/Node |
 | Unit | Coordinate scaling (client → stream space) | Jest/Node |
 | Unit | CursorUpdate parse + overlay positioning | Jest/Node |
+| Unit | `releaseAllHeld()` sends an up-record for every entry in `heldKeys`/`heldButtons` and clears both sets | Jest/Node |
+| Integration | `window.blur` while a key is held sends its release before any other input; a key pressed AFTER blur (impossible in a real browser, but the handler must not throw) is a no-op | Browser automation (Playwright) |
 | Integration | Full connection + frame decode | Browser automation (Playwright) |
 | Visual | Render quality, cursor alignment | Manual + screenshot comparison |
 | Performance | Decode latency, frame drop rate | WebCodecs metrics API |

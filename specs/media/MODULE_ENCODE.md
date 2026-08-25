@@ -227,6 +227,22 @@ Encode module deliberately excludes:
 
 ---
 
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | `encode()` returns ONE contiguous Annex B access unit per call — never the rejected per-NAL `Vec<Vec<u8>>` shape | No |
+| Unit | `keyframe` flag is set by the encoder itself; a keyframe access unit contains SPS+PPS+IDR (H.264) or VPS+SPS+PPS+IDR (HEVC) in order, never a bare IDR | No |
+| Unit | `force_keyframe()` is safe to call concurrently with `encode()` (signalled via AtomicBool/channel) and the very next `encode()` call after it returns a keyframe | No |
+| Unit | Color conversion correctness: BGRA→I420 via `ARGBToI420` and RGBA→I420 via `ABGRToI420` produce matching Y/U/V planes for a known test pattern (verifies the libyuv naming-convention mapping isn't inverted) | No |
+| Unit | Chroma capability gate: requesting 4:2:2/4:4:4 from OpenH264 returns `StreamError::ChromaUnsupported`; requesting the same from x264 succeeds | No |
+| Unit | `update_stream_params` returns `StreamError::RequiresRestart` for a change a given add-on can't apply live, and the pipeline tears down + recreates on that signal | No |
+| Integration | Pipeline SW fallback order when no hardware encoder is loaded: `x264 > VT SW (macOS only) > OpenH264` | Yes (per add-on) |
+| Integration | `Converter` reuse: steady-state `convert()` calls after warmup perform zero additional allocation | No |
+| Integration | Per-add-on encode of a 5s synthetic I420 sequence produces a decodable Annex B stream (round-trip through a reference decoder) for OpenH264, x264, and VT SW | Yes (per add-on/OS) |
+
+---
+
 ## Implementation Status
 
 | Add-on | Status |

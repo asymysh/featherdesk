@@ -20,6 +20,9 @@ pub struct Pipeline {
     transport: Box<dyn transport::Transport>,         // QUIC/WebTransport listener; built here, handed to server
     capturer: Box<dyn capture::Capturer>,
     surf_cap: Option<Box<dyn capture::SurfaceCapturer>>, // None if capturer doesn't implement SurfaceCapturer
+    cursor_cap: Option<Box<dyn capture::CursorCapturer>>, // Some ONLY when step 6a resolved cursorMode="separate";
+                                                      // polled on the frame loop → server.send_cursor
+    cursor_mode: CursorMode,                          // Separate | Embedded — derived at 6a, reported in `config`
     converter: Option<encode::Converter>,             // BGRA/RGBA→I420 (+ scale to output dims); None on HW path
     encoder: Option<Box<dyn encode::Encoder>>,        // None if hardware path
     hw_encoder: Option<Box<dyn hwencode::HardwareEncoder>>, // None if software path
@@ -90,6 +93,11 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    b. **Phase-B (load-aware) config validation**: force_addon must name a LOADED
       add-on ID (else startup error); each [addon_module_<id>] section is now
       strict-decoded iff its add-on is loaded, else silently ignored.
+   c. Read each probe's `ProbeReport.caps` (`MODULE_ABI` "Optional-trait
+      capability flags") — this is the ONLY way the host learns whether a
+      `CapturerBox` also serves `SurfaceCapturer` / `CursorCapturer` /
+      `ConfigurableCapturer`, since a sabi object cannot be downcast. It decides
+      `surf_cap`, `cursor_cap`, and whether a param change is hot or a rebuild.
    d. Probe each loaded capture add-on (one shared library per add-on):
       - Linux:   nvfbc → kms_egl
       - macOS:   sck
@@ -105,6 +113,23 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
         as a fallback; if none is loaded, fail fast ("HW encoder X has no SW
         fallback add-on loaded") rather than risk an unrecoverable mid-session
         StreamError::FallbackToSoftware.
+3g. For each selected add-on that reports `AddonCaps::CONFIGURABLE` /
+    `ENC_CONFIGURABLE`, call `StreamParamsCapable::stream_params_capability()`
+    (MODULE_STREAM_PARAMS) once and cache the result on the `stream::Manager`.
+    It is the source of two things the Manager cannot otherwise know:
+      - **hot vs restart, per field** — `hot_changeable["bitrate_bps"] == true`
+        means `apply` routes it to `update_stream_params`; `false` means the
+        pipeline tears down + rebuilds that add-on. The `AddonCaps` bit only says
+        "configurable at all"; this says *which fields*.
+      - **clamp bounds** — `min_values`/`max_values` are what `Manager::apply`
+        clamps client `resize`/`set_bitrate`/`set_fps` requests against, so an
+        out-of-range request is silently clamped rather than failing the encoder.
+    An add-on that does not implement it is treated as fully immutable: every
+    parameter change is a restart, and requests are clamped to the `[stream]`
+    config bounds only. `StreamParamsCapability` carries `HashMap`/`serde_json`
+    and is therefore **Layer-2 only** — it is built host-side by the adapter from
+    the add-on's boundary-safe reply, never passed across `dlopen` as-is (same
+    split as `ProbeReport` → `ProbeResult`, see MODULE_ABI).
 4. Match capture surface format to encoder input:
     - HW encoder + SurfaceCapturer with compatible FBInfo → zero-copy path
    - SW encoder + any Capturer → CPU readback + I420 conversion path
@@ -117,11 +142,31 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    to software path permanently for the rest of the session (builds the
    Converter + SW encoder via `build_software_path`; `self.capturer` is already set)
 6. Derive stream dims from the capturer's actual resolution (NOT hardcoded).
-6b. Instantiate the QUIC transport: `transport.New(transport.Config{…})` from
+6a. Resolve `cursorMode` from `[capture] show_cursor` and whether the chosen
+    capture add-on implements `capture::CursorCapturer` (see MODULE_CAPTURE
+    "Cursor delivery"). Store it on `self.cursor_mode`; it is reported in every
+    `config` message, and set `self.cursor_cap = Some(..)` only when the resolved
+    mode is `"separate"`.
+6b. Instantiate the QUIC transport: `transport::new(transport::Config{…})` from
     the `[server]`, `[server.tls]`, and `[transport]` sections (binds the UDP
     port + TLS). The pipeline owns the transport and hands it to the server.
-7. Create server (embedded client FS, session token), passing it the transport
-    via `server.Config.Transport`.
+7. Create the server, filling **every** `server::Config` field
+    (MODULE_SERVER "Public Interface") — the pipeline is the sole constructor,
+    so an unfilled field here is a compile error rather than a runtime surprise:
+    - `transport`   → the `transport::Transport` built at 6b (moved in)
+    - `client_fs`   → the embedded web-client filesystem (`rust-embed`), served from `/`
+    - `authenticator` → `auth::new(&cfg.auth)` per the `[auth]` section
+                        (MODULE_AUTH). This is where the mode's one-time startup
+                        work happens (token generation + `token_file` write, the
+                        `none`-mode warning, PIN pairing window); an
+                        `AuthError::Config` here **fails startup** rather than
+                        starting a server that cannot gate correctly.
+    - `session_cache` → backing store for resume, TTL from `[reconnect] cache_ttl_seconds`
+    - `allow_takeover` → `[server] allow_takeover`
+    - `max_clients`  → `[server] max_clients`
+    There is **no** `stream_mgr` field — the Manager arrives later via
+    `set_stream_params_callback` at step 12, because it cannot be built until
+    `param_tx` exists. See the note in `server::Config`.
 8. Create the input dispatcher if `[input] enabled` (default true): the
    `KeyMouseInjector` is the **in-core `enigo` default** unless an override add-on
    is loaded (Interception on Windows, uinput on Linux); plus an optional
@@ -139,11 +184,35 @@ struct. The pipeline reads `[capture]`, `[encode]`, `[stream]`,
    - server.set_config_provider       → returns current ConfigPayload (codec, dims, fps, hdr, cursorMode, session_token)
    - server.set_new_client_callback   → self.force_keyframe() ONLY (server already gates on cached keyframe)
    - server.set_input_callback        → input::Dispatcher::dispatch (binary; None only if [input] enabled=false)
-   - server.set_clipboard_callback    → clipboard::Monitor::set (direction + role gated by server)
+   - server.set_clipboard_callback    → clipboard::Monitor::set (C→H; direction + role gated by server)
+   - clipboard H→C drain              → the clipboard task (step 13) selects on
+                                        `clipboard::Monitor::changes()` and calls
+                                        `server.send_clipboard(content)` for each
+                                        change; the server does the direction /
+                                        controller-only / sanitization gating.
+                                        This is the mirror of the callback above —
+                                        MODULE_CLIPBOARD "Internal Architecture"
+                                        and MODULE_SERVER `clipboardReader()` both
+                                        assume this wire exists; the pipeline owns it.
    - server.set_file_transfer_service → filetransfer::Service (None if [filetransfer] disabled → server rejects new file-transfer streams with close::PROTOCOL_ERROR)
    - server.set_keyframe_request_callback → self.force_keyframe() (server rate-limits before calling)
    - input gamepad rumble emitter     → server.send_gamepad_rumble (None if no gamepad add-on)
-13. Start the frame loop (dedicated std::thread) + tokio tasks (clipboard monitor, audio loop, server).
+   - Construct the `stream::Manager` impl with a **clone of `self.param_tx`** (it
+     enqueues effective `Params` onto the same channel `on_capture_dims_changed`
+     uses — see "Resolution-Change Handling" below) and hand it to
+     `server.set_stream_params_callback`: the server dispatches control-stream
+     `resize`/`set_bitrate`/`set_fps`/`set_hdr` requests to `Manager::apply`, and
+     the bandwidth-adaptation telemetry loop (MODULE_SERVER.md "RTT + adaptive
+     bitrate") feeds it signals every `[stream.adaptive] interval_ms`. This is
+     the one piece of wiring MODULE_SERVER.md and MODULE_STREAM_PARAMS.md both
+     assume exists but neither module constructs — the pipeline owns it, same
+     as every other cross-module wire in this step.
+13. Start the frame loop (dedicated std::thread) + tokio tasks (clipboard task,
+    audio loop, server). The **clipboard task** runs `Monitor::start(cancel)` and,
+    in the same `select!`, drains `Monitor::changes()` → `server.send_clipboard`
+    (step 12). It exits on `cancel`; a `ClipboardError` from `start` disables
+    clipboard sync for the session and leaves video untouched (see "Error
+    Recovery Strategy").
 14. Enter main frame loop.
 ```
 
@@ -177,6 +246,32 @@ fn run_frame_loop(&mut self, cancel: CancellationToken) {
         //     it here, so encode and update_stream_params are never concurrent.
         if let Ok(np) = self.param_rx.try_recv() {
             self.apply_params(np);
+        }
+
+        // (0b) Cursor poll — BEFORE the skip check on purpose. The whole point
+        //      of cursorMode "separate" is that the pointer keeps moving while
+        //      video is skipped, dropped, or static (Key Design Decision:
+        //      "cursor moves without waiting for a video frame"). Polling this
+        //      after (1)/(3) would freeze the cursor exactly when the stream is
+        //      already struggling — the worst moment for it.
+        //      `self.cursor_cap` is Some only when step 6a resolved "separate".
+        if let Some(cc) = self.cursor_cap.as_mut() {
+            match cc.next_cursor() {
+                Ok(Some(cu)) => self.server.send_cursor(cu), // latest-wins datagram
+                Ok(None) => {}                               // unchanged; send nothing
+                Err(e) => {
+                    // Non-fatal and NEVER escalated to the capture-error ladder:
+                    // a dead cursor query must not take video down. Log once,
+                    // disable cursor polling, and push a fresh `config` with
+                    // cursorMode "embedded" so the client stops waiting for
+                    // overlay updates it will never receive.
+                    tracing::warn!(target: "pipeline", err = %e, "cursor capture failed; \
+                                   switching to embedded cursor for this session");
+                    self.cursor_cap = None;
+                    self.cursor_mode = CursorMode::Embedded;
+                    self.server.send_config(self.current_config());
+                }
+            }
         }
 
         // (1) Skip owed frames from a previous overrun.
@@ -419,8 +514,12 @@ scaling; this keeps the client's absolute mouse mapping pixel-accurate.
 1. CancellationToken fired (signal handler or explicit cancel)
 2. Frame loop exits (checks cancel.is_cancelled())
 3. Audio loop exits (cancel.cancelled() select branch)  [audio deferred — placeholder]
+3b. Clipboard task exits (cancel.cancelled() select branch); its
+    `Monitor::changes()` receiver is dropped, so no further `send_clipboard`.
 4. Drop encoder (flushes pending frames in its Drop impl)
-5. Drop capturer (releases DRM/EGL/subprocess on Drop)
+5. Drop `cursor_cap`, then the capturer (releases DRM/EGL/XFixes cursor handle /
+   subprocess on Drop). Cursor before capturer: on X11 and DXGI the cursor query
+   borrows the same display/duplication handle the capturer owns.
 6. Drop audio encoder + capturer add-on (no subprocess) [audio impl deferred]
 7. Drop input Dispatcher (its Drop releases active KeyMouse / Touch / Gamepad
    injectors, releasing all held keys + buttons on the way out)
@@ -590,8 +689,11 @@ impl RollingStats {
 | Capture returns error (transient) | Warn | Log, skip frame, continue |
 | Capture returns error (3 consecutive) | Error | Attempt capturer restart |
 | Capture returns error (10 consecutive) | Fatal | Shutdown pipeline |
-| Encoder returns error | Warn | Log, skip frame, continue |
-| Encoder returns StreamError::FallbackToSoftware | Info | Switch to software encoder permanently |
+| Encoder returns error (transient) | Warn | Log, skip frame, continue |
+| Encoder returns error (3 consecutive) | Error | Restart the encoder add-on under the backoff ladder below |
+| Encoder returns `StreamError::FallbackToSoftware` | Info | Switch to software encoder permanently |
+| Encoder returns `StreamError::Unrecoverable` | Error | **Do not retry.** Drop this add-on for the session, fall through to the next candidate in dispatch order; shutdown if none remain |
+| Encoder add-on exhausts its restart budget (5 restarts / 60 s) | Error | Same as `Unrecoverable` — drop + fall through |
 | Server broadcast fails | - | Per-client: drop frame (handled internally) |
 | Audio chunk channel closed | Warn | Attempt audio reconnect |
 | Input device error | Warn | Log, disable input (viewers still work) |
@@ -599,6 +701,77 @@ impl RollingStats {
 | File-transfer write error | Warn | Send `ERROR` to client for that transfer; drop only that transfer |
 | Gamepad add-on connect failure | Warn | Drop subsequent gamepad records; log once per index |
 | Context cancelled | - | Graceful shutdown |
+
+---
+
+## Add-On Crash Recovery (backoff + circuit breaker)
+
+Fixes **TD-39**. The Go `ffmpeg.go` `restart()` was a flat kill → 50 ms sleep →
+respawn with no attempt counter, so a persistently failing encoder (bad driver,
+missing `ffmpeg`, GPU wedged) restart-looped roughly every 250 ms forever —
+burning a core and flooding the log while producing no frames. Nothing in v1 may
+reproduce that shape. This section is the **normative policy for every restartable
+add-on** (subprocess-backed encoders like `x264`, in-process encoders, and
+capturers alike); an add-on spec may tighten the numbers but may not opt out.
+
+### Two levels, one rule each
+
+**Level 1 — inside the add-on (self-healing).** An add-on that owns a restartable
+resource (`x264` owns an `ffmpeg` child; `libva` owns a VA display) restarts it
+itself on failure, under a **bounded, exponential** ladder:
+
+| Attempt | Delay before respawn |
+|---------|----------------------|
+| 1 | 100 ms |
+| 2 | 200 ms |
+| 3 | 400 ms |
+| 4 | 800 ms |
+| 5 | 1600 ms |
+| 6+ | — give up |
+
+- Delay is `min(100 ms × 2^(n-1), 1600 ms)`, with **±20 % jitter** so N add-ons
+  (or N sessions on one host) that fail on the same cause do not resynchronize
+  into a thundering herd.
+- The counter is **decayed, not cumulative**: it resets to 0 after the resource
+  has run **60 s** without a failure. A process that dies once an hour is healthy
+  and self-heals forever; one that dies five times in a minute is broken.
+- While a restart is pending, `encode()` returns `StreamError::Backend(..)` for
+  each frame — the frame is dropped by the ladder above, the pipeline is not
+  blocked, and no frame is queued for the dead resource.
+- On the 6th failure within the window the add-on **stops restarting** and returns
+  `StreamError::Unrecoverable(reason)` (`AbiErr::Unrecoverable`, code 7) from that
+  call and every subsequent one. It must be idempotent and cheap after that — no
+  further spawns, no further sleeps.
+- Every restart logs at `warn` **once per attempt** with attempt number and delay;
+  the give-up logs at `error`. No per-frame logging on a dead resource — that is
+  the other half of the TD-39 symptom.
+
+**Level 2 — inside the pipeline (fall-through).** The pipeline never retries an
+add-on that reported `Unrecoverable`. It:
+
+1. Logs at `error` with the add-on ID and the carried reason.
+2. Marks that add-on **poisoned for the session** — it is skipped for the rest of
+   the process lifetime, including by `degrade_to_software`, so a dead `x264`
+   cannot be re-selected as the SW fallback for a failing HW encoder.
+3. Walks to the **next candidate in the same probe order used at startup**
+   (step 3e: HW `nvenc → amf/amf_rocm → libva → qsv → mf_hw → vt_hw`, SW
+   `x264 → vt_sw → openh264`), skipping poisoned entries, and re-probes it. A
+   successful swap forces an IDR on the first frame so clients get fresh
+   SPS/PPS, and pushes a new `config` message (the codec string may have changed
+   — see MODULE_SERVER).
+4. If no candidate remains, shuts the pipeline down with a clear terminal error
+   rather than spinning. This is the same terminal case as the startup check in
+   step 3f ("HW encoder X has no SW fallback add-on loaded"), just reached
+   mid-session.
+
+The pipeline applies the identical two-level policy to **capturers**: the
+"3 consecutive → restart / 10 consecutive → fatal" rows above are the capture
+ladder, and a capture add-on returning `Unrecoverable` is dropped and fallen
+through the capture probe order (`nvfbc → kms_egl`, etc.) the same way.
+
+`Unrecoverable` is deliberately **not** a wire-visible condition on its own — the
+client sees only the resulting `config` + keyframe on a successful swap, or a
+normal close on shutdown.
 
 ---
 
@@ -674,13 +847,21 @@ INFO [pipeline] Shutdown complete: 18432 frames captured, 147 dropped (0.8%), 2h
 
 | Level | What | Hardware Required |
 |-------|------|-------------------|
-| Unit | Config validation at New() | No |
+| Unit | Config validation at `pipeline::new()` | No |
 | Unit | Frame drop calculation logic | No |
 | Unit | Stats rolling window (min/max/avg/p99) | No |
 | Unit | Capability probe result parsing | No |
 | Integration | Full pipeline with mock capturer + mock encoder | No |
+| Unit | `cursorMode` resolution truth table: `show_cursor=true` → embedded; `false` + `caps & CURSOR` → separate; `false` without the cap → embedded **+ warn** (never a cursorless stream) | No |
+| Integration | Cursor keeps flowing while video does not: with a mock capturer returning `Ok(None)` (static screen) and with `skip_budget > 0`, `send_cursor` is still called on every tick — this is the regression guard for polling cursor before the skip check | No |
+| Integration | A `CursorCapturer` error disables cursor polling, pushes a fresh `config` with `cursorMode: "embedded"`, and does **not** touch the capture-error escalation counter or stop video | No |
+| Integration | Clipboard H→C drain: a `Monitor::changes()` emission reaches `server.send_clipboard`; with `[clipboard] direction` set to client→host only, the server drops it and the viewer session never receives a clipboard write | No |
 | Integration | Graceful shutdown order verification | No |
 | Integration | Hardware → software fallback transition | Partially |
+| Integration | Crash-recovery backoff (TD-39): a mock encoder that fails on every call produces exactly 5 restarts with monotonically increasing delays, then `Unrecoverable` — never a 6th spawn and never a per-frame log line | No |
+| Integration | Restart-counter decay: a mock encoder failing once, then succeeding for >60 s, then failing again starts its second ladder at attempt 1 (100 ms), not attempt 2 | No |
+| Integration | Fall-through on `Unrecoverable`: the poisoned add-on is skipped for the rest of the session (including by `degrade_to_software`), the next probe-order candidate is selected, and an IDR + fresh `config` follow the swap | No |
+| Integration | No candidate remains after fall-through → clean terminal shutdown, not a spin loop | No |
 | System | End-to-end: capture → encode → broadcast → client decode | Yes |
 
 ---

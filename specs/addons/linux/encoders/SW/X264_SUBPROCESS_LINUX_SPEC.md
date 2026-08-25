@@ -224,3 +224,28 @@ This add-on implements `stream::ConfigurableEncoder` (see [`../../../../core/MOD
 | `BitDepth=10` / `HDR=true` | rejected with `StreamError::HdrUnsupported` -- H.264 HDR profile not in WebCodecs spec | n/a |
 
 **Restart semantics:** the bridge forces an IDR on the first frame from the new ffmpeg instance so the client decoder picks up the new SPS/PPS cleanly.
+
+---
+
+## Crash Recovery (subprocess death)
+
+A *deliberate* restart (param change, forced IDR) is the section above. This
+section covers the ffmpeg child dying on its own — killed by the OOM killer,
+segfaulting, or never starting because the binary is missing or the codec was
+built out. Fixes **TD-39**.
+
+This add-on implements **Level 1** of the normative ladder in
+[`MODULE_PIPELINE.md`](../../../../core/MODULE_PIPELINE.md) "Add-On Crash
+Recovery" — read that first; it is the contract, this is the binding:
+
+| Concern | This add-on's binding |
+|---------|-----------------------|
+| Detecting death | A dedicated reaper task owns `Child::wait()`. Death is also inferred from `EPIPE`/`BrokenPipe` on the stdin write or clean EOF on the stdout NAL reader — whichever fires first wins; the other is a no-op. |
+| Backoff | 100/200/400/800/1600 ms ±20 % jitter, counter decays after 60 s of a healthy child. |
+| During the gap | `encode()` returns `StreamError::Backend("x264: subprocess restarting")`. Frames are **dropped, never buffered** — a queue here would defeat the whole zero-latency design and re-add the accumulated-latency problem the frame-drop strategy exists to prevent. |
+| Give-up | 6th death inside the window → every subsequent call returns `StreamError::Unrecoverable("x264: ffmpeg died 6x in 60s: <last stderr line>")`, and the add-on stops spawning. The pipeline then falls through to `vt_sw`/`openh264`. |
+| Post-restart correctness | The new child is fed a **fresh IDR**, and the NAL splitter's partial-Annex-B accumulator is **cleared** before the first byte of the new stdout stream — otherwise a half-read NAL from the dead process would be concatenated onto the new SPS and hand the client a corrupt access unit. |
+| Diagnostics | ffmpeg's stderr (`-loglevel error`) is drained continuously into a small ring buffer (last 8 lines) and logged with each restart, so "died 6x" carries the actual reason rather than just an exit code. A missing/unexecutable `ffmpeg` binary is caught at **`probe()`** time, not at first frame — that is a negative `ProbeReport`, not a crash loop. |
+
+**Never:** a flat sleep-and-respawn loop, an unbounded retry count, a per-frame
+log line on a dead child, or a blocking write to a dead pipe.

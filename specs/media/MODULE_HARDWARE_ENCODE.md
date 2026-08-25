@@ -59,8 +59,15 @@ pub use stream::{EncodedFrame, EncodedUnit};
 // D3D11 / VA / MF / Metal contexts).
 pub trait HardwareEncoder {
     /// encode_surface CONSUMES a GPU-resident surface (moved in BY VALUE) and
-    /// returns one encoded access unit (H.264 or HEVC) as an EncodedUnit with
-    /// `keyframe` set BY THE ENCODER.
+    /// returns one encoded access unit (H.264 or HEVC today; AV1 once an `av1`
+    /// add-on exists) as an EncodedUnit with `keyframe` set BY THE ENCODER.
+    ///
+    /// NOTE: EncodedUnit.data is defined as a contiguous Annex B access unit
+    /// for H.264/HEVC (see MODULE_ENCODE.md). AV1 has no Annex B framing --
+    /// its `data` is a raw low-overhead OBU temporal unit instead (see
+    /// CENTRAL_SPEC.md frame_type::VIDEO_AV1). An `av1` add-on's EncodedUnit
+    /// carries OBUs, not start-coded NALs; the pipeline dispatches on
+    /// codec_type to know which framing a given EncodedFrame holds.
     ///
     /// SURFACE OWNERSHIP (single owner — RAII resolves the prior 4-way
     /// ambiguity): the FbInfo is moved in and its Drop releases the resource
@@ -232,6 +239,21 @@ licensing, add-on IDs, and Rust FFI specifics all live in the add-on specs.
   server forwards it to the client in `config`. No browser codec-preference handshake.
 - **No keyframe interval logic.** Periodic IDRs are not configured — every
   IDR is on-demand via `force_keyframe()` (triggered by client gap detection).
+
+---
+
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | `encode_surface`'s `FbInfo` argument is dropped (and its resource released) exactly once across all three outcomes: success, error, and `StreamError::FallbackToSoftware` — the M-1/TD-01 invariant | No |
+| Unit | `codec()` returns `avc1.*` by default and switches to `hvc1.*` only when HDR is requested; no third codec string appears without a dedicated add-on | No |
+| Unit | Scaling invariant: a native-resolution input surface always produces output at exactly `initial_params.width × height`, regardless of native capture size | Yes (per vendor) |
+| Integration | `StreamError::FallbackToSoftware` degrades the pipeline to a SW encoder add-on for the remainder of the session — never retries the HW path mid-session | Yes (per vendor) |
+| Integration | HW probe priority order: NVENC preferred over `libva` on NVIDIA, AMF preferred over `libva` on AMD, MF HW falls back to whatever vendor MFT is registered | Yes (per vendor) |
+| Integration | Chroma capability advertisement + `StreamError::ChromaUnsupported` fallback to 4:2:0 matches the SW path's client-side decode gate | Yes (per vendor, e.g. NVENC 4:4:4 on Turing+) |
+| Integration | `SurfaceHandle` variant compatibility: the capture add-on's produced handle (DMA-BUF / IOSurface / D3D11Texture) is accepted by the paired HW encoder on that OS without a format-mismatch fallback | Yes (per OS pairing) |
+| Benchmark | Per-vendor encode latency at 1080p matches (or is tracked against regressions from) the numbers recorded in the Implementation Status table below | Yes (per vendor) |
 
 ---
 

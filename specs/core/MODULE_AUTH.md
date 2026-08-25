@@ -363,7 +363,26 @@ pub enum AuthError {
     #[error("bad credentials")] BadCredentials,
     #[error("expired")] Expired,
     #[error("rate limited")] RateLimited,
+    /// Startup-only: the [auth] section is internally inconsistent (e.g. a
+    /// token shorter than 32 chars, mode="password" with no password_hash,
+    /// an unreadable token_file path). Returned by `new`, never by
+    /// `authenticate` — a misconfigured server must fail to start, not accept
+    /// connections it cannot correctly gate.
+    #[error("auth config: {0}")] Config(String),
 }
+
+/// Builds the Authenticator for the configured mode. This is the pipeline's
+/// single entry point into this crate (MODULE_PIPELINE step 7) — it selects
+/// between `none.rs` / `token.rs` / `password.rs` / `pin.rs` / `oauth_stub.rs`
+/// and performs the mode-specific startup work that must happen exactly once:
+///   - `none`     → prints the loud "AUTH DISABLED" warning to stdout
+///   - `token`    → generates the 32-byte CSPRNG token if `token = ""`, prints
+///                  it once, and writes `token_file` with mode 0600 if set
+///   - `password` → validates the argon2id hash is present and well-formed
+///   - `pin`      → opens the pairing window and loads the paired-device store
+///   - `oauth`    → returns `AuthError::Config` unless the `oauth` cargo
+///                  feature is enabled (deferred)
+pub fn new(cfg: &config::AuthConfig) -> Result<Box<dyn Authenticator>, AuthError>;
 
 /// Server's auth pipeline
 pub struct Server {
@@ -436,7 +455,7 @@ impl Server {
 
 ```
 featherdesk-auth/src/
-├── lib.rs             // Authenticator trait, Identity struct, Mode enum
+├── lib.rs             // Authenticator trait, Identity struct, Mode enum, `new()` factory
 ├── none.rs            // Mode::None implementation (prints security warning)
 ├── token.rs           // Mode::Token implementation (bearer in control-stream msg, not URL params)
 ├── password.rs        // Mode::Password implementation + argon2id hashing
@@ -468,6 +487,24 @@ featherdesk-auth/src/
 | Viewer-only attacks | `require_auth_for_view = true` by default. Unauthenticated viewing requires explicit opt-in. |
 | Controller takeover | `allow_takeover = false` by default. When enabled, displaced controller receives QUIC application close code 4410 (`close::CONTROLLER_TAKEOVER`). |
 | Origin hijacking | `allow_origin = ""` by default (same-origin only). Wildcard `"*"` requires explicit opt-in. |
+
+---
+
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | `mode = token`: correct/missing/expired/malformed-JSON first-message → `auth_ok` vs `close::AUTH_FAILED (4401)` | No |
+| Unit | `mode = password`: constant-time argon2id comparison rejects a wrong password without a timing difference vs. a correct one | No |
+| Unit | `mode = pin`: PIN brute-force backoff timing (1s, 2s, 4s, 8s... after the 3rd failure) and hard stop at `max_pin_attempts` | No |
+| Unit | `session_token` generation and lookup use the CSPRNG path only — a test double `Authenticator` proves no code path can construct a `Session` with a non-CSPRNG token | No |
+| Integration | Resume flow: valid unexpired `session_token` + `resume:true` skips auth and emits `{"resumed":true,...}`; expired/unknown token falls through to full re-auth, never a bare HTTP 401 (QUIC close 4401 instead) | No |
+| Integration | `mode = pin` full pairing flow end-to-end: `GET /pair` → CSRF token issued → `POST /pair` with correct PIN → device token stored in `paired_devices_file` → subsequent connection authenticates via device token | No |
+| Integration | Role assignment: first connection with role omitted becomes `control`; a second `role:"control"` connection without `takeover:true` becomes `view`; `takeover:true` only succeeds when `[auth] allow_takeover = true` | No |
+| Integration | `require_auth_for_view = true` (default) rejects an unauthenticated viewer; `= false` allows it | No |
+| Security | Token/PIN/password are never accepted from a URL query parameter — a request smuggling credentials in the `/wt` URL is treated as unauthenticated, not as an alternate auth path | No |
+| Unit | `new()` fails startup on every inconsistent `[auth]` section — `mode="token"` with a token under 32 chars, `mode="password"` with no/malformed `password_hash`, an unwritable `token_file` path, `mode="oauth"` without the `oauth` feature — returning `AuthError::Config`. **A misconfigured server must not start**; the failure mode being guarded against is one that boots and silently under-gates. | No |
+| Unit | `new()` side effects happen exactly once and only for the selected mode: `token=""` generates one CSPRNG token and writes `token_file` at mode 0600; `mode="none"` emits the warning line; no other mode touches those paths | No |
 
 ---
 

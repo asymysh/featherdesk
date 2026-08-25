@@ -567,6 +567,23 @@ realistic network conditions.
 
 ---
 
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | `StreamType` tag dispatch (0x00/0x01/0x02/0x03/0x10, unknown tag, a duplicate 0x00) each produce the correct handler or `close::PROTOCOL_ERROR (4400)` | No |
+| Unit | Datagram fragmentation: `[Version][Type][FrameID][FragIndex]` encode/decode round-trip, including the bit-15 LAST-flag convention (no FragCount field) | No |
+| Unit | Reassembly buffer holds only the latest in-progress FrameID per Type — a newer FrameID arriving mid-reassembly discards the older incomplete one | No |
+| Unit | Reassembly deadline (`fragment_reassembly_ms`) drops a stale partial frame and increments the drop metric, without blocking delivery of the next frame | No |
+| Unit | Per-session out-queue is frame-granular drop-oldest (cap ~8 whole frames) — confirms a full queue never drops a fragment mid-frame | No |
+| Integration | Full WebTransport handshake (TLS 1.3 + HTTP/3 upgrade to `/wt`) against both TLS modes: CA-trusted PEM and self-signed with `serverCertificateHashes` | No |
+| Integration | `auth_deadline` (default 5s): a session that never completes the control-stream auth handshake is closed with `close::AUTH_TIMEOUT (4408)` | No |
+| Integration | `keepalive_period < max_idle_timeout` is enforced as a config invariant; a session survives an idle gap shorter than `max_idle_timeout` via QUIC keepalive PINGs | No |
+| Integration | `allow_origin = ""` (default) rejects a cross-origin WebTransport upgrade; `"*"` accepts it | No |
+| Load | `max_streams_bidi` ceiling: opening more concurrent streams than configured (control + input + clipboard + N file transfers) is rejected cleanly, not a panic | No |
+
+---
+
 ## Status
 
 📋 **Specced — not yet built.** This module replaces the previous WebSocket

@@ -322,8 +322,9 @@ formats    = ["text", "html"]   # subset of supported formats to sync
 ```
 Host clipboard change (WM_CLIPBOARDUPDATE / XFixes / changeCount poll — thin layer)
     → Monitor reads via arboard (+ thin layer for rich HTML) + size-checks + sanitizes
-    → changes() mpsc channel → server
-    → direction check ([clipboard] direction)
+    → changes() mpsc channel → drained by the PIPELINE's clipboard task
+    → server.send_clipboard(content)   (MODULE_SERVER trait; MODULE_PIPELINE step 12/13)
+    → direction check ([clipboard] direction) + controller-only + HTML sanitize
     → server writes [u32 Len][JSON] on the clipboard stream to controller client(s)
 
 Client copy (clipboardchange / copy event)

@@ -37,7 +37,9 @@ pub trait Server: Send + Sync {
     /// assigns the video Sequence and, when f.keyframe is set BY THE ENCODER
     /// (the server does NOT re-scan the bitstream), caches the assembled access
     /// unit for bootstrap-stream fast-join. codec_type is
-    /// frame_type::VIDEO_H264 / VIDEO_HEVC (VP8 was rejected; slot 5 reserved).
+    /// frame_type::VIDEO_H264 / VIDEO_HEVC today; VIDEO_AV1 (16) is reserved
+    /// for the future hardware-only AV1 path (VP8/VP9 were rejected; see
+    /// BRANCH.md "Codec set").
     fn broadcast(&self, codec_type: u8, f: EncodedFrame);
 
     /// Sends one already-encoded audio payload (Opus packet or raw PCM) to all
@@ -54,6 +56,23 @@ pub trait Server: Send + Sync {
 
     /// Pushes a CursorUpdate (client-side cursor mode).
     fn send_cursor(&self, c: CursorUpdate);
+
+    /// Pushes a HOST clipboard change out to clients as `[u32 Len][JSON]` on
+    /// each recipient's clipboard stream (tag 0x02). This is the H→C direction —
+    /// the mirror of `set_clipboard_callback`, which handles C→H.
+    ///
+    /// The pipeline's clipboard task drains `clipboard::Monitor::changes()` and
+    /// calls this; the SERVER applies the gating, not the caller:
+    ///   - `[clipboard] direction` must permit host→client (else drop silently),
+    ///   - only the **controller** session receives it (viewers never do — see
+    ///     MODULE_CLIPBOARD "Viewer isolation"),
+    ///   - HTML is sanitized server-side before it goes on the wire,
+    ///   - a session with no clipboard stream open yet is skipped, not queued.
+    ///
+    /// Non-blocking and infallible from the caller's side: a slow or closed
+    /// clipboard stream drops that push for that session and bumps a metric
+    /// rather than stalling the monitor task.
+    fn send_clipboard(&self, c: clipboard::Content);
 
     /// Returns the current number of connected clients.
     fn client_count(&self) -> u32;
@@ -85,6 +104,19 @@ pub trait Server: Send + Sync {
     /// server rate-limits before invoking.
     fn set_keyframe_request_callback(&self, f: Box<dyn Fn() + Send + Sync>);
 
+    /// Fires for a client-driven param change (control-stream `resize` /
+    /// `set_bitrate` / `set_fps` / `set_hdr`) AND for the server's own
+    /// bandwidth-adaptation telemetry loop (every `[stream.adaptive]
+    /// interval_ms` — see "RTT + adaptive bitrate" below). The server builds a
+    /// `stream::Params` (current effective params with only the changed
+    /// field(s) overlaid) and passes it to this callback, which the pipeline
+    /// wires directly to `stream::Manager::apply` (see MODULE_PIPELINE.md
+    /// "Wire callbacks" — the pipeline owns constructing the Manager). The
+    /// returned effective Params (post clamping/hysteresis) is what the server
+    /// sends back as a fresh `{"type":"config"}` (or `{"type":"resize_suppressed"}`
+    /// when hysteresis drops it — see MODULE_STREAM_PARAMS.md).
+    fn set_stream_params_callback(&self, f: Box<dyn Fn(stream::Params) -> Result<stream::Params, StreamError> + Send + Sync>);
+
     /// Frames + sends a GAMEPAD_RUMBLE (type 15) to the client that OWNS gamepad
     /// slot `index` (the controller for slot 0; a player client for slots 1…N in
     /// co-op — see Controller Model). Called by the pipeline when the active
@@ -101,7 +133,15 @@ pub struct Config {
     pub authenticator: Box<dyn auth::Authenticator>, // MODULE_AUTH.md — validates control-stream auth
     pub session_cache: Box<dyn SessionCache>,     // for resume (see "Resume Path")
     pub allow_takeover: bool,                     // controller takeover policy
-    pub stream_mgr: Box<dyn stream::Manager>,     // applies client-driven parameter changes
+    // NOTE: there is deliberately NO `stream_mgr` field here. Client-driven
+    // parameter changes reach the Manager through `set_stream_params_callback`,
+    // not through construction. Two reasons: `Manager::apply` takes `&mut self`,
+    // which does not fit a field on a `Send + Sync` server shared across every
+    // session task without adding a lock; and the pipeline cannot build the
+    // Manager until its `param_tx` channel exists, which is after the server is
+    // constructed (MODULE_PIPELINE step 7 vs step 12). One route only — an
+    // earlier draft had both, which is exactly the kind of ambiguity that
+    // produces two divergent implementations.
     pub max_clients: u32,                         // hard cap; rejects via close::AUTH_FAILED on overflow
     // Logging is via the `tracing` crate (replaces the old *slog.Logger field).
 }
@@ -299,7 +339,7 @@ noted in the browser-compat matrix in `MODULE_WEB_CLIENT.md` and `PLATFORM_COMPA
         {"type":"chroma_unsupported"} → stream::Manager downgrades chroma to "420";
                                  server re-sends config + forces a keyframe
     (Clipboard is NOT here — it rides the clipboard stream from step 15.)
-18. Datagram-in loop: ReadDatagram blocks until the client sends one.
+18. Datagram-in loop: `session.read_datagram()` blocks until the client sends one.
     In v1 there are no C→S datagrams (reserved); any datagram received is
     counted in a metric and dropped.
 19. Session close (either side, or context cancel):
@@ -412,9 +452,9 @@ Three independent timers, each owning a distinct concern — do not conflate the
   `input::Dispatcher::dispatch`; writes `InputAck` back length-prefixed on the
   same stream.
 - `clipboardReader()` (started when a 0x02 stream is accepted): reads
-  `[u32 Len][JSON]` clipboard messages → `clipboard.Monitor.Set`
+  `[u32 Len][JSON]` clipboard messages → `clipboard::Monitor::set`
   (direction+role gated); writes host→client clipboard the same way.
-- `streamAcceptor()`: `wt.AcceptStream` loop; reads each stream's StreamType tag
+- `stream_acceptor()`: `session.accept_stream()` loop; reads each stream's StreamType tag
   and dispatches (0x01 input, 0x02 clipboard, 0x03 → `filetransfer::Service::serve_stream`).
 
 ### Broadcasting (frame-granular fan-out; pump fragments at send)

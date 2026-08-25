@@ -76,8 +76,48 @@ pub struct ProbeReport {
     pub available: bool,        // false = prerequisite missing — this is Ok(available:false), NOT an error
     pub reason: RString,        // human-readable detail when !available
     pub codecs: RVec<CodecId>,  // what this backend can actually emit/consume
+    pub caps: AddonCaps,        // which OPTIONAL host traits this add-on serves (below)
 }
 ```
+
+### Optional-trait capability flags
+
+A `#[sabi_trait]` object is one flat vtable — the host **cannot** downcast a
+`CapturerBox` to ask "do you also implement `SurfaceCapturer`?". So each sabi
+object carries the union of its optional methods, and the add-on declares which
+of them are real via a bitflag. Anything the flag does not claim MUST return
+`AbiErr::Generic` if called; the host never calls it.
+
+```rust
+#[repr(C)] #[derive(StableAbi, Copy, Clone)]
+pub struct AddonCaps(pub u32);   // bitflags; unknown bits are IGNORED, never an error
+                                 // (forward-compatible: a v2 add-on can set bits a
+                                 //  v1 host does not know, and still loads)
+
+impl AddonCaps {
+    // Capture kind (0x01)
+    pub const SURFACE: u32      = 1 << 0;  // implements capture::SurfaceCapturer (zero-copy path eligible)
+    pub const CURSOR: u32       = 1 << 1;  // implements capture::CursorCapturer  (cursorMode "separate" eligible)
+    pub const CONFIGURABLE: u32 = 1 << 2;  // implements capture::ConfigurableCapturer (hot param change,
+                                           //   else the pipeline tears down + recreates)
+    // Encoder kinds (0x02 / 0x03)
+    pub const ENC_CONFIGURABLE: u32 = 1 << 8;  // implements Configurable{Encoder,HardwareEncoder}
+}
+```
+
+**Why `ProbeReport` and not `CapabilityDescriptor`:** these are *runtime* facts,
+not compile-time ones. The same `kms_egl` binary can serve `CURSOR` on X11
+(XFixes present) and not on Wayland; `dxgi_dd` can lose `SURFACE` when it falls
+back to a WARP adapter. `descriptor()` answers "what am I", which never changes;
+`probe()` answers "what can I do *here, now*", which is exactly this. The
+descriptor's static superset is not separately encoded — a capability an add-on
+never implements simply never appears in any of its probe reports.
+
+The host reads `caps` once, at probe time, and it is the sole input to the
+`Option<Box<dyn …>>` fields in `MODULE_PIPELINE`'s `Pipeline` struct:
+`caps & SURFACE` → `surf_cap`, `caps & CURSOR` → `cursor_cap` (combined with
+`[capture] show_cursor` per MODULE_CAPTURE "Cursor delivery"), and so on. A
+re-probe after a mid-session add-on swap re-reads it.
 
 > **`RAddonConfig` / `AddonObject` are abi-stable unions.** `RAddonConfig` carries
 > the kind-appropriate config (the host's `CaptureConfig` / `EncoderConfig` /
@@ -121,7 +161,7 @@ into the sub-kinds below so one descriptor unambiguously names one trait.
 
 | Kind | Id | Layer-1 sabi object | Layer-2 host trait | Host trait the backend implements |
 |------|----|---------------------|--------------------|-----------------------------------|
-| `Capture`        | `0x01` | `CapturerBox`         | `CaptureAddon` | `capture::Capturer` (+ optional `SurfaceCapturer`) |
+| `Capture`        | `0x01` | `CapturerBox`         | `CaptureAddon` | `capture::Capturer` (+ optional `SurfaceCapturer`, `CursorCapturer`, `ConfigurableCapturer`) |
 | `SoftwareEncode` | `0x02` | `EncoderBox`          | `EncoderAddon` (`kind()=="sw"`) | `encode::Encoder` |
 | `HardwareEncode` | `0x03` | `HwEncoderBox`        | `EncoderAddon` (`kind()=="hw"`) | `hwencode::HardwareEncoder` |
 | `AudioCapture`   | `0x04` | `AudioCapturerBox`    | `AudioAddon` (`kind()=="capture"`) | `audio::AudioCapturer` |
@@ -143,12 +183,14 @@ An add-on's codec ↔ its wire frame type (see
 |---------|----|-------|-------------------|-------|
 | `H264`     | `0x01` | video | `VIDEO_H264` (1) | universal default |
 | `Hevc`     | `0x02` | video | `VIDEO_HEVC` (7) | HW only; HDR |
-| `Av1`      | `0x03` | video | — (none yet)     | descriptor accepted but **load-rejected** (no wire type assigned) |
+| `Av1`      | `0x03` | video | `VIDEO_AV1` (16) | HW only; wire type reserved, no add-on implements it yet (see `PLATFORM_COMPAT.md`) |
 | `Opus`     | `0x10` | audio | `AUDIO_OPUS` (8) | default audio codec |
 | `PcmS16le` | `0x11` | audio | `AUDIO_PCM` (4)  | built-in fallback (no codec add-on) |
 
-A descriptor naming a `CodecId` that has no wire `frame_type` (e.g. `Av1` today)
-is skipped with a warning — see the load-failure taxonomy.
+A descriptor naming a `CodecId` that has no wire `frame_type` assigned at all
+is skipped with a warning — see the load-failure taxonomy. (As of this spec,
+every registered `CodecId` — including `Av1` — has a wire type; this path
+exists for a future `CodecId` added before its wire type is picked.)
 
 ## AbiErr registry
 
@@ -163,6 +205,7 @@ each code back to the matching host enum:
 | `HdrUnsupported`     | `4` | `StreamError::HdrUnsupported`     | encoder can't emit 10-bit / HEVC-Main10 |
 | `RequiresRestart`    | `5` | `StreamError::RequiresRestart`    | param change needs teardown + rebuild |
 | `DeviceLost`         | `6` | `StreamError::DeviceLost` / `AudioError::DeviceLost` | capture/encode/audio device or context lost |
+| `Unrecoverable`      | `7` | `StreamError::Unrecoverable` | add-on exhausted its own restart budget (see MODULE_PIPELINE "Add-On Crash Recovery"); host MUST drop it and fall through to the next candidate — never retry |
 
 Code `0` is reserved; success is `ROk`, never an error code. **Availability is NOT
 an error** — a negative probe is `Ok(ProbeReport { available: false, reason })`,
@@ -205,7 +248,7 @@ startup for any of these:
 | not an add-on (no `abi_stable` root module — stray library in dir) | skip + warn |
 | root-module constructor returns an error | skip + warn |
 | ABI version / layout-hash mismatch (`abi_stable`) | skip + warn |
-| capability descriptor names an unknown `AddonKind`, or a `CodecId` with no wire type (e.g. `Av1`) | skip + warn |
+| capability descriptor names an unknown `AddonKind`, or a `CodecId` with no wire type assigned | skip + warn |
 | add-ons dir does not exist | treated as empty + warn |
 
 An add-on library MUST match the host's **OS *and* CPU arch** (an x86_64 `.dylib`
@@ -223,6 +266,21 @@ cross-composed.
   rejected, not miscompiled).
 - The host accepts an add-on iff its ABI version is compatible **and** the layout
   hash matches **and** os/arch match.
+
+---
+
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | `AbiErr` code → host error enum mapping is total: every registry code (`Generic`..`Unrecoverable`) maps to exactly one `StreamError`/`AudioError`/`InputError` variant, no silent default | No |
+| Unit | `CodecId` → wire `frame_type` lookup for all five registered codecs, plus the "no wire type assigned" skip path for a hypothetical future codec | No |
+| Unit | `RVec<u8>` / `RString` returned across the boundary drop deterministically exactly once (no double-free, no leak) — verified via a counting allocator in the fixture add-on | No |
+| Integration | Load a real, separately-compiled `cdylib` fixture and drive `descriptor()` → `probe()` → `construct()` end-to-end (the validated spike scenario from the Overview) | No (needs a built cdylib fixture, no device hardware) |
+| Integration | `ABI_VERSION` mismatch and `abi_stable` structural layout-hash mismatch are both rejected at load, never silently miscompiled | No |
+| Integration | A `.cdylib` built for the wrong OS/arch (e.g. x86_64 `.so` on an arm64 host) is rejected at load, never partially loaded | No (cross-compiled fixture, no target hardware needed) |
+| Integration | A panic inside `probe()`/`construct()`/any trait method, wrapped in `catch_unwind`, surfaces to the host as `AbiErr::Generic` — never an unwind across the `dlopen` boundary | No |
+| Integration | `[addons] abi_strict = true` aborts startup on every load-failure-taxonomy row; default config only warns + skips the offending add-on | No |
 
 ---
 

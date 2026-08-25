@@ -127,7 +127,59 @@ pub struct CaptureConfig {
 pub trait ConfigurableCapturer: Capturer {
     fn update_stream_params(&mut self, p: stream::Params) -> Result<(), StreamError>;
 }
+
+// CursorCapturer is the HOST-SIDE PRODUCER of the client-side cursor overlay.
+// It is OPTIONAL and orthogonal to the frame path: a capture add-on implements
+// it when the OS can report the cursor separately from the framebuffer.
+//
+// Why it lives on the capture add-on rather than in its own module: the add-on
+// already owns the OS display handle the cursor query needs, and on Windows the
+// cursor arrives as METADATA OF THE SAME AcquireNextFrame call — splitting it
+// into a separate module would mean a second, redundant duplication handle.
+//
+// This is what feeds `server.send_cursor` (MODULE_SERVER) → datagram
+// `frame_type::CURSOR_UPDATE` (11) → the client's `cursor.js` overlay. Without
+// an implementation of this trait the server has nothing to send and the
+// pipeline MUST fall back to cursor_mode = "embedded" (see below).
+pub trait CursorCapturer: Capturer {
+    /// Returns the cursor state IF it changed since the last call, else
+    /// `Ok(None)`. Non-blocking — the pipeline polls this on the frame loop,
+    /// so it must never wait on the compositor.
+    ///
+    /// `image_changed` is set ONLY when the cursor BITMAP changed (shape swap:
+    /// arrow → I-beam → resize). A pure position move returns the update with
+    /// `image_changed = false` and an EMPTY `rgba`, which is the common case and
+    /// keeps the datagram at 10 bytes. The pipeline does not diff for the
+    /// add-on; the add-on is the one that knows whether the OS handed it a new
+    /// shape.
+    fn next_cursor(&mut self) -> Result<Option<protocol::CursorUpdate>, StreamError>;
+}
 ```
+
+### Cursor delivery and the `"separate"` / `"embedded"` decision
+
+`Config.cursorMode` is **derived, not merely configured**. At startup the
+pipeline resolves it as:
+
+| Condition | Resolved `cursorMode` |
+|-----------|----------------------|
+| `[capture] show_cursor = true` | `"embedded"` — the add-on is asked to composite the cursor into the frame; `next_cursor` is never polled |
+| `show_cursor = false` AND the chosen capture add-on implements `CursorCapturer` | `"separate"` — the intended path; frame stays cursor-free (required for zero-copy, where the frame never touches the CPU) |
+| `show_cursor = false` AND the add-on does **not** implement `CursorCapturer` | `"embedded"` + a `warn!` — falling back is mandatory, because `"separate"` with no producer would leave the user with **no visible cursor at all**. If the add-on also cannot embed, startup fails with a clear error rather than shipping a cursorless stream. |
+
+The resolved value goes into the `config` handshake message, so the client is
+told which mode it got — it never assumes. A mid-session capturer swap
+(fall-through per MODULE_PIPELINE "Add-On Crash Recovery") re-resolves this and
+pushes a fresh `config` if the mode changed.
+
+**Per-OS availability** (see the add-on specs for detail):
+
+| Add-on | `CursorCapturer` source |
+|--------|------------------------|
+| `dxgi_dd` (Windows) | `DXGI_OUTDUPL_FRAME_INFO.PointerPosition` + `GetFramePointerShape` — arrives with the frame, zero extra syscalls |
+| `sck` (macOS) | `NSCursor.currentSystem` polled on the frame loop (`SCStreamConfiguration.showsCursor = NO`) |
+| `kms_egl` / `nvfbc` (Linux/X11) | XFixes `XFixesGetCursorImage` (shape + hotspot) — the reason `bWithCursor = NVFBC_FALSE` |
+| Linux/Wayland | Not available from a client process; these sessions resolve to `"embedded"` |
 
 ---
 
@@ -251,6 +303,25 @@ They do **not** downscale to the stream resolution — that is the encoder's job
 FPS fields; a width/height change does **not** resize capture output (the encoder
 absorbs it). This keeps the invariant **encoder-output dims == `config` dims ==
 input-coordinate range** without the capturer and encoder both trying to scale.
+
+---
+
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | `next_frame()` returns `Ok(None)` on an idle screen within the per-frame deadline, never a stale frame reused as new | No |
+| Unit | Stride handling: a `Frame` with `stride > width*4` (padded GPU readback row) converts correctly via libyuv — a test that assumes `stride == width*4` must fail on a synthetic padded fixture | No |
+| Unit | `FbInfo::Drop` releases the underlying resource (DMA-BUF fd close / IOSurface release / D3D11Texture COM release) exactly once, verified across all three outcomes of `encode_surface`: success, error, and `StreamError::FallbackToSoftware` | No |
+| Unit | A surface that is never handed to an encoder (probe/teardown path) is still released via `FbInfo::Drop` — no fd/handle leak | No |
+| Integration | Capturer selection order: NvFBC preferred over KMS+EGL on Linux when both probe available; DXGI DD triggers IddCx virtual-display auto-install and retries probe on Windows headless | Yes (per platform) |
+| Integration | `ConfigurableCapturer::update_stream_params` with only HDR/bit-depth/FPS changes never resizes capture output — width/height changes are absorbed by the encoder, not the capturer | Yes (per add-on) |
+| Integration | End-to-end `next_frame`/`next_surface` capture loop for 5s per platform add-on (KMS+EGL, NvFBC, SCK, DXGI DD), confirming native-resolution output and correct `PixelFormat`/`SurfaceHandle` variant for that OS | Yes (per OS) |
+| Integration | Monitor hotplug/mode change on the selected display is handled via the resolution-change flow without a capturer crash or leaked surface | Yes |
+| Unit | `CursorCapturer::next_cursor()` returns `Ok(None)` when nothing moved; a pure position move returns `image_changed = false` with an EMPTY `rgba` (10-byte datagram), and only a shape swap sets `image_changed = true` with a bitmap | No |
+| Unit | Serialized `CursorUpdate` round-trips byte-exactly against the `[x:u16][y:u16][visible:u8][image_changed:u8][w:u16][h:u16][rgba…]` layout the web client parses — a shared golden fixture, so a host-side field reorder cannot silently break `cursor.js` | No |
+| Integration | An add-on that reports `caps & CURSOR` actually produces a moving cursor across a 5 s drag, and one that does not report it is never polled (calling `next_cursor` on it would be a host bug) | Yes (per OS) |
+| Integration | `ProbeReport.caps` is truthful per environment: `kms_egl` reports `CURSOR` under X11 and clears it under Wayland; `dxgi_dd` clears `SURFACE` on a WARP adapter | Yes (per platform) |
 
 ---
 

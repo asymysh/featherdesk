@@ -705,6 +705,22 @@ name is silently ignored, not flagged — verify the add-on logged its loaded co
 
 ---
 
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | `Duration`/`ByteSize` string-form parsing (`"15s"`, `"10MiB"`) succeeds and rejects a bare unitless number | No |
+| Unit | Every rule in the Validation rules table independently: e.g. `stream.fps` outside 1–240, `transport.enable_datagrams = false`, `metrics.port == server.bind port` | No |
+| Unit | Unknown key anywhere in a known section fails parsing with a file+line+key error, never a silent default | No |
+| Unit | `[addon_module_<id>]` phase-A capture as raw `toml::Value` never fails parsing regardless of its contents (deferred to phase B) | No |
+| Integration | Phase-B validation: an `[addon_module_x264]` section strict-decodes when `x264` is loaded, is silently ignored when it isn't, and `encode.force_addon` naming an unloaded add-on ID fails startup | No |
+| Integration | Missing config file at the resolved default path: binary writes a fully-defaulted config and continues; empty-but-existing file also defaults every section | No |
+| Integration | Hot reload (SIGHUP) atomicity: an invalid reloaded file leaves the previous config fully in effect (no partial application observable) | No |
+| Integration | Hot reload applies `[log]`/`[capture].mode`/`[encode]` non-`force_addon` changes live; confirms `[server].bind` and `[transport]` flow-control keys are rejected without a restart | No |
+| Integration | `[gamepad].enabled` / `[audio].enabled` / `[input].enabled` with no matching add-on loaded degrades to a startup warning, not a hard error | No |
+
+---
+
 ## Status
 
 📋 **Specced — not yet implemented.** Existing code reads CLI flags in

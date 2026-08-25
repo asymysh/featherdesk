@@ -41,8 +41,12 @@ pub mod frame_type {
     // 12 retired (was Clipboard; clipboard is now a clipboard-stream message)
     pub const INPUT_ACK: u8 = 14;     // input stream (S→C), length-prefixed
     pub const GAMEPAD_RUMBLE: u8 = 15;// datagram control (S→C); MODULE_GAMEPAD, no FrameHeader
+    pub const VIDEO_AV1: u8 = 16;     // datagram media (S→C); fragmented + bootstrap-stream join.
+                                      // Payload is a raw low-overhead OBU temporal unit, NOT Annex B
+                                      // (see MODULE_HARDWARE_ENCODE.md). Reserved for the `av1` HW
+                                      // add-on tier; no add-on implements it yet (impl deferred).
     // 0x50 reserved for future webcam redirection (deferred from v1).
-    // Do NOT reuse 6, 12, or 0x50 without a protocol version bump.
+    // Do NOT reuse 6, 12, 16, or 0x50 without a protocol version bump.
 }
 
 // Application-layer close codes (carried by transport `Session::close_with_error`
@@ -209,6 +213,7 @@ framings in the same direction.
 | CursorUpdate | 11 | S→C | datagram control (no FrameHeader) | Cursor position + optional image (latest-wins) |
 | InputAck | 14 | S→C | **input stream** (length-prefixed) | 13-byte `[Type=14 u8][Seq u32][RecvTimestampNs u64]` |
 | GamepadRumble | 15 | S→C | datagram | 9 bytes `[Index u8][WeakMag u16][StrongMag u16][DurationMs u32]` (see [`MODULE_GAMEPAD.md`](../interaction/MODULE_GAMEPAD.md)) |
+| VideoAV1 | 16 | S→C | **datagram media** (fragmented) + bootstrap stream for the join keyframe | One AV1 temporal unit — raw low-overhead OBU stream, **not** Annex B (keyframe = OBU_SEQUENCE_HEADER + key OBU_FRAME). Reserved for the `av1` HW add-on tier; no add-on implements it yet (impl deferred) |
 | _(reserved)_ | 0x50 | — | — | Reserved for future webcam redirection. |
 | **Input events** | **0x01-0x4F** | **C→S** | **input stream** (length-prefixed) | Binary input records (keyboard 0x10-0x1F, mouse 0x20-0x2F, touch 0x30-0x3F, gamepad 0x40-0x4F; see [`MODULE_INPUT.md`](../interaction/MODULE_INPUT.md) and [`MODULE_GAMEPAD.md`](../interaction/MODULE_GAMEPAD.md)) |
 

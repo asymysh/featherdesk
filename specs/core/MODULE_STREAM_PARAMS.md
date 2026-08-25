@@ -145,6 +145,16 @@ pub enum StreamError {
     #[error("stream: capture/encode device lost")]
     DeviceLost,
 
+    /// The add-on has failed repeatedly and has exhausted its own internal
+    /// recovery (see "Add-On Crash Recovery" in MODULE_PIPELINE). This is the
+    /// TERMINAL signal for one add-on instance: the pipeline must NOT retry it,
+    /// it drops the add-on and falls through to the next candidate in the
+    /// dispatch order (or shuts the pipeline down if none remain). Distinct from
+    /// `DeviceLost` (which the pipeline itself retries) and from
+    /// `Backend` (a single transient call failure).
+    #[error("stream: add-on unrecoverable, do not retry: {0}")]
+    Unrecoverable(String),
+
     /// Catch-all backend failure with no more specific variant. Carries a
     /// human-readable detail for the LOG (never the wire); across the ABI it is
     /// the `AbiErr::Generic` code and the host fills the detail.
@@ -356,7 +366,7 @@ the policy; add-ons translate.
    │                                     │                              │   → capture.update_stream_params
    │                                     │                              │   → encoder.update_stream_params
    │                                     │                              │     (or restart if required)
-   │                                     │                              │ ForceKeyframe (new dims invalidate
+   │                                     │                              │ force_keyframe (new dims invalidate
    │                                     │                              │  reference frames)
    │                                     │                              │
    │                                     │ Send fresh config message    │
@@ -461,12 +471,25 @@ pub trait StreamParamsCapable {
 }
 ```
 
-The pipeline uses this at startup to decide:
-- Which fields trigger `update_stream_params()` vs full add-on restart
-- Validation bounds for incoming client requests (clamp to add-on's MinValues / MaxValues)
+The pipeline calls this **once at startup** (MODULE_PIPELINE step 3g) for each
+selected add-on whose `ProbeReport.caps` sets `CONFIGURABLE` / `ENC_CONFIGURABLE`,
+and caches the result on the `stream::Manager`. It decides:
+- Which fields trigger `update_stream_params()` vs a full add-on restart. The
+  `AddonCaps` bit only answers "configurable at all?"; `hot_changeable` answers
+  it **per field** (e.g. bitrate hot, width not).
+- Validation bounds for incoming client requests — `Manager::apply` clamps
+  `resize`/`set_bitrate`/`set_fps` to `min_values`/`max_values` rather than
+  letting an out-of-range value reach the encoder.
 
 Add-ons that don't implement `StreamParamsCapable` are treated as fully
-immutable: every parameter change requires restart.
+immutable: every parameter change requires restart, and requests are clamped to
+the `[stream]` config bounds only.
+
+> **Layer-2 only.** `StreamParamsCapability` carries `HashMap` and
+> `serde_json::Value`, neither of which is `StableAbi`. It never crosses the
+> `dlopen` boundary in this shape — the Layer-2 adapter builds it host-side from
+> the add-on's boundary-safe reply, exactly as `ProbeResult` is built from
+> `ProbeReport` (see [`MODULE_ABI.md`](./MODULE_ABI.md)).
 
 ---
 
@@ -491,6 +514,22 @@ doesn't fit the dynamic Params model:
 
 The TOML `[stream]` section provides **initial defaults**; runtime
 `stream::Params` may diverge based on client requests and adaptive policy.
+
+---
+
+## Testing Strategy
+
+| Level | What | Hardware |
+|-------|------|----------|
+| Unit | HDR terminal case: `HDR:true` with no HEVC-Main10-capable encoder loaded → `{"type":"hdr_unavailable"}`, session stays SDR, capture is never half-switched to 10-bit | No |
+| Unit | Chroma fallback cascade: encoder `ChromaUnsupported` → downgrade to encoder's best; separately, a synthetic client `{"type":"chroma_unsupported"}` → forced downgrade to 420 + fresh `config` + keyframe | No |
+| Unit | Resize hysteresis: dimension change ≤5% and aspect-ratio change ≤2% is suppressed (`resize_suppressed` sent); either threshold exceeded applies the resize | No |
+| Unit | Bandwidth adaptation policy math: sustained >5% loss for 200ms → `current * 0.7` clamped to `min_bitrate_bps`; <1% loss for 1s + stable RTT → `current * 1.1` clamped to `max_bitrate_bps`; a single-window drop-queue spike → immediate 0.5× cut | No |
+| Unit | `StreamParamsCapability.hot_changeable` gates whether a param change calls `update_stream_params()` vs. tears down and recreates the add-on | No |
+| Integration | Concurrent resize requests are coalesced to the latest only; the pipeline never applies a stale intermediate resolution | No |
+| Integration | A resolution or HDR change forces an IDR on the first frame after the change (GOP invalidated) | No |
+| Integration | Per-add-on translation table spot-checks: `BitrateBps` is hot on OpenH264/NVENC/AMF/VT HW but requires an ffmpeg restart on x264; `Width`/`Height` is cold (`Terminate`+`ReInit`) on AMF specifically | Yes (per encoder add-on) |
+| Integration | Add-ons that don't implement `ConfigurableEncoder`/`Capturer` are torn down and recreated on every param change, with no dropped-frame gap wider than one GOP | Yes (per add-on) |
 
 ---
 
