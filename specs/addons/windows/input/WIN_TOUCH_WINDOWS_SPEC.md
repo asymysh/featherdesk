@@ -33,8 +33,10 @@ Two-step Windows API (`user32.dll`):
 
 ```rust
 // Win32 touch injection via the `windows` crate (windows-rs).
-// Once at startup: max 10 simultaneous contacts, no system visual feedback.
-unsafe { InitializeTouchInjection(10, TOUCH_FEEDBACK_NONE)?; }
+// Once, on the pinned thread, from this add-on's own decoded
+// [addon_module_win_touch] section: max_contacts simultaneous contacts
+// (default 10) and the configured system visual feedback (default "none").
+unsafe { InitializeTouchInjection(sect.max_contacts, sect.feedback.as_flag())?; }
 
 // Per frame: an array of POINTER_TOUCH_INFO, one per active contact.
 let mut c = POINTER_TOUCH_INFO::default();
@@ -71,7 +73,16 @@ transition. Cancel is treated as UP.
 The touch injection context is **per-thread**. All `InjectTouchInput` calls MUST
 come from the same thread that called `InitializeTouchInjection`. The add-on
 spawns a dedicated OS thread (a `std::thread` it owns for the add-on's lifetime)
-and funnels all touch frames to it over an `std::sync::mpsc` channel.
+and funnels all touch frames to it over a **bounded**
+`std::sync::mpsc::sync_channel(64)`. The channel is bounded so a stalled
+injection thread cannot grow it without limit: on `try_send` returning `Full` the
+touch frame is **dropped** and a `warn` is logged at most once per second. Sending
+never blocks the caller, which is a per-session task, not this add-on's thread.
+
+This is also how the add-on satisfies MODULE_ABI "Thread requirements" without an
+`unsafe impl Send` on the injection context: the `TouchInjector` object the host
+holds is a `Send` proxy over the channel, and the thread-affine context never
+leaves the thread that created it.
 
 ### Coordinate mapping (DPI-aware, virtual screen)
 
@@ -79,20 +90,23 @@ and funnels all touch frames to it over an `std::sync::mpsc` channel.
 space** — the union of all monitors' physical pixel grids. Two corrections vs
 the naive read are mandatory:
 
-1. **DPI awareness (owned by the process entry point, NOT this add-on).**
+1. **DPI awareness (owned by the host entry point, NOT this add-on).**
    `PER_MONITOR_AWARE_V2` is **process-global and may be set only once**, before
    any DPI-dependent call — and the `dxgi_dd` capture add-on depends on it too
-   (for correct physical surface dimensions). So it MUST be established **once at
-   process startup**, owned by the FeatherDesk entry point via the **application
-   manifest** (`<dpiAwareness>PerMonitorV2</dpiAwareness>`, the most robust path)
-   or a single early `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`
-   call. This add-on does **not** set it (a lazy set at injector-create time would
-   be too late and could race the capture add-on). Instead, at `new()` it
-   **verifies** the context via `GetThreadDpiAwarenessContext` /
-   `AreDpiAwarenessContextsEqual` and returns an actionable error if the process
-   is not PER_MONITOR_AWARE_V2 — because otherwise `GetSystemMetrics(SM_CXSCREEN)`
-   returns DPI-scaled (logical) pixels and touch lands at the wrong physical
-   position on every HiDPI display.
+   (for correct physical surface dimensions). It is established once at process
+   startup by the host, at
+   [`specs/core/MODULE_PIPELINE.md`](../../../core/MODULE_PIPELINE.md) startup
+   step 0, which ships both declarations (the application manifest's
+   `<dpiAwareness>PerMonitorV2</dpiAwareness>` and an early
+   `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`);
+   the Windows-specific packaging side is in
+   [`../WINDOWS_SPEC.md`](../WINDOWS_SPEC.md) "DPI awareness". This add-on does
+   **not** set it (a lazy set at injector-create time would be too late and could
+   race the capture add-on). Instead, at `new_touch()` it **verifies** the context
+   via `GetThreadDpiAwarenessContext` / `AreDpiAwarenessContextsEqual` and returns
+   an actionable error if the process is not PER_MONITOR_AWARE_V2 — because
+   otherwise `GetSystemMetrics(SM_CXSCREEN)` returns DPI-scaled (logical) pixels
+   and touch lands at the wrong physical position on every HiDPI display.
 2. **Virtual-screen metrics, not SM_CXSCREEN.** On any multi-monitor setup
    `SM_CXSCREEN` only covers the primary display. Use:
    ```rust
@@ -128,27 +142,57 @@ the abi_stable `FeatherDeskAddonOpen` entry point). Available on Windows 8+.
 ```rust
 // crate: featherdesk-addon-win_touch (the add-on's cdylib)
 
-/// `probe` returns true if InitializeTouchInjection is available (Windows 8+).
-/// Implemented via GetProcAddress on user32.dll — does NOT call
-/// InitializeTouchInjection itself (that has the side effect of registering a
-/// per-thread injection context, which would conflict with the pinned-thread
-/// pattern used at construction).
+// Layer 1 — what the host actually calls (MODULE_ABI "Root module surface"):
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
 fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-/// Initialize touch injection (max contacts) and start the pinned thread.
-fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::TouchInjector>, input::InputError>;
+/// `descriptor().kind` is `InputTouch` (0x07), so this is the one of
+/// `InputAddon`'s three constructors that is valid here; `new_key_mouse` and
+/// `new_gamepad` return `PipelineError::AddonBackend`.
+/// Initializes touch injection (max contacts) and starts the pinned thread.
+fn new_touch(&self, cfg: input::InjectorConfig)
+    -> Result<Box<dyn input::TouchInjector>, PipelineError>;
 ```
+
+`probe` resolves `InitializeTouchInjection` via `GetProcAddress` on `user32.dll`
+(Windows 8+) and does **not** call it — calling it has the side effect of
+registering a per-thread injection context, which would conflict with the pinned
+thread used at construction. It reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(), codecs: RVec::new(),
+    caps: AddonCaps(0),          // no optional method on TouchInjector is gated
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** No `InitializeTouchInjection` export is
+`ROk(ProbeReport { available: false, reason: "InjectTouchInput requires Windows 8
+or later" })`, never an `RErr`.
+
+**Set every capability bit this add-on actually serves.** `AddonCaps(0)` is the
+correct and complete answer here: `TouchInjector` has no optional methods, so
+there is no bit to claim.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons").
 
 ---
 
 ## Error Handling
 
-| Failure | Behavior |
-|---------|----------|
-| `InitializeTouchInjection` fails | `new` error → touch unavailable; in-core kb/mouse still work |
-| `InjectTouchInput` `ERROR_INVALID_PARAMETER` | log; reset the offending contact's state machine |
-| `InjectTouchInput` `ERROR_TIMEOUT` | retry once next frame |
-| > max contacts received | inject the first N (10), drop extras, log once |
+| Failure | Returned as | Behavior |
+|---------|-------------|----------|
+| `InitializeTouchInjection` missing (pre-Windows 8) | `ProbeReport { available: false, reason }` | Add-on not selected; touch records are dropped by the dispatcher, in-core kb/mouse still work |
+| Process is not `PER_MONITOR_AWARE_V2` | `PipelineError::AddonBackend` from `new_touch` | Actionable error naming MODULE_PIPELINE startup step 0; touch unavailable rather than mis-positioned |
+| `InitializeTouchInjection` fails | `PipelineError::AddonBackend` from `new_touch` | Touch unavailable; in-core kb/mouse still work |
+| `InjectTouchInput` `ERROR_INVALID_PARAMETER` | `input::InputError::Backend(detail)` | Log; reset the offending contact's state machine |
+| `InjectTouchInput` `ERROR_TIMEOUT` | — | Retry once next frame |
+| More than `max_contacts` in one frame | — | Inject the first `max_contacts`, drop the extras, log once |
+| Injection funnel full (64 frames queued) | — | Drop the touch frame, `warn` at most once per second (see "Single-thread requirement") |
 
 ---
 

@@ -13,10 +13,15 @@ Windows is a primary target for FeatherDesk. The use case covers both **remote c
 Windows uses **one** capture mechanism — DXGI Desktop Duplication — for all
 GPU vendors and all deployment scenarios (with or without a physical display).
 
-Benchmarking proved DXGI DD's raw capture overhead is **sub-microsecond** on
-both NVIDIA and AMD GPUs. Vendor-specific capture APIs (NvFBC, AMF Display
-Capture) were considered and rejected — they cannot improve on near-zero
-overhead, and adding them would double maintenance for no measurable benefit.
+DXGI Desktop Duplication is the single Windows capture path for maintenance
+reasons, not measured ones: it is the only vendor-neutral API that yields an
+`ID3D11Texture2D` directly consumable zero-copy by MF HW, NVENC, AMF and QSV,
+so one add-on serves every GPU. Vendor-specific capture APIs (NvFBC, AMF
+Display Capture) are **deferred, not rejected on evidence** — no DXGI
+acquisition has been measured yet (the bench tool's DXGI backend is a stub
+pending COM bindings, and every recorded session reports it unavailable), so
+there is no number to compare them against. Revisit if a measured DXGI
+acquisition turns out to be a material share of the frame budget.
 
 ```
 capture/
@@ -49,8 +54,8 @@ for the full auto-install flow.
 | API | Why rejected |
 |-----|-------------|
 | Windows.Graphics.Capture (WGC) | Only advantage was per-window capture, which is out of scope. Full-desktop WGC is slower than DXGI DD. |
-| NvFBC for Windows | DXGI DD overhead already sub-microsecond — no measurable gain. Would add NVIDIA driver patcher concerns on GeForce. |
-| AMF Display Capture | Same reason — no measurable improvement over DXGI DD for full-desktop capture. |
+| NvFBC for Windows | Deferred, not rejected on evidence — one vendor-neutral add-on covers every GPU, and no measured DXGI acquisition cost exists to compare against. Would also add NVIDIA driver-patcher concerns on GeForce. |
+| AMF Display Capture | Deferred for the same maintenance reason — a second AMD-only capture path for an unquantified gain. |
 | GDI BitBlt | ~30–50ms, misses hardware-accelerated content (DirectX games, modern apps). |
 | Magnification API | ~15–30ms, CPU-only. Niche. |
 | DirectShow / MF screen capture | Wrappers around DXGI DD. No benefit. |
@@ -64,18 +69,16 @@ for the full auto-install flow.
 4. None of the above?                                          → fatal: no capture add-on installed
 ```
 
-### Measured benchmark (GTX 1080 Ti + RX 6800 XT)
+### Capture cost: not yet measured
 
-| GPU | Display | Test | P50 | P95 | P99 |
-|-----|---------|------|-----|-----|-----|
-| GTX 1080 Ti | Real 60Hz | Blocking (vsync wait) | 16.4ms | 17.4ms | 18.1ms |
-| GTX 1080 Ti | Real 60Hz | **Polling (raw overhead)** | **<0.001ms** | **<0.001ms** | 0.5ms |
-| RX 6800 XT | Dummy HDMI | Blocking (vsync wait) | 16.5ms | 17.5ms | 18.2ms |
-| RX 6800 XT | Dummy HDMI | **Polling (raw overhead)** | **<0.001ms** | **<0.001ms** | <0.001ms |
-
-The blocking latency (~16.4ms) is purely the 60Hz refresh interval —
-unavoidable for any frame-based capture. Raw acquisition overhead is
-effectively zero.
+No DXGI acquisition has been benchmarked. The bench tool's DXGI backend is a
+stub pending COM bindings, and every recorded session in
+`PROJECT_ARTIFACTS/bench_out` reports `{"backend":"dxgi","available":false}` —
+the bench machine's display is a Parsec virtual adapter, which blocks Desktop
+Duplication. The one thing that is structural rather than measured: a *blocking*
+`AcquireNextFrame` cannot return sooner than the display's refresh interval
+(~16.7 ms at 60 Hz), because there is no new frame before then. The polling cost
+on top of that is what remains unquantified.
 
 ---
 
@@ -91,7 +94,7 @@ want. The full set:
 encoders/
 ├── SW/
 │   ├── OPENH264_WINDOWS_SPEC.md           ← BSD-licensed Cisco SW (commercial use)
-│   └── X264_SUBPROCESS_WINDOWS_SPEC.md        ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
+│   └── X264_SUBPROCESS_WINDOWS_SPEC.md        ← GPL-isolated x264 subprocess (opt-in, force_addon only)
 └── HW/
     ├── MEDIAFOUNDATION_HW_WINDOWS_SPEC.md     ← cross-vendor HW (NVIDIA + AMD + Intel + Qualcomm)
     ├── NVENC_WINDOWS_SPEC.md                  ← NVIDIA direct
@@ -117,8 +120,8 @@ alongside MF HW.
 
 | Deployment | Add-ons |
 |-----------|---------|
-| Generic Windows, commercial | `dxgi_dd` + `openh264` + `mf_hw` |
-| Generic Windows, home / OSS | `dxgi_dd` + `x264` + `mf_hw` |
+| Generic Windows, any licence | `dxgi_dd` + `openh264` + `mf_hw` |
+| Measured CPU-bound host (x264 opt-in) | `dxgi_dd` + `x264` + `mf_hw`, with `[encode] force_addon = "x264"` |
 | ARM Snapdragon | `dxgi_dd` + `openh264` + `mf_hw` (OpenH264 has NEON path) |
 | NVIDIA-only | `dxgi_dd` + `openh264` + `nvenc` |
 | AMD-only | `dxgi_dd` + `openh264` + `amf` |
@@ -185,3 +188,36 @@ DXGI:               UNAVAILABLE (Parsec virtual display, expected)
 | DXGI on virtual adapters | ⚠️ Same — Parsec, VMware, VirtualBox display adapters block DDup. IddCx VDD bypass applies the same way. |
 | Admin rights | Not required for normal capture. **One-time UAC** required for IddCx VDD install on first headless launch. |
 | Driver | Any GPU driver from the last 5 years supports DDup |
+| Process DPI awareness | **`PER_MONITOR_AWARE_V2`, mandatory** — see below. Both `dxgi_dd` and `win_touch` depend on it |
+| Long paths | The app manifest sets `longPathAware`; file-transfer folders are opened `\\?\`-prefixed (see [`specs/interaction/MODULE_FILETRANSFER.md`](../../interaction/MODULE_FILETRANSFER.md)) |
+
+### DPI awareness
+
+`PER_MONITOR_AWARE_V2` is process-global and may be set only once, before any
+DPI-dependent call. `dxgi_dd` needs it for physical surface dimensions and
+`win_touch` needs it for physical injection coordinates, so neither add-on may
+set it — the host entry point owns it, at
+[`specs/core/MODULE_PIPELINE.md`](../../core/MODULE_PIPELINE.md) startup step 0,
+and declares it twice:
+
+- The **application manifest** embedded in `featherdesk.exe`, which is effective
+  before any code runs, and which also carries `longPathAware`:
+
+  ```xml
+  <windowsSettings xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+    <dpiAwareness>PerMonitorV2</dpiAwareness>
+    <longPathAware>true</longPathAware>
+  </windowsSettings>
+  ```
+
+- `main()` additionally calls
+  `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)` as
+  its first statement, for hosts started from a build that lost the manifest. It
+  returns `ERROR_ACCESS_DENIED` when the manifest already applied it — that error
+  is expected and ignored.
+
+Without it, `IDXGIOutput::GetDesc` reports virtualized logical dimensions, the
+advertised `config` width/height do not match the panel, and every absolute
+pointer coordinate lands short by the scale factor. `dxgi_dd.probe()` verifies
+the context and reports `available: false` rather than capturing at the wrong
+size.

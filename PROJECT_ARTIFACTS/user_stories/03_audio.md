@@ -36,7 +36,7 @@ plus one regression-guard story informed by
 - Given a stereo 20ms Opus packet is produced, When it is sent on the wire, Then it fits in a single datagram (no fragmentation) at ~100–300 bytes.
 - Given a 5.1 or 7.1 host layout, When Opus encodes it, Then it uses Opus multistream encoding (channel mapping family 1) rather than treating channels independently.
 
-**Validated by:** specs/media/MODULE_AUDIO.md — "Codec (pluggable, advertised in config)"; specs/PLATFORM_COMPAT.md — "Audio" section
+**Validated by:** specs/media/MODULE_AUDIO.md — "Codec (pluggable, advertised in `config`)"; specs/PLATFORM_COMPAT.md — "Audio" section
 
 ---
 
@@ -51,7 +51,7 @@ plus one regression-guard story informed by
 - Given PCM has no loss concealment, When a datagram carrying a PCM chunk is lost, Then the result is a ~20ms audio gap with no concealment (unlike Opus's FEC/PLC).
 - Given a 20ms PCM stereo frame is ~3840 bytes, When it is sent, Then it is fragmented into multiple datagrams (like video), unlike the single-datagram Opus case.
 
-**Validated by:** specs/media/MODULE_AUDIO.md — "Codec (pluggable, advertised in config)", "Wire Format"
+**Validated by:** specs/media/MODULE_AUDIO.md — "Codec (pluggable, advertised in `config`)", "Wire Format"
 
 ---
 
@@ -98,7 +98,7 @@ plus one regression-guard story informed by
 - Given a datagram carrying an Opus packet is lost, When the decoder cannot recover it via FEC, Then Opus PLC (packet loss concealment) fills the gap.
 - Given a genuine gap with no FEC recovery, When the worklet reaches that gap in playout, Then it outputs PLC/silence for that ~20ms window rather than stalling or throwing a decode error.
 
-**Validated by:** specs/media/MODULE_AUDIO.md — "Codec (pluggable, advertised in config)" (Opus FEC/PLC), "Browser Playback" (step 5)
+**Validated by:** specs/media/MODULE_AUDIO.md — "Codec (pluggable, advertised in `config`)" (Opus FEC/PLC), "Browser Playback" (step 5)
 
 ---
 
@@ -125,7 +125,7 @@ plus one regression-guard story informed by
 **So that** audio doesn't accumulate delay that would break the audio-is-master sync guarantee
 
 **Acceptance Criteria:**
-- Given the capture-to-pipeline channel is small (~3–4 frames, ~60–80ms), When it overflows, Then the oldest chunk is dropped so the consumer always gets the freshest audio, rather than growing the buffer.
+- Given the add-on's own capture ring is small (4 frames, ~80 ms at 20 ms chunks), When it overflows, Then the oldest chunk is dropped so the host's audio thread always pulls the freshest audio, rather than growing the buffer — the ring lives inside the add-on, on its own side of the ABI, and no channel crosses the boundary.
 - Given timestamps are stamped at capture (not at consumption), When chunks flow through the pipeline, Then they remain on the same monotonic timeline as video regardless of pipeline scheduling jitter.
 
 **Validated by:** specs/media/MODULE_AUDIO.md — "Realtime Pipeline" ("Small buffers everywhere"), "Testing Strategy" (Unit: back-pressure drop-oldest behavior)

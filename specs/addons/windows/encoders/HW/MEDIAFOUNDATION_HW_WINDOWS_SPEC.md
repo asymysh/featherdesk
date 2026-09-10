@@ -14,7 +14,7 @@ is registered:
 | Intel Sandy Bridge+ | Intel driver | Quick Sync |
 | Intel Arc | Intel driver | Quick Sync (with AV1) |
 | Qualcomm Snapdragon (ARM) | Qualcomm driver | Snapdragon HW encoder |
-| Microsoft Basic Display | Microsoft | falls back to software |
+| Microsoft Basic Display | — | registers no hardware MFT, so this add-on's probe reports `available: false` and the pipeline falls through to a software encoder add-on |
 
 One Rust FFI binding handles all of them — same way `libva` handles Intel + AMD + NVIDIA
 on Linux. The vendor SDKs (NVENC, AMF, QSV) are still worth shipping as separate
@@ -45,9 +45,21 @@ No royalty concern. No SDK to ship. The vendor's driver brings the hardware path
 | Intel Sandy Bridge+ | ✅ | ✅ Skylake+ | ✅ Arc+ |
 | Qualcomm Snapdragon | ✅ | ✅ | ❌ |
 
-Runtime probe via `MFTEnumEx` with `MFT_ENUM_FLAG_HARDWARE` returns the available
-hardware MFTs. If none, this add-on falls through to the next encoder (or fails
-gracefully so the SW add-on takes over).
+`probe()` calls `MFTEnumEx` with `MFT_ENUM_FLAG_HARDWARE` for each codec subtype
+and reports the registered hardware MFTs as `ProbeReport.codecs`, with `caps`
+setting `AddonCaps::ENC_CONFIGURABLE` — `ICodecAPI` changes bitrate and quality on
+the running transform, which is enough to serve `update_stream_params` without a
+rebuild for the common adaptive case. Availability is not an error: no hardware
+MFT registered (a Microsoft Basic Display adapter, a driver that ships none) is
+`ROk(ProbeReport { available: false, reason: "no hardware H.264 MFT registered" })`,
+never an `RErr`, and the pipeline falls through to the next encoder add-on. Set
+every bit the add-on actually serves, and claim only what the probe can prove — a
+bit claimed here and refused later is a capability lie (MODULE_ABI "Misbehaving
+add-ons").
+
+What the vendor MFTs *support* is not what the session *uses*: this add-on emits
+H.264 for every SDR session and HEVC Main10 only for an HDR one (see
+[`../README.md`](../README.md) "Codec fallback order at runtime").
 
 ---
 
@@ -123,7 +135,14 @@ let encoder: IMFTransform = unsafe { (*activates).as_ref().unwrap().ActivateObje
 // 4. Attach the D3D11 device manager so the MFT uses the GPU
 unsafe { encoder.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, std::mem::transmute(&device_manager))?; }
 
-// 5. Set input + output media types (same as SW spec, but with D3D11 surface as input)
+// 5. Set input + output media types (D3D11 surface in, Annex B H.264 out).
+//    The output type MUST carry the colour description — it is what becomes the
+//    SPS VUI (MODULE_ENCODE "Colour signalling"), not a tuning knob:
+//      MF_MT_VIDEO_PRIMARIES      = MFVideoPrimaries_BT709   (…_BT2020 for HDR)
+//      MF_MT_TRANSFER_FUNCTION    = MFVideoTransFunc_709     (…_2084  for HDR)
+//      MF_MT_YUV_MATRIX           = MFVideoTransferMatrix_BT709
+//                                                            (…_BT2020_10 for HDR)
+//      MF_MT_VIDEO_NOMINAL_RANGE  = MFNominalRange_16_235    (limited, both modes)
 // ... SetInputType / SetOutputType with codec config
 
 // 6. Per frame:
@@ -227,13 +246,16 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
+The keys, their defaults and their domains are in MODULE_CONFIG "Schema", under
+`[addon_module_mf_hw]`; this spec does not restate them.
+
 
 
 ---
 
 ## Stream Params Translation
 
-This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). MediaFoundation has mixed hot-reconfiguration support -- bitrate and quality are hot via `ICodecAPI` property store; resolution and profile require full MFT re-init.
+This add-on implements the `hwencode::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). MediaFoundation has mixed hot-reconfiguration support -- bitrate and quality are hot via `ICodecAPI` property store; resolution and profile require full MFT re-init.
 
 | Param change | MF API | Hot? |
 |--------------|--------|------|
@@ -242,4 +264,5 @@ This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`..
 | `QP` | `ICodecAPI::SetValue(CODECAPI_AVEncCommonQuality, q)` | yes |
 | `KeyframeInterval` | `ICodecAPI::SetValue(CODECAPI_AVEncMPVGOPSize, ki)` -- behavior varies per GPU vendor MFT | vendor-dependent |
 | `Width`, `Height` | Full `IMFTransform` teardown + recreation (returns `stream::StreamError::RequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 MFT subtype -- requires HEVC-capable MFT + D3D11 10-bit surfaces; full reinit (returns `stream::StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 MFT subtype -- requires an HEVC-capable MFT + D3D11 10-bit surfaces; full reinit (returns `stream::StreamError::RequiresRestart`). Only an HDR session reaches it; every SDR session stays on H.264 High | no |
+| Colour signalling | `MF_MT_VIDEO_PRIMARIES` / `MF_MT_TRANSFER_FUNCTION` / `MF_MT_YUV_MATRIX` / `MF_MT_VIDEO_NOMINAL_RANGE` on the output media type: BT.709 / 709 / BT.709 / `MFNominalRange_16_235` for SDR, BT.2020 / 2084 / BT.2020_10 / `16_235` for HDR. Written into the SPS VUI of every keyframe access unit (MODULE_ENCODE "Colour signalling"). Not a knob | set with the output type; changes with the HDR rebuild |

@@ -16,8 +16,10 @@ real Xbox 360 controllers. We choose ViGEmBus because:
 - **Real device node.** DirectInput, RawInput, and XInput games all see the
   virtual pad as genuine hardware - no driver-detection workarounds.
 - **Rumble feedback works.** ViGEmBus surfaces `XInputSetState` vibration
-  requests back to the user-mode client, which we forward to the browser via
-  `SetRumbleEmitter`.
+  requests back to the user-mode client, which we forward to the browser through
+  the host's `RumbleSink`. This add-on therefore sets `AddonCaps::RUMBLE` — it
+  serves `set_rumble_sink` **and** actually fires it, which is what the bit
+  claims.
 
 > **Project status note (be honest with operators).** The upstream ViGEm
 > project was archived by its original author in November 2023. The driver
@@ -51,6 +53,18 @@ the ViGEm Project and the community maintainers.
 The driver exposes a single device handle; `ViGEmClient.dll` is the user-mode
 wrapper. State pushes are full XUSB report writes - the driver compares against
 its last report internally, so a no-change `Update` is cheap.
+
+**Thread affinity.** `PVIGEM_CLIENT` and `PVIGEM_TARGET` are opaque handles onto
+an overlapped device handle that ViGEmClient serializes internally, so this add-on
+takes the first of the two options MODULE_ABI "Thread requirements" allows: a
+`unsafe impl Send` on the injector, justified by ViGEmClient's documented
+thread-safety for `vigem_target_x360_update` and `vigem_target_add`/`_remove` on a
+connected client. The bare claim is not enough on its own, so it is paired with
+one rule: **every call on a given `PVIGEM_TARGET` is serialized by the injector's
+own mutex**, including the teardown sequence, so the notification worker thread
+and the dispatcher can never touch the same target concurrently. No `unsafe impl
+Sync` is claimed — `Sync` comes from the host's `Mutex` around the Dispatcher, not
+from this object.
 
 ```rust
 // Raw FFI bindings to ViGEmClient.dll (a `vigem-client-sys`-style module).
@@ -117,16 +131,34 @@ unchanged (both sides are -32768..32767, same handedness).
 
 ### Rumble forwarding
 
+The host installs its side of the path at startup step 12 with the Layer-1 call
+`set_rumble_sink(sink: RumbleSinkBox)` — a `#[sabi_trait]` object the host
+implements and hands down. `Arc<dyn RumbleSink>` is the host-side Layer-2 form
+([`specs/interaction/MODULE_GAMEPAD.md`](../../../interaction/MODULE_GAMEPAD.md));
+the Layer-2 adapter wraps it into `RumbleSinkBox` before it crosses `dlopen`. A
+`Box<dyn Fn(..)>` emitter cannot cross the add-on
+ABI: a host closure's vtable is host-layout, and an add-on calling through it is
+calling into a foreign layout
+([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md) "Two layers"). The host
+installs the sink only when `caps().has(AddonCaps::RUMBLE)` and
+`[gamepad] allow_rumble` is true; `set_rumble_sink` returns
+`Err(InputError::Unsupported)` otherwise.
+
 The notification callback runs on a ViGEmClient worker thread. It receives
 `(client, target, largeMotor, smallMotor, ledNumber)`. The add-on:
 
 1. Looks up the W3C index for this target (small map kept on Connect).
-2. Calls the registered emitter: `emit(index, weak=smallMotor<<8, strong=largeMotor<<8, durationMs=250)`.
-3. The dispatcher forwards to `server::send_gamepad_rumble`.
+2. Calls the installed sink:
+   `sink.emit(index, weak = smallMotor << 8, strong = largeMotor << 8, duration_ms = 250)`.
+3. The host's sink `try_send`s onto its 64-slot channel and returns immediately —
+   `emit` never blocks the ViGEmClient worker thread, and a full channel drops the
+   event (rumble is best-effort, exactly like its datagram). The pipeline's drain
+   task calls `server::send_gamepad_rumble`.
 
 `largeMotor` / `smallMotor` are 8-bit; we left-shift to 16-bit for the wire
 format. Duration is fixed at 250 ms because XInput rumble is "set magnitude
-until next call"; the client refreshes on each event.
+until next call"; the client refreshes on each event. The host clamps it to
+`[0, 5000]` at the drain, so the value this add-on sends is never the last word.
 
 ---
 
@@ -179,33 +211,61 @@ The ViGEmBus driver is a signed kernel driver; install once, reboot once:
 ```rust
 // crate: featherdesk-addon-vigem (the add-on's cdylib)
 
-/// `probe` returns true if ViGEmClient.dll loads AND vigem_connect succeeds
-/// (driver present and not in a broken state).
+// Layer 1 — what the host actually calls (MODULE_ABI "Root module surface"):
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
 fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-/// Allocate the client, connect to the driver, and return the injector.
+/// `descriptor().kind` is `InputGamepad` (0x08), so this is the one of
+/// `InputAddon`'s three constructors that is valid here; `new_key_mouse` and
+/// `new_touch` return `PipelineError::AddonBackend`.
 /// No virtual controllers are plugged in until `connect(index, id)` is called.
-fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::GamepadInjector>, input::InputError>;
+fn new_gamepad(&self, cfg: input::InjectorConfig)
+    -> Result<Box<dyn input::GamepadInjector>, PipelineError>;
 ```
 
 `probe` is non-destructive: it calls `vigem_alloc` + `vigem_connect`, then
-`vigem_disconnect` + `vigem_free`. If `vigem_connect` returns
-`VIGEM_ERROR_BUS_NOT_FOUND`, `probe` returns false and the pipeline starts
-without gamepad capability; the operator sees an actionable install hint in
-the log.
+`vigem_disconnect` + `vigem_free`. On success it reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(), codecs: RVec::new(),
+    caps: AddonCaps(AddonCaps::RUMBLE),   // set_rumble_sink is served AND fired
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** A missing `ViGEmClient.dll`, or
+`vigem_connect` returning `VIGEM_ERROR_BUS_NOT_FOUND`, is
+`ROk(ProbeReport { available: false, reason: "ViGEmBus driver not installed; run
+ViGEmBus_Setup.msi (one-time, reboot required)" })` — never an `RErr`. The
+pipeline then starts without gamepad capability and the operator sees an
+actionable install hint in the log.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` here
+means `[gamepad] allow_rumble = true` produces nothing, silently — the failure
+mode `AddonCaps::RUMBLE` exists to make visible.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); the constructed object's
+`caps()` is authoritative and may be a strict subset of this one.
 
 ---
 
 ## Error Handling
 
-| Failure | Behavior |
-|---------|----------|
-| `ViGEmClient.dll` missing | `probe` false -> add-on not selected |
-| Driver not installed (`VIGEM_ERROR_BUS_NOT_FOUND`) | `probe` false; log install instructions + installer path |
-| `vigem_target_add` fails | `connect` returns error; that index stays unbound; other indices keep working |
-| Out of slots (4 x360 + 7 DS4 cap) | `connect` returns `Error::TooManyControllers`; dispatcher refuses extra indices |
-| `vigem_target_x360_update` fails mid-session | log + continue; mark the target for re-add on next `connect` |
-| Notification callback delivers after `disconnect` | drop silently (race window between unplug and worker thread drain) |
+| Failure | Returned as | Behavior |
+|---------|-------------|----------|
+| `ViGEmClient.dll` missing | `ProbeReport { available: false, reason }` | Add-on not selected; gamepad records are dropped by the dispatcher |
+| Driver not installed (`VIGEM_ERROR_BUS_NOT_FOUND`) | `ProbeReport { available: false, reason }` | Same; log install instructions + installer path |
+| Driver disappears between probe and construct | `PipelineError::AddonBackend` from `new_gamepad` | The pipeline starts without gamepad capability |
+| `vigem_target_add` fails | `input::InputError::Backend(detail)` from `connect` | That index stays unbound; other indices keep working |
+| Out of slots (4 x360 targets) | `input::InputError::Backend("no free x360 slot (4 max)")` from `connect` | The dispatcher refuses extra indices and logs once. `InputError`'s variant set is fixed by the AbiErr registry, so the slot ceiling travels in the `Backend` detail rather than in a variant of its own |
+| `vigem_target_x360_update` fails mid-session | `input::InputError::Backend(detail)` | Log + continue; mark the target for re-add on next `connect` |
+| Driver handle invalidated (bus removed mid-session) | `input::InputError::DeviceLost` | The pipeline rebuilds the injector; gamepad records are dropped if it cannot |
+| `set_rumble_sink` called without `AddonCaps::RUMBLE` | `input::InputError::Unsupported` | Cannot happen on the specified path — this add-on always sets the bit; the host checks it before calling |
+| Notification callback delivers after `disconnect` | — | Drop silently (race window between unplug and worker thread drain); the sink is never called for an unbound target |
 
 ---
 
@@ -216,7 +276,7 @@ addons/vigem/
 ├── src/
 │   ├── lib.rs        // GamepadInjector impl (Rust FFI)
 │   ├── buttons.rs    // W3C bit -> XUSB_GAMEPAD_* mask table
-│   └── rumble.rs     // notification callback + emitter wiring
+│   └── rumble.rs     // notification callback + RumbleSink wiring
 ├── vendor/vigem/     // ViGEm/Client.h + import lib (dynamic)
 └── build.rs          // link config for ViGEmClient.dll
 ```
@@ -246,4 +306,4 @@ If absent, defaults apply. Strictly validated only when this add-on is loaded.
 Specced - not yet built. Implementation order: DLL load + probe -> `vigem_connect`
 lifecycle -> `connect`/`disconnect` per-index target tracking -> button mapping
 table + `update` with diff suppression -> rumble notification callback wired to
-`set_rumble_emitter` -> driver-install first-run flow.
+`set_rumble_sink` -> driver-install first-run flow.

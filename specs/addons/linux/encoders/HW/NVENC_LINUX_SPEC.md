@@ -222,25 +222,59 @@ Documented in `MODULE_HARDWARE_ENCODE.md` as one of the supported zero-copy path
 
 ## Probe & Selection
 
-```rust
-// crate: featherdesk-addon-nvenc  (cfg(target_os = "linux"))
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Root module surface"):
 
-fn probe_nvenc() -> Result<NvencCapabilities, EncodeError> {
+```rust
+// crate: featherdesk-addon-nvenc   (cfg(target_os = "linux"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
+```
+
+```rust
+fn probe(&self) -> RResult<ProbeReport, AbiError> {
     // 1. dlopen libnvidia-encode.so
     // 2. NvEncodeAPICreateInstance
-    // 3. Enumerate encode GUIDs (H.264, HEVC, AV1)
+    // 3. nvEncGetEncodeGUIDCount / nvEncGetEncodeGUIDs on an opened session
     // 4. Query max width/height per codec
-    // 5. Return capabilities or error if no NVIDIA driver/GPU
+    // 5. No NVIDIA driver/GPU, or a driver too old for the SDK → ROk(ProbeReport {
+    //      available: false,
+    //      reason: "no NVIDIA adapter, or the driver predates Video Codec SDK
+    //               <n>".into(),
+    //      codecs: RVec::new(), caps: AddonCaps(0), displays: RVec::new() })
+    // 6. Otherwise → ROk(ProbeReport {
+    //      available: true, reason: RString::new(),
+    //      codecs: <what the device reports: H264 always; Hevc on Maxwell 2+;
+    //               Av1 on Ada+>,
+    //      caps: AddonCaps(AddonCaps::ENC_CONFIGURABLE), // nvEncReconfigureEncoder
+    //                                                    //   changes bitrate, QP,
+    //                                                    //   frame rate and GOP
+    //                                                    //   without a rebuild
+    //      displays: RVec::new() })
 }
 ```
 
-Pipeline probes in this order on Linux:
+**Availability is not an error.** No NVIDIA adapter, or a driver too old for the
+SDK, is `ROk(ProbeReport { available: false, reason })`, never an `RErr`. `RErr`
+is reserved for the probe itself failing.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` means
+no hot parameter change — silently, with no error and no warning.
+
+**Only claim what this call can prove.** `codecs` is what the *device* reports,
+not the union of what NVENC supports somewhere; a bit or a codec claimed here and
+refused later is a capability lie (MODULE_ABI "Misbehaving add-ons"), and the
+constructed object's `caps()` is authoritative.
+
+Pipeline probes encoders in this order on Linux (`MODULE_PIPELINE` startup
+step 3e):
 ```
-NVENC available?      → use NVENC (this add-on, if loaded)
-AMF-ROCm available?   → use AMF (other add-on)
-VA-API (libva)?       → use VA-API
-x264 subprocess?      → use x264 (GPL builds only)
-OpenH264?             → universal SW fallback
+HW:  nvenc (this add-on)  →  amf_rocm  →  libva
+SW:  openh264             →  (x264 only via [encode] force_addon = "x264")
 ```
 
 ---
@@ -251,7 +285,7 @@ OpenH264?             → universal SW fallback
 addons/encode/nvenc/
 ├── nvenc.rs              // Encoder struct, NvencEncoder::new
 ├── ffi.rs                // Rust FFI bindings, cfg(target_os = "linux") (built into the add-on cdylib)
-├── probe.rs              // probe_nvenc()
+├── probe.rs              // the root module's probe() -> ProbeReport
 ├── cuda_interop.rs       // KMS DMA-BUF → CUDA array import
 ├── sdk/                  // NVIDIA SDK headers (redistributable per NVIDIA license)
 │   ├── nvEncodeAPI.h
@@ -308,12 +342,15 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
+The keys, their defaults and their domains are in MODULE_CONFIG "Schema", under
+`[addon_module_nvenc]`; this spec does not restate them.
+
 
 ---
 
 ## Stream Params Translation
 
-This add-on implements `stream::ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). NVENC supports fully-hot reconfiguration via `nvEncReconfigureEncoder` for everything except resolution changes that cross the IDR boundary.
+This add-on implements `hwencode::ConfigurableHardwareEncoder` and sets `AddonCaps::ENC_CONFIGURABLE` at probe (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). NVENC supports fully-hot reconfiguration via `nvEncReconfigureEncoder` for everything except resolution changes that cross the IDR boundary.
 
 | Param change | NVENC API | Hot? |
 |--------------|-----------|------|

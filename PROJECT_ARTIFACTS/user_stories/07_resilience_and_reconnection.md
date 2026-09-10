@@ -13,10 +13,14 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 **So that** a short Wi-Fi blip doesn't force me to restart the whole session
 
 **Acceptance Criteria:**
-- Given a session disconnects, When it reconnects within `[reconnect] cache_ttl_seconds` (default 300s) and sends `{"type":"auth","token":"<bearer>","resume":true}`, Then `SessionCache.get` hits and the server marks the session "resumed", skipping fresh-session setup.
+- Given a session disconnects, When it reconnects within `[reconnect] cache_ttl_seconds` (default 300s) and sends `{"type":"auth","token":"<bearer>","resume":true}`, Then `SessionCache::take` **consumes** the entry, admission control (step 9), the effective-role clamp (step 10) and the controller-slot CAS (step 11) all re-run exactly as on the fresh-auth path, and the reply carries a freshly minted `session_token`.
+- Given two connections present the same resume token concurrently, When both reach step 8, Then exactly one `take` returns the entry and the other falls through to fresh auth — resume never admits two holders of one token.
+- Given a session that has resumed several times, When its `[auth] session_ttl_minutes` elapses measured from the ORIGINAL full authentication, Then it expires; reconnection never extends `absolute_expiry`.
 - Given a resumed session, When the server sends the config handshake, Then it restarts at the same resolution/bitrate/HDR captured in `SessionState.last_params` at disconnect, rather than renegotiating from defaults.
 - Given a resumed session, When the decoder needs seeding, Then the server always reseeds via a fresh bootstrap-stream IDR (there is no `LastVideoSeq` optimization — resume never assumes stored sequence continuity).
-- Given the reconnect happens after `cache_ttl_seconds` has elapsed, When the client sends `resume:true`, Then the cache misses and the client goes through fresh auth instead.
+- Given the reconnect happens more than `[reconnect] cache_ttl_seconds` (default 300) after the disconnect, When the client sends `resume:true`, Then the cache misses and the client goes through fresh auth instead.
+- Given the server closes with `close::SERVER_FULL (4429)`, When the client reconnects, Then it backs off from 5 s to a 60 s cap with full jitter and never at a fixed 2 s interval.
+- Given the server closes with `close::AUTH_FAILED (4401)`, When the client handles it, Then it discards the cached session token and makes exactly one full-auth attempt before prompting — it never retries a rejected credential on a timer.
 
 **Validated by:** specs/core/MODULE_SERVER.md — "WebTransport Session Lifecycle" step 8 (Resume path), "Session Cache (Reconnect)", "Session State" (`last_params`)
 
@@ -33,7 +37,7 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 - Given a vanished controller, When its session is cleaned up, Then its controller slot is released and available to the next client authenticating with `"role":"control"`.
 - Given a vanished session, When cleanup runs, Then all per-session tasks are cancelled via the session's cancellation token, and its state is retained in `SessionCache` for `cache_ttl_seconds` in case it reconnects.
 
-**Validated by:** specs/core/MODULE_SERVER.md — "Keepalive, liveness & timeouts", "WebTransport Session Lifecycle" step 19 (Session close), Testing Strategy row "Client disconnect cleanup (no panic, count=0)"
+**Validated by:** specs/core/MODULE_SERVER.md — "Keepalive, liveness & timeouts", "WebTransport Session Lifecycle" step 21 (Session close), Testing Strategy row "Client disconnect cleanup (no panic, count=0)"
 
 ---
 
@@ -44,11 +48,11 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 **So that** I get a lower-quality but smooth stream instead of a stalled/buffering one
 
 **Acceptance Criteria:**
-- Given the server's per-session `frame_out` queue is dropping frames on overflow (a sustained drop spike), When the telemetry loop observes this on its next 100ms tick, Then the effective bitrate is immediately cut by 0.5x on that single measurement (the FAST path), without waiting for client-reported stats.
-- Given the bitrate is adjusted, When the new value is computed, Then it is sent to the pipeline's `param_ch` and applied on the frame loop — no separate config message is sent to the client (a bitrate change is transparent to the decoder).
+- Given the server's per-session `frame_out` queue is dropping frames on overflow (a sustained drop spike) on the reference session, or on at least half the connected sessions inside the same 100ms window, When the telemetry loop observes it on its next tick, Then the effective bitrate is immediately cut by 0.5x on that single measurement (the FAST path), without waiting for client-reported stats — where "effective bitrate" is the value at the moment of the signal, seeded per MODULE_STREAM_PARAMS "Cold start" if the session was still in constant-QP mode.
+- Given the bitrate is adjusted, When the new value is computed, Then it is sent to the pipeline's `param_tx` and applied on the frame loop — no separate config message is sent to the client (a bitrate change is transparent to the decoder).
 - Given `[stream.adaptive] enabled = false`, When congestion occurs, Then no automatic bitrate adjustment happens (the operator opted out).
 
-**Validated by:** specs/core/MODULE_STREAM_PARAMS.md — "Bandwidth Adaptation (Server-Measured, Manager-Driven)" (FAST path)
+**Validated by:** specs/core/MODULE_STREAM_PARAMS.md — "Congestion-Reactive Bitrate Control (Server-Measured, Manager-Driven)" (FAST path), "Cold start"
 
 ---
 
@@ -59,12 +63,12 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 **So that** the video quality tracks my actual network conditions instead of oscillating or staying degraded forever
 
 **Acceptance Criteria:**
-- Given `PacketLossPct > loss_threshold_pct` (default 5.0%) for 2 consecutive 100ms windows (200ms), When the SLOW path evaluates, Then `new_bitrate = max(current * adjustment_factor (0.7), min_bitrate)`.
+- Given `PacketLossPct > loss_threshold_pct` (default 5.0%) for 2 consecutive 100ms windows (200ms), When the SLOW path evaluates, Then `new_bitrate = max(current * adjustment_factor (0.7), min_bitrate)`, `current` being the effective bitrate at the moment of the signal — seeded per MODULE_STREAM_PARAMS "Cold start" if the session was still in constant-QP mode.
 - Given `PacketLossPct < recovery_threshold_pct` (default 1.0%) for 10 consecutive windows (1s) AND RTT is stable, When the SLOW path evaluates, Then `new_bitrate = min(current * recovery_factor (1.1), max_bitrate)`.
 - Given `min_bitrate_bps` (default 1 Mbps) and `max_bitrate_bps` (default 25 Mbps), When any adjustment is computed, Then the result never goes below the floor or above the ceiling.
 - Given severe degradation (>15% loss for 30s), When the adaptation policy runs, Then only bitrate is adapted — resolution-level adaptation is explicitly deferred to a future version and must not be assumed to exist in v1.
 
-**Validated by:** specs/core/MODULE_STREAM_PARAMS.md — "Bandwidth Adaptation" (SLOW path), "Bounds and policy knobs", "Resolution-level adaptation (deferred)"
+**Validated by:** specs/core/MODULE_STREAM_PARAMS.md — "Congestion-Reactive Bitrate Control" (SLOW path), "Cold start", "Bounds and policy knobs", "Resolution-level adaptation (deferred)"
 
 ---
 
@@ -78,9 +82,9 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 - Given a hardware encoder add-on is active, When `encode_surface` cannot import the surface (format mismatch, GPU reset, or driver constraint), Then it returns `StreamError::FallbackToSoftware` and still releases the surface exactly once (the FbInfo's RAII Drop fires on this path just as on success/error).
 - Given `StreamError::FallbackToSoftware` is returned, When the pipeline catches it, Then it switches to a software encoder add-on for the remainder of that session — existing viewers keep receiving frames, just from the new encoder, with no session teardown.
 - Given a fallback has occurred for a session, When the frame loop continues, Then the pipeline does NOT retry the hardware path again mid-session (fallback is one-way per session).
-- Given the runtime probe/selection order in `specs/CENTRAL_SPEC.md` (`nvenc -> amf -> libva -> qsv -> mf_hw -> vt_hw` for HW; `x264 -> vt_sw -> openh264` for SW), When falling back, Then the pipeline selects from the SW probe order, not an arbitrary encoder.
+- Given the per-OS runtime probe order defined in `specs/core/MODULE_PIPELINE.md` step 3e (Linux HW `nvenc -> amf_rocm -> libva`; Windows HW `nvenc -> amf -> qsv -> mf_hw`; macOS HW `vt_hw`; SW `openh264 -> vt_sw` on macOS, `openh264` elsewhere, with `x264` reachable only via `force_addon`), When falling back, Then the pipeline selects from the SW order for that OS, not an arbitrary encoder.
 
-**Validated by:** specs/media/MODULE_HARDWARE_ENCODE.md — "Public Interface" (`encode_surface` docs on `FallbackToSoftware`), Testing Strategy rows "the M-1/TD-01 invariant" and "StreamError::FallbackToSoftware degrades the pipeline to a SW encoder add-on for the remainder of the session — never retries the HW path mid-session"; specs/CENTRAL_SPEC.md — "Runtime probe and selection" item 4
+**Validated by:** specs/media/MODULE_HARDWARE_ENCODE.md — "Public Interface" (`encode_surface` docs on `FallbackToSoftware`), Testing Strategy rows "the M-1/TD-01 invariant" and "`StreamError::FallbackToSoftware` degrades the pipeline to a SW encoder add-on for the remainder of the session — never retries the HW path mid-session"; specs/CENTRAL_SPEC.md — "Runtime probe and selection" item 4
 
 ---
 
@@ -94,7 +98,7 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 - Given a GPU reset occurs during `encode_surface`, When the call returns `StreamError::FallbackToSoftware`, Then the surface (`FbInfo`) is dropped and its underlying GPU resource released exactly once — never left dangling, never double-freed.
 - Given this is the same code path exercised on success and on ordinary errors, When tested, Then all three outcomes (success, error, `FallbackToSoftware`) are verified to release the resource exactly once, across all vendor implementations.
 
-**Validated by:** specs/media/MODULE_HARDWARE_ENCODE.md — "Public Interface" (SURFACE OWNERSHIP note), Testing Strategy row "encode_surface's FbInfo argument is dropped ... exactly once across all three outcomes"
+**Validated by:** specs/media/MODULE_HARDWARE_ENCODE.md — "Public Interface" (SURFACE OWNERSHIP note), Testing Strategy row "`encode_surface`'s `FbInfo` argument is dropped (and its resource released) exactly once across all three outcomes"
 
 ---
 
@@ -105,10 +109,10 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 **So that** I still get a working (if slightly less sharp) picture rather than a broken session
 
 **Acceptance Criteria:**
-- Given the host is encoding with 4:2:2 or 4:4:4 chroma, When the client reports `{"type":"chroma_unsupported"}`, Then `stream::Manager` downgrades to 4:2:0 and the server re-sends the config message and forces a keyframe.
+- Given the host is encoding with 4:2:2 or 4:4:4 chroma, When the client reports `{"type":"decode_unsupported"}`, Then `stream::Manager` downgrades to 4:2:0 and the server re-sends the config message and forces a keyframe.
 - Given an encoder add-on cannot produce the requested chroma format at all, When probed, Then it returns `StreamError::ChromaUnsupported` and the pipeline falls back to 4:2:0 for that session, matching the client-side decode gate.
 
-**Validated by:** specs/core/MODULE_SERVER.md — "WebTransport Session Lifecycle" step 17 (`chroma_unsupported` handling); specs/media/MODULE_HARDWARE_ENCODE.md — Testing Strategy row "Chroma capability advertisement + StreamError::ChromaUnsupported fallback to 4:2:0"
+**Validated by:** specs/core/MODULE_SERVER.md — "WebTransport Session Lifecycle" step 19 (the control-stream reader loop, `decode_unsupported` dispatch); specs/media/MODULE_HARDWARE_ENCODE.md — Testing Strategy row "Chroma capability advertisement + `StreamError::ChromaUnsupported` fallback to 4:2:0"
 
 ---
 
@@ -119,7 +123,8 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 **So that** I understand what happened instead of assuming a network fault
 
 **Acceptance Criteria:**
-- Given a graceful shutdown is initiated, When the server closes sessions, Then it closes each with `close::SERVER_SHUTDOWN (4503)`, a distinct code from a network-fault close, so the client can show "server shutting down" rather than a generic connection-lost message.
+- Given a graceful shutdown is initiated, When the server begins tearing sessions down, Then every connected client first receives `{"type":"server_shutdown"}` on its control stream and only then the QUIC close — the message precedes the close, so a client that reads it can distinguish an operator shutdown from a network fault before its transport dies.
+- Given a graceful shutdown is initiated, When the server closes sessions, Then it closes each with `close::SERVER_SHUTDOWN (4503)`, a distinct code from a network-fault close, so the client can show "server shutting down" rather than a generic connection-lost message, and cancels its auto-reconnect timer rather than storming a host that is going away.
 
 **Validated by:** specs/core/MODULE_SERVER.md — "Keepalive, liveness & timeouts" (Graceful shutdown), R-SRV-05 (Graceful Client Notification on Shutdown)
 
@@ -136,12 +141,12 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 - Given the child dies a 6th time inside the 60 s window, When the next `encode()` is called, Then the add-on returns `StreamError::Unrecoverable` and **stops spawning entirely** — no 7th process, no further sleeps.
 - Given a child that dies once and then runs healthy for more than 60 s, When it later dies again, Then the ladder restarts at attempt 1 (100 ms) — the counter decays rather than accumulating, so a once-an-hour blip self-heals forever.
 - Given the pipeline receives `Unrecoverable`, When it recovers, Then it **never retries that add-on**: it poisons it for the session (including for `degrade_to_software`), walks the startup probe order to the next candidate, and on a successful swap forces an IDR and pushes a fresh `config`.
-- Given no candidate encoder remains after fall-through, When the pipeline gives up, Then it shuts down with a clear terminal error rather than spinning.
+- Given no candidate encoder remains after fall-through, When the pipeline gives up, Then it shuts down within 1 second with a terminal error naming every poisoned add-on — it does not spin, and it does not emit a further restart attempt.
 - Given a child is dead and awaiting restart, When frames arrive, Then they are **dropped, not buffered**, and the log gets one `warn` **per restart attempt** — never one line per frame. Log flooding was half the original symptom.
 - Given `ffmpeg` is missing or not executable, When the add-on is probed at startup, Then it reports `available: false` with a reason — this is caught at probe time, never as a runtime crash loop.
 
 **Validated by:** specs/core/MODULE_PIPELINE.md — "Add-On Crash Recovery (backoff + circuit breaker)" + its four Testing Strategy rows; specs/addons/linux/encoders/SW/X264_SUBPROCESS_LINUX_SPEC.md — "Crash Recovery (subprocess death)"; specs/core/MODULE_STREAM_PARAMS.md — `StreamError::Unrecoverable`; specs/core/MODULE_ABI.md — `AbiErr::Unrecoverable` (code 7)
-**Regression guard:** TD-39 — the Go `internal/encode/ffmpeg.go` `restart()` was a flat kill + 50 ms sleep + respawn with no attempt counter, restart-looping roughly every 250 ms indefinitely on a persistent fault.
+**Regression guard:** TD-39 — the Go `internal/encode/ffmpeg.go` `restart()` was a flat kill + 50 ms sleep + respawn with no attempt counter, re-entered from `Encode()` on every frame, so a persistent fault respawned once per frame period indefinitely.
 
 ---
 
@@ -161,3 +166,21 @@ fallback/device-loss handling, as specified in `specs/core/MODULE_SERVER.md`,
 **Validated by:** specs/CENTRAL_SPEC.md — **Contract 9: Clipboard <-> Server**; specs/core/MODULE_SERVER.md — `send_clipboard`; specs/core/MODULE_PIPELINE.md — startup step 12/13 + Testing Strategy row "Clipboard H→C drain"; specs/interaction/MODULE_CLIPBOARD.md — "Internal Architecture"
 
 > Added in the final review pass. US-CF-1 asserts bidirectional sync, but the host→client half had **no method on the `Server` trait and no drainer in the pipeline** — both MODULE_CLIPBOARD and MODULE_SERVER assumed the wire existed and neither constructed it.
+
+---
+
+## US-RR-11: The adaptive loop behaves definedly under the shipped default configuration
+
+**As a** host operator who ran the binary without editing the config
+**I want** bandwidth adaptation to do something specified on the default settings
+**So that** the out-of-the-box configuration is not the one nobody tested
+
+**Acceptance Criteria:**
+- Given the shipped defaults `[stream] bitrate_bps = 0`, `qp = 26` and `[stream.adaptive] enabled = true`, When the host starts, Then the controller emits nothing at all — no ticks, no adjustment, no `config` — until the first congestion signal, and `featherdesk_effective_bitrate_kbps` reports 0 for as long as that lasts. Silence from a loop that keeps multiplying a zero seed fails this criterion; silence from a controller that has not armed yet is the specified behaviour.
+- Given the first congestion signal (a `frame_out` drop spike, or loss above `loss_threshold_pct` for two consecutive 100 ms windows), When it arrives, Then the Manager seeds `current` from the QUIC congestion window (`8 × cwnd / smoothed_rtt`) clamped into `[min_bitrate_bps, max_bitrate_bps]`, sets `params.bitrate_bps` to it, applies the reduction that armed it, and logs the constant-QP → bitrate-target transition once at `info`.
+- Given the session has armed, When 5% packet loss is sustained for 200 ms, Then the applied bitrate is `max(current * 0.7, 1_000_000)` and is strictly less than `current`.
+- Given the session has armed, When it later runs below 1% loss for 10 consecutive 100 ms windows, Then the bitrate recovers by `min(current * 1.1, 25_000_000)` per window and never exceeds `max_bitrate_bps`.
+- Given the transition to bitrate-target mode has happened, When the network recovers completely, Then the session does **not** return to constant-QP — the transition is one-way for the life of the session.
+- Given `[stream.adaptive] enabled = false` with any `bitrate_bps`, When the session runs, Then `featherdesk_effective_bitrate_kbps` never changes for the life of the session.
+
+**Validated by:** specs/core/MODULE_STREAM_PARAMS.md — "Congestion-Reactive Bitrate Control (Server-Measured, Manager-Driven)", "Cold start"; specs/core/MODULE_CONFIG.md — the `[stream]` and `[stream.adaptive]` schema plus the Validation table

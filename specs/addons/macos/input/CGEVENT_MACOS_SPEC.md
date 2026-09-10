@@ -41,7 +41,7 @@ CGEventSetFlags(e, currentFlags); // tracked modifier mask, see below
 CGEventPost(kCGHIDEventTap, e);
 CFRelease(e);
 
-// Absolute mouse move (stream pixel → global display POINT, NOT pixel — see below).
+// Absolute mouse move (stream PIXEL in, global display POINT out — see below).
 // While a button is held, post the matching *MouseDragged event so AppKit / Finder
 // register the drag (kCGEventMouseMoved is NOT a drag).
 CGEventType moveType = currentlyDown(button) ? draggedFor(button) : kCGEventMouseMoved;
@@ -52,7 +52,9 @@ CGEventPost(kCGHIDEventTap, m); CFRelease(m);
 
 // Relative mouse (pointer lock): CGEventCreateMouseEvent ALWAYS moves the cursor
 // to its CGPoint argument — the delta fields only inform game-style consumers.
-// Fetch the current location, add the delta, clamp to display bounds.
+// The wire delta is in stream pixels, so it goes through the SAME sx/sy multiply
+// as an absolute position. Fetch the current location, add, clamp to bounds.
+double dxPoints = wireDx * sx, dyPoints = wireDy * sy;
 CGEventRef snap = CGEventCreate(NULL);
 CGPoint cur = CGEventGetLocation(snap); CFRelease(snap);
 CGPoint next = CGPointMake(clamp(cur.x + dxPoints, 0, screenPointsW - 1),
@@ -75,18 +77,41 @@ CGEventRef s = CGEventCreateScrollWheelEvent(NULL, unit, 2, macDy, macDx);
 CGEventPost(kCGHIDEventTap, s); CFRelease(s);
 ```
 
-### Coordinate space: points, not pixels
+### Coordinate space: stream pixels in, points out
 
 `CGEventPost` consumes the **global display coordinate space measured in
 points**, NOT pixels. On a Retina Mac the framebuffer is, e.g., 2880x1800
-physical pixels but the global space is 1440x900 points. Using raw pixel
-coordinates lands the cursor at half the intended position on every Retina
-display.
+physical pixels while the global space is 1440x900 points.
 
-The pipeline must therefore advertise `cfg.width`/`cfg.height` in **points** to
-the `enigo` default, and the capture pipeline must agree. Conversion if needed:
-`CGDisplayPixelsWide(displayID)` (pixels) vs `CGDisplayBounds(displayID).size.width`
-(points) gives the per-display backing-scale factor.
+The wire and the whole pipeline are in **stream pixels** (see
+[`../../../core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)
+"Coordinate space"). This injector — not the pipeline, not the capturer —
+performs the conversion, because it is the component that knows CGEvent's units:
+
+```objc
+// Cached at construction and refreshed from a display-reconfiguration callback.
+CGDirectDisplayID  did      = <the display `sck` is capturing>;
+CGRect             bounds   = CGDisplayBounds(did);              // POINTS
+size_t             px_w     = CGDisplayPixelsWide(did);          // PIXELS
+size_t             px_h     = CGDisplayPixelsHigh(did);          // PIXELS
+
+// resize(w, h) records the stream space; convert on every absolute event:
+double sx = bounds.size.width  / (double)stream_w;   // stream px -> points
+double sy = bounds.size.height / (double)stream_h;
+CGPoint pt = CGPointMake(bounds.origin.x + stream_x * sx,
+                         bounds.origin.y + stream_y * sy);
+CGWarpMouseCursorPosition(pt);   // or the CGEventCreateMouseEvent location
+```
+
+Note that `sx`/`sy` fold **two** ratios into one multiply: the backing-scale
+factor (`px_w / bounds.size.width`, 2.0 on Retina) and any stream downscale
+(`stream_w / px_w`). Deriving them separately is the mistake that produces the
+half-position bug.
+
+`CGDisplayRegisterReconfigurationCallback` refreshes `bounds`/`px_*` on a mode
+change, a resolution change or a display being attached; the pipeline's
+resolution-change flow separately calls `resize()` with the new stream space, and
+the two are independent inputs to the same multiply.
 
 ### Modifier flag tracking & release-all
 
@@ -109,10 +134,10 @@ behave correctly.
 
 ### Coordinate mapping
 
-Stream-point coordinates (see "Coordinate space" above) map directly to the
-global display point space. For the single-display target with the captured
-display at origin (0,0): `globalPointX = x`, `globalPointY = y`. `resize`
-updates the width/height used for clamping. Multi-monitor is out of scope.
+`resize(width, height)` is how the injector learns the stream space; the multiply
+above is how it reaches the OS. For the single-display v1 target the captured
+display is at origin `(0, 0)`, so `bounds.origin` contributes nothing and the
+conversion collapses to the two scale factors. Multi-monitor is out of scope.
 
 ---
 
@@ -128,7 +153,7 @@ Boolean trusted = AXIsProcessTrustedWithOptions(
     (__bridge CFDictionaryRef)@{ (__bridge id)kAXTrustedCheckOptionPrompt : @YES });
 ```
 
-- At startup, `probe`/`new` calls `AXIsProcessTrusted()`. If not trusted, it
+- At startup, `new_key_mouse` calls `AXIsProcessTrusted()`. If not trusted, it
   prompts (opens the Accessibility pane) and returns a clear error; the pipeline
   starts view-only until permission is granted.
 - The error message tells the operator exactly which toggle to enable.
@@ -141,9 +166,9 @@ Boolean trusted = AXIsProcessTrustedWithOptions(
 
 ## Build & Distribution
 
-```bash
-cargo build --release -p featherdesk-addon-cgevent   # cdylib  featherdesk-addon-cgevent.dylib
-```
+There is nothing to build separately and nothing to drop into the add-ons
+directory: this path is compiled into the core `featherdesk-input` crate along
+with the rest of the `enigo` default, and ships inside the app bundle.
 
 Framework link config (Rust FFI):
 
@@ -162,18 +187,30 @@ Accessibility once. Apple Silicon and Intel use the identical API.
 
 ---
 
-## Constructor & Probe
+## Construction
+
+There is no `probe()` here and no `ProbeReport` to fill. This is not an add-on:
+it is the macOS arm of the in-core `enigo` default, so it has no root module, no
+`InputAddon` adapter and no `AddonCaps` of its own — `caps()` on the constructed
+injector returns `AddonCaps(0)`, exactly as
+[`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)
+states for the default. Core Graphics always exists on macOS; what is not
+guaranteed is Accessibility permission, and that is checked at construction with
+an actionable error.
 
 ```rust
 // crate: featherdesk-input (the `enigo` default's macOS backend, compiled into core)
 
-/// probe returns true on macOS (the API always exists); it does NOT guarantee
-/// Accessibility permission — that is checked in `new` with an actionable error.
-fn probe(&self) -> Result<ProbeResult, PipelineError>;
-
-/// new creates the injector. Returns Err(InputError::NoAccessibility) if not trusted.
-fn new(&self, cfg: InjectorConfig) -> Result<Box<dyn KeyMouseInjector>, InputError>;
+/// Builds the macOS KeyMouseInjector and caches the display geometry the
+/// coordinate conversion needs. Returns `Err(InputError::Backend(..))` naming the
+/// Accessibility toggle when `AXIsProcessTrusted()` is false; the pipeline starts
+/// view-only until the operator grants it.
+fn new_key_mouse(cfg: input::InjectorConfig)
+    -> Result<Box<dyn input::KeyMouseInjector>, input::InputError>;
 ```
+
+The result is handed to `input::new_dispatcher(km, touch, gp, cfg)` at startup
+step 8, alongside `gcvirtual` if that add-on loaded.
 
 ---
 
@@ -181,7 +218,7 @@ fn new(&self, cfg: InjectorConfig) -> Result<Box<dyn KeyMouseInjector>, InputErr
 
 | Failure | Behavior |
 |---------|----------|
-| No Accessibility permission | `new` returns `InputError::NoAccessibility`, prompts, opens Settings pane; view-only until granted |
+| No Accessibility permission | `new_key_mouse` returns `InputError::Backend("Accessibility permission not granted (System Settings → Privacy & Security → Accessibility)")`, prompts, opens the Settings pane; view-only until granted. `InputError`'s variant set is fixed by the AbiErr registry, so the actionable text travels in the `Backend` detail rather than in a variant of its own |
 | `CGEventCreate*` returns NULL | log + skip that event; do not crash |
 | Unmappable HID usage | log once; drop the key |
 | Permission revoked mid-session | injection silently no-ops (OS behavior); detect via a periodic `AXIsProcessTrusted` check and warn |
@@ -205,15 +242,14 @@ featherdesk-input/src/macos/   (the `enigo` default's macOS backend, compiled in
 
 ## Configuration
 
-Reads `[addon_module_cgevent]` (see [`specs/core/MODULE_CONFIG.md`](../../../core/MODULE_CONFIG.md)).
-
-```toml
-[addon_module_cgevent]
-prompt_accessibility = true   # auto-open the Accessibility pane if not trusted
-```
-
-If absent, defaults apply. Folded into the core input config now that the macOS
-kb/mouse path is the in-core `enigo` default (no separate add-on to load).
+There is **no** `[addon_module_cgevent]` section, and the strict config decoder
+would reject one: `[addon_module_*]` tables exist only for loadable add-ons, and
+this path is in core. The macOS kb/mouse default is governed by `[input]` like
+every other OS's default (see
+[`specs/core/MODULE_CONFIG.md`](../../../core/MODULE_CONFIG.md)) — `enabled`
+is the master switch, and setting it to `false` is what makes a macOS binary
+view-only. Prompting for Accessibility is not a knob: an injector that cannot
+inject always says so, and always says which toggle to flip.
 
 ---
 

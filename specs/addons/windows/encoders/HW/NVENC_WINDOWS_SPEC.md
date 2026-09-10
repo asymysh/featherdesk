@@ -32,7 +32,20 @@ source tree per NVIDIA's permissive header redistribution policy.
 
 Same hardware support as the NVENC Linux add-on. NVENC has been in every NVIDIA
 GPU since Kepler (GTX 600 series, 2012). On Windows the codec coverage and session
-caps are identical to Linux. See
+caps are identical to Linux.
+
+`probe()` queries `nvEncGetEncodeGUIDCount` / `nvEncGetEncodeGUIDs` on an opened
+session and reports the result as `ProbeReport { available, codecs, caps }`:
+`codecs` is what the device actually reports (H.264 always; HEVC on Maxwell 2+;
+AV1 on Ada+), and `caps` sets `AddonCaps::ENC_CONFIGURABLE`, because
+`nvEncReconfigureEncoder` changes bitrate, QP, frame rate and GOP length without
+a rebuild. Availability is not an error — no NVIDIA adapter, or a driver too old
+for the SDK, is `ROk(ProbeReport { available: false, reason })`, never an `RErr`.
+Set every bit the add-on actually serves, and claim only what the probe can
+prove: a bit claimed here and refused later is a capability lie (MODULE_ABI
+"Misbehaving add-ons").
+
+See
 [`../../../linux/encoders/HW/NVENC_LINUX_SPEC.md`](../../../linux/encoders/HW/NVENC_LINUX_SPEC.md)
 for the full Kepler → Blackwell matrix.
 
@@ -185,4 +198,5 @@ Identical to the Linux `nvenc` add-on -- NVENC's API is OS-portable through `nvE
 | `QP` | `nvEncReconfigureEncoder` (`constQP`) | yes |
 | `KeyframeInterval` | `nvEncReconfigureEncoder` (`gopLength`) | yes |
 | `Width`, `Height` | hot if within initial `maxEncodeWidth/Height`, else re-init | mostly |
-| `BitDepth=10` / `HDR=true` | requires HEVC Main10 GUID at session start | no |
+| `BitDepth=10` / `HDR=true` | requires the HEVC Main10 GUID at session start (returns `stream::StreamError::RequiresRestart`). H.264 is emitted for every SDR session; HEVC Main10 only for HDR — see [`../README.md`](../README.md) "Codec fallback order at runtime" | no |
+| Colour signalling | `NV_ENC_CONFIG_H264_VUI_PARAMETERS` (and the HEVC equivalent): `videoSignalTypePresentFlag = 1`, `videoFullRangeFlag = 0`, `colourDescriptionPresentFlag = 1`, and `colourPrimaries`/`transferCharacteristics`/`colourMatrix` = `1/1/1` for SDR BT.709 or `9/16/9` for HDR BT.2020 PQ. Written into the SPS of every keyframe access unit (MODULE_ENCODE "Colour signalling"). Not a knob | set at session start; changes with the HDR rebuild |

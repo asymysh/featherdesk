@@ -18,7 +18,7 @@ realistic choice to make.
 
 | Add-on | Add-on ID | Spec | When to use | Status |
 |--------|-----------|------|------------|--------|
-| **ScreenCaptureKit (SCK)** | `sck` | [`./SCK_MACOS_SPEC.md`](./SCK_MACOS_SPEC.md) | Always — the only supported macOS capture API | ✅ Working |
+| **ScreenCaptureKit (SCK)** | `sck` | [`./SCK_MACOS_SPEC.md`](./SCK_MACOS_SPEC.md) | Always — the only supported macOS capture API | 📋 Specced; Hackintosh-benchmarked |
 
 ### Recommended combinations
 
@@ -61,6 +61,13 @@ With only one capture add-on possible, the probe collapses to:
 2. Otherwise                                    → fatal: no usable capture
 ```
 
+`sck` declares `AddonCaps::EMBED_CURSOR | EMBED_CURSOR_SURF` and **not**
+`AddonCaps::CURSOR`, so macOS always resolves `cursorMode = "embedded"`:
+ScreenCaptureKit composites the pointer before the sample buffer is delivered.
+Setting `[capture] cursor_mode = "separate"` makes `sck` ineligible and, with no
+other macOS capture add-on, fails startup — see
+[`./SCK_MACOS_SPEC.md`](./SCK_MACOS_SPEC.md) "Cursor Handling".
+
 ---
 
 ## If a separate capture is ever needed
@@ -71,5 +78,5 @@ workload requires it (e.g., a hypothetical pre-compositor frame access API):
 1. Write the spec at `specs/addons/macos/capture/{NAME}_MACOS_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib from `addons/capture/{name}/`
-5. Wire the runtime probe order in `MODULE_PIPELINE.md`
+4. Follow CENTRAL_SPEC "Where to register a new add-on" steps 4–7 for the code
+   side (root module, `AddonCaps`, cdylib path, probe-order wiring).

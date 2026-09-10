@@ -75,6 +75,12 @@ in-core `enigo` default stays in charge:
 2. Otherwise                                       → in-core enigo default (kb/mouse via XTEST/libei)
 ```
 
+Selection is by `InputAddon::kind()` at startup step 8, not by rank: the
+`KeyMouse` slot takes at most one add-on and, when filled, overrides the `enigo`
+default; the `Gamepad` slot takes at most one. An unwritable `/dev/uinput` is
+`ProbeReport { available: false, reason }` — not an error — and the `enigo`
+default stays in charge (`MODULE_PIPELINE` startup step 8).
+
 ---
 
 ## When ready to add a new input backend
@@ -82,5 +88,5 @@ in-core `enigo` default stays in charge:
 1. Write the spec at `specs/addons/linux/input/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the input index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib from `addons/input/{name}/`
-5. Wire the capability registration in `MODULE_PIPELINE.md`
+4. Follow CENTRAL_SPEC "Where to register a new add-on" steps 4–7 for the code
+   side (root module, `AddonCaps`, cdylib path, probe-order wiring).

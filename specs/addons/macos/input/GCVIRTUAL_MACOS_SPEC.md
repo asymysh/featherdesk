@@ -27,10 +27,13 @@ Apple supports.
 - **No rumble inbox.** `GCController`'s haptics API (`GCHaptics`) is designed
   for *apps* to play effects on a *connected* controller. There is no public
   inbox by which a virtual controller can observe a host app's vibration
-  request. v1 therefore does **not** forward rumble on this add-on -
-  `set_rumble_emitter` is registered and stored but never invoked. The dispatcher
-  treats this as "rumble unavailable" the same way Safari treats missing
-  `vibrationActuator`.
+  request. This add-on therefore does **not** set `AddonCaps::RUMBLE`, and
+  `set_rumble_sink` returns `Err(InputError::Unsupported)`. That is the point of
+  the bit: the host installs no `RumbleSink`, and logs once at `info` that
+  `[gamepad] allow_rumble` has no effect with this add-on, instead of leaving the
+  operator with a setting that silently does nothing. A stub that stored the sink
+  and never fired it would look identical to a working one — see
+  [`specs/interaction/MODULE_GAMEPAD.md`](../../../interaction/MODULE_GAMEPAD.md).
 
 ---
 
@@ -182,21 +185,51 @@ Apple Silicon and Intel use the identical framework API.
 
 ## Constructor & Probe
 
-```rust
-// crate: featherdesk-addon-gcvirtual (built as a cdylib add-on)
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md) "Root module surface"):
 
-/// probe returns true only on macOS 14 (Sonoma) and later. It does not
-/// allocate any virtual controllers; that happens in `connect`.
+```rust
+// crate: featherdesk-addon-gcvirtual   (cfg(target_os = "macos"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
 fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-/// new stores config and prepares the shim. No virtual controllers are
-/// brought online until `connect(index, id)` is called.
-fn new(&self, cfg: InjectorConfig) -> Result<Box<dyn GamepadInjector>, InputError>;
+/// `descriptor().kind` is `InputGamepad` (0x08), so this is the one of
+/// `InputAddon`'s three constructors that is valid here; `new_key_mouse` and
+/// `new_touch` return `PipelineError::AddonBackend`. It stores config and
+/// prepares the shim — no virtual controllers are brought online until
+/// `connect(index, id)` is called.
+fn new_gamepad(&self, cfg: input::InjectorConfig)
+    -> Result<Box<dyn input::GamepadInjector>, PipelineError>;
 ```
 
-`probe` checks `@available(macOS 14, *)` via the shim. On pre-Sonoma it
-returns false and the pipeline starts without gamepad capability; the log
-line tells the operator the OS version requirement.
+`probe` checks `@available(macOS 14, *)` via the shim and allocates nothing. On
+Sonoma or later it reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(), codecs: RVec::new(),
+    caps: AddonCaps(0),          // NOT RUMBLE — GameController has no inbox
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** Pre-Sonoma is
+`ROk(ProbeReport { available: false, reason: "GCVirtualController requires macOS
+14 (Sonoma) or later" })`, never an `RErr`. The pipeline then starts without
+gamepad capability and the log line tells the operator the OS version
+requirement.
+
+**Set every capability bit this add-on actually serves.** `AddonCaps(0)` is
+correct and complete here: `set_rumble_sink` is the only optional method on
+`GamepadInjector`, and this add-on cannot serve it.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); the constructed object's
+`caps()` is authoritative and may be a strict subset of this one.
 
 ---
 
@@ -204,12 +237,12 @@ line tells the operator the OS version requirement.
 
 | Failure | Behavior |
 |---------|----------|
-| Pre-macOS 14 | `probe` false -> add-on not selected; log "GCVirtualController requires macOS 14+" |
-| `GCVirtualController` init / connect fails | `connect` returns the `NSError` description (mapped to `InputError`); that index stays unbound |
+| Pre-macOS 14 | `ProbeReport { available: false, reason }` -> add-on not selected; log "GCVirtualController requires macOS 14+" |
+| `GCVirtualController` init / connect fails | `connect` returns `input::InputError::Backend(<NSError description>)`; that index stays unbound and other indices keep working |
 | Host game does not use GameController framework | undetectable from our side; the virtual pad simply has no observer. Document in the user-facing README |
 | `setValue:` on an element fails | log once + continue (do not crash the stream) |
 | `disconnect` called on never-connected index | no-op (matches trait contract) |
-| Rumble request from server | `set_rumble_emitter` is stored; the emitter is never invoked (no inbox); no error returned |
+| `set_rumble_sink` called | `input::InputError::Unsupported` — this add-on never sets `AddonCaps::RUMBLE`, so the host checks the bit and does not call it; the return value is defence in depth |
 
 ---
 
@@ -244,7 +277,7 @@ If absent, defaults apply. Strictly validated only when this add-on is loaded.
 
 ## Status
 
-Specced - not yet built. Implementation order: `@available` probe + version
+📋 Specced - not yet built. Implementation order: `@available` probe + version
 gate -> Objective-C++ shim with `gcv_connect` / `gcv_disconnect` lifecycle ->
 button + thumbstick + trigger + D-pad mapping -> `update` diff suppression on
 the Rust side (avoid crossing FFI on no-change) -> documentation pass on the

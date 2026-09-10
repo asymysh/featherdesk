@@ -32,7 +32,10 @@ to the single `SCStream` the `sck` capture add-on owns:
 // In the shared SCStreamConfiguration (set by sck, audio fields added here):
 cfg.capturesAudio              = YES;
 cfg.sampleRate                 = 48000;
-cfg.channelCount               = 2;
+cfg.channelCount               = <host layout channel count, 1..8; 2 when [audio] channels = "stereo">;
+                               // read from the default output device via
+                               // AudioObjectGetPropertyData(kAudioDevicePropertyPreferredChannelLayout)
+                               // (AVAudioSession on the iOS-family equivalent) — NOT a constant
 cfg.excludesCurrentProcessAudio = YES;   // don't capture FeatherDesk's own output
 
 // Audio output delegate:
@@ -46,10 +49,21 @@ cfg.excludesCurrentProcessAudio = YES;   // don't capture FeatherDesk's own outp
 ### Format & normalization
 
 SCK delivers Float32 PCM at the configured rate/channels. The add-on converts to
-the canonical **48 kHz / S16LE**, following the host layout (stereo / 5.1 / 7.1).
-SCK can be asked for the host's channel count; the add-on reorders to canonical
-Vorbis order (`config.audio_layout`) and downmixes to stereo only when
-`[audio] channels = "stereo"`.
+the canonical format MODULE_AUDIO defines — **48 kHz, S16LE, interleaved, Vorbis
+channel order** — with the channel count **following the host output layout** up
+to 7.1:
+
+- float32 → S16LE (clamp + scale),
+- reorder CoreAudio's `AudioChannelLayout` (`L R C LFE …`) into the **Vorbis**
+  order (`L C R Ls Rs LFE`) MODULE_AUDIO defines — the two differ by a C/R
+  transposition and by LFE moving from fourth to last. Downmix to stereo only if
+  `[audio] channels = "stereo"`,
+- resample if the device rate ≠ 48 kHz (`rubato`, sinc interpolation, MIT —
+  declared as a dependency of this add-on; bypassed entirely when the device
+  already runs at 48 kHz).
+
+The channel count is **not** fixed at 2: `format()` reports what the host layout
+actually is, and `config.audioLayout` tells the client which layout to expect.
 
 ### Timestamp & clock mapping
 
@@ -65,7 +79,8 @@ audio-master A/V sync exact on macOS.
 
 | Component | License |
 |-----------|---------|
-| ScreenCaptureKit / CoreMedia | Apple system frameworks — linked, not redistributed |
+| ScreenCaptureKit / CoreMedia / CoreAudio | Apple system frameworks — linked, not redistributed |
+| `rubato` (sample-rate conversion) | MIT — the only third-party dependency; pure Rust, no C library |
 | Our Rust FFI / Obj-C++ binding | MIT |
 
 No driver. Requires the **Screen Recording** permission (already needed for `sck`
@@ -89,28 +104,60 @@ cargo build --release -p featherdesk-addon-opus   # cdylib  featherdesk-addon-op
 
 ## Constructor & Probe
 
-```rust
-// crate: featherdesk-addon-sck_audio (built as a cdylib add-on)
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md) "Root module surface"):
 
-/// probe returns true on macOS 13+ AND when the sck capture add-on is the active
-/// capturer (so an SCStream exists to attach the audio output to).
+```rust
+// crate: featherdesk-addon-sck_audio   (cfg(target_os = "macos"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
 fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-/// new attaches the audio output to the shared SCStream and starts emitting
-/// PcmChunks. It receives a handle to the sck stream via the pipeline wiring.
-fn new(&self, cfg: AudioConfig) -> Result<Box<dyn AudioCapturer>, AudioError>;
+/// `descriptor().kind` is `AudioCapture` (0x04). Attaches the audio output to
+/// the shared `SCStream` and starts emitting PcmChunks; it receives a handle to
+/// the sck stream through the pipeline wiring. Called on the audio thread;
+/// `new_codec` returns `PipelineError::AddonBackend` here.
+fn new_capturer(&self, cfg: audio::AudioConfig)
+    -> Result<Box<dyn audio::AudioCapturer>, PipelineError>;
 ```
+
+`probe` checks the OS version and that `sck` is the selected capturer, and
+resolves the host output layout. It is side-effect-free — no audio output is
+attached until `new_capturer`. On success it reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(), codecs: RVec::new(),
+    caps: AddonCaps(0),          // AudioCapturer has no optional methods
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** macOS 12 or a capturer that is not `sck` is
+`ROk(ProbeReport { available: false, reason: "sck_audio requires macOS 13+ and
+the sck capture add-on" })`, never an `RErr`. **Set every capability bit this
+add-on actually serves** — `AddonCaps(0)` is correct and complete here, because
+`AudioCapturer` has no optional methods. **Only claim what this call can prove:**
+a bit claimed here and refused later is a capability lie (MODULE_ABI
+"Misbehaving add-ons").
 
 ---
 
 ## Error Handling
 
-| Failure | Behavior |
-|---------|----------|
-| Pre-macOS 13 | `probe` false → add-on not selected; log "SCK audio requires macOS 13+" |
-| `sck` not the active capturer | `probe` false → log "sck_audio requires the sck capture add-on" |
-| Screen-Recording permission denied | Surfaces via the shared `sck` permission flow; audio disabled with the same notice |
-| Stream stops / reconfigures (display change) | Audio output is re-attached when `sck` rebuilds the stream; emit silence across the gap |
+| Failure | Returned as | Behavior |
+|---------|-------------|----------|
+| Pre-macOS 13 | `ProbeReport { available: false, reason }` | Add-on not selected; the host streams video only. Log "SCK audio requires macOS 13+" |
+| `sck` not the active capturer | `ProbeReport { available: false, reason }` | Same; log "sck_audio requires the sck capture add-on" |
+| Screen-Recording permission denied | `ProbeReport { available: false, reason }` | Surfaces via the shared `sck` permission flow; audio disabled with the same notice |
+| Stream stops / reconfigures (display change) | — | The audio output is re-attached when `sck` rebuilds the stream, and **silence is synthesized across the gap** so the capture-stamped timeline stays continuous |
+| Default output device changes mid-session | — | The SCK audio tap follows the system default. The add-on registers an `AudioObjectAddPropertyListener` for `kAudioHardwarePropertyDefaultOutputDevice`, and on notification re-attaches the audio output to the shared `SCStream` (re-applying `capturesAudio`, the rate and the resolved channel count). Silence is synthesized for the gap so the capture-stamped timeline stays continuous and the master clock never stalls |
+| Host channel layout changes (stereo ↔ 5.1) | — | Treated as a format change: the add-on re-resolves the layout, re-derives the Vorbis permutation, `format()` reports the new channel count, and the pipeline pushes a fresh `config` with the new `audioChannels`/`audioLayout`/`audioDescription` |
+| CoreMedia / SCK call fails mid-session | `audio::AudioError::Backend(detail)` | Log and continue on the next sample buffer; `detail` crosses the ABI in `AbiError.detail` |
+| Re-attach exhausts its retry budget | `audio::AudioError::Unrecoverable(detail)` | The pipeline drops the audio path for the session and pushes a fresh `config` with `audio: false`; video is untouched |
 
 ---
 

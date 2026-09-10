@@ -114,8 +114,8 @@ for real bugs found in the prior (Go) web client implementation. Source specs:
 **So that** I can judge whether my connection is suitable for latency-sensitive use (e.g. gaming)
 
 **Acceptance Criteria:**
-- Given the dispatcher successfully injects an input record, When the server processes it, Then it sends a 13-byte `InputAck` (`[Type=14][Seq u32][RecvTimestampNs u64]`), length-prefixed `[u16 RecLen=13]`, back on the input stream.
-- Given the `Seq` in the ack matches the `Seq` the client sent, When the client receives the ack, Then it can compute round-trip input latency from the timestamps.
+- Given the dispatcher successfully injects an input record, When the server processes it, Then it sends a 13-byte `InputAck` — `[Type=14]` (`frame_type::INPUT_ACK`) `[Seq u32][RecvTimestampNs u64]`, length-prefixed `[u16 RecLen=13]` — back on the input stream, best-effort: a session whose input stream will not accept the write drops the ack rather than stalling the reader.
+- Given the `Seq` in the ack matches the `Seq` the client sent, When the client receives the ack, Then round-trip input latency is computed from the two timestamps and rendered in the HUD, and an ack whose `Seq` was never sent is discarded without updating the HUD.
 
 **Validated by:** specs/interaction/MODULE_INPUT.md — "Public Interface" (InputAck / latency), "Wire Format" (Shared 6-byte record header, Seq echoed in InputAck)
 
@@ -148,7 +148,24 @@ for real bugs found in the prior (Go) web client implementation. Source specs:
 **Acceptance Criteria:**
 - Given the client captures a `wheel` event with a `deltaY` magnitude, When it constructs the `Scroll` record, Then it encodes the actual high-resolution `i16 Dy` magnitude from the browser event — not a fixed/quantized step size.
 - Given a large `deltaY` (fast scroll) vs. a small `deltaY` (slow scroll), When both are injected on the host, Then the resulting host-side scroll amount is proportionally larger for the fast gesture, matching the wire magnitude (after the required sign negation).
-- Given the client may batch multiple wheel samples per animation frame, When it sends them, Then the specced batching/coalescing window is honored rather than sending unconditionally on every event (which would defeat any smoothing without fixing the magnitude-collapse defect).
+- Given the client produces more than `[server] input_rate_limit` (default 1000) events per second, When they reach the server, Then the excess is rejected and `mousemove` records are coalesced; batched samples travel as one `InputBatch` (Type `0x01`) container rather than N separate records.
 
 **Validated by:** specs/interaction/MODULE_INPUT.md — "Wire Format" (Scroll record: `i16 Dy` high-res magnitude, sign convention)
 **Regression guard:** PROJECT_ARTIFACTS/summaries/input_injection_uinput/phase4.md — T10 documents that the shipped web client's `wheel` handler sent `deltaY` unconditionally with no batching, and (per the broader review of that code path) scroll magnitude was collapsed to a fixed step rather than preserving the gesture's actual speed.
+
+---
+
+## US-INP-11: Rumble reaches the client that owns the slot, or nobody
+
+**As a** co-op player
+**I want** the controller in my hands to rumble and nobody else's
+**So that** haptics match what is happening to my character, not someone else's
+
+**Acceptance Criteria:**
+- Given the host game requests vibration for global gamepad slot N, When the pipeline calls `send_gamepad_rumble(N, weak, strong, duration_ms)`, Then a `GAMEPAD_RUMBLE` (type 15) datagram is sent only to the client that owns slot N — no other connected client receives it.
+- Given the receiving client, When it decodes the datagram, Then the slot index it reads maps to one of **its own** local gamepad indices before reaching `GamepadHapticActuator.playEffect()` — a client with one pad must never be asked to rumble index 3.
+- Given the loaded gamepad add-on does not set `AddonCaps::RUMBLE`, or `[gamepad] allow_rumble = false`, When the host requests vibration, Then no rumble sink is installed, no datagram is sent at all, and the call is a no-op — not a datagram the client ignores.
+- Given no client currently owns slot N, When vibration is requested, Then the call is a no-op and no datagram is emitted.
+- Given a rumble datagram is lost in transit, When the next one arrives, Then it simply supersedes the lost one — rumble is latest-wins and is never retransmitted; on the WebSocket fallback carrier it is coalesced per gamepad index in the send queue instead.
+
+**Validated by:** specs/interaction/MODULE_GAMEPAD.md — the rumble path and the co-op slot model; specs/core/MODULE_SERVER.md — `send_gamepad_rumble`; specs/core/MODULE_PROTOCOL.md — `frame_type::GAMEPAD_RUMBLE = 15`; specs/core/MODULE_ABI.md — `AddonCaps::RUMBLE`

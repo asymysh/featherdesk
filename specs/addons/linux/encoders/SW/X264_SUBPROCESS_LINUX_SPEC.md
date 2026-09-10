@@ -6,6 +6,12 @@ libx264 H.264 software encoder running as a **separate subprocess** to maintain
 GPL isolation from the proprietary main binary. The fastest software H.264
 encoder available — 2x faster than OpenH264 at equivalent quality.
 
+**Opt-in.** This add-on is never auto-selected; it is reached only by
+`[encode] force_addon = "x264"`. Its only mechanism for an on-demand IDR is
+killing and respawning the `ffmpeg` child — see
+[`MODULE_ENCODE.md`](../../../../media/MODULE_ENCODE.md) "Software encoder order".
+`openh264` is the software default.
+
 The subprocess model: the main `featherdesk` binary (proprietary) spawns a
 small GPL-licensed encoder process. Communication via stdin/stdout pipe (raw
 I420 frames in, H.264 NALs out). Only the encoder subprocess is GPL; the main
@@ -100,19 +106,27 @@ raw I420, NALs are read from stdout in Annex B format.
 ffmpeg -hide_banner -loglevel error \
   -f rawvideo -pix_fmt yuv420p -s 1920x1080 -r 60 \
   -i pipe:0 \
-  -c:v libx264 -preset ultrafast -tune zerolatency \
+  -c:v libx264 -preset ultrafast -tune zerolatency -profile:v high \
   -crf 26 -threads 12 \
+  -bsf:v h264_metadata=aud=insert \
   -f h264 pipe:1
 ```
 
-Parameters controlled by the Rust bridge via config:
+`-bsf:v h264_metadata=aud=insert` makes ffmpeg emit an Access Unit Delimiter
+(NAL type 9) at every AU boundary. That delimiter is the only thing that makes an
+unframed `-f h264 pipe:1` byte stream splittable into access units — see
+"NAL splitter".
 
-| Parameter | Config key | Default |
-|-----------|-----------|---------|
-| Preset | `encode.x264_preset` | `ultrafast` |
-| CRF | `encode.qp` | 26 |
-| Threads | auto (`std::thread::available_parallelism()`) | all cores |
+Parameters controlled by the Rust bridge:
+
+| Parameter | Source | Default |
+|-----------|--------|---------|
+| Preset | `[addon_module_x264] preset` (static, read once at startup) | `ultrafast` |
+| CRF | `stream::Params.qp` — never read from config by this add-on; it arrives with the initial params and again on every rebuild (see "Stream Params Translation") | 26 (from `[stream] qp`) |
+| Threads | `[addon_module_x264] threads`; `0` = auto (`std::thread::available_parallelism()`, capped at 12) | `0` |
+| ffmpeg binary | `[addon_module_x264] ffmpeg_path`; `""` = auto-discover | `""` |
 | Tune | hardcoded | `zerolatency` (mandatory for streaming) |
+| Profile | `[addon_module_x264] profile` — the chroma negotiation selects it; this is the ceiling | `high` |
 
 ---
 
@@ -149,7 +163,8 @@ ffmpeg must be in PATH or at a known location. The bridge searches:
 ```
 addons/encode/x264/
 ├── x264.rs              // Rust bridge: subprocess management, pipe I/O
-├── nal_split.rs         // H.264 NAL unit splitting from pipe stream
+├── nal_split.rs         // AUD-keyed access-unit splitting + timestamp FIFO
+├── probe.rs             // the root module's probe() -> ProbeReport
 └── tests.rs             // Integration test (requires ffmpeg)
 ```
 
@@ -157,27 +172,85 @@ addons/encode/x264/
 
 ## Codec Output
 
-- Profile: Constrained Baseline (ultrafast preset)
+- Profile: High (`-profile:v high`); `ultrafast` disables CABAC, which High permits
 - Entropy: CAVLC (ultrafast) or CABAC (superfast+)
 - Slices: auto (x264 decides based on thread count)
 - B-frames: 0 (zerolatency tune)
-- IDR: on-demand via `force_keyframe()` → kill + restart ffmpeg, or `-x264opts keyint=N`
-- NAL format: Annex B (start codes retained) — matches our wire protocol
+- IDR: on-demand via `force_keyframe()` → kill + restart ffmpeg (the only
+  mechanism this bridge has; ~100 ms and a few dropped frames — see "Crash
+  Recovery"), or `-x264opts keyint=N`. There is no cheaper path, which is why
+  this add-on is opt-in
+- NAL format: Annex B (start codes retained) — matches our wire protocol, with an
+  Access Unit Delimiter at every AU boundary (see "NAL splitter")
+
+---
+
+## Probe & Selection
+
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Root module surface"):
+
+```rust
+// crate: featherdesk-addon-x264   (the add-on's cdylib)
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
+```
+
+`probe` resolves the ffmpeg binary (`[addon_module_x264] ffmpeg_path`, then
+`PATH`, then next to the host binary) and runs `ffmpeg -hide_banner -encoders` to
+confirm `libx264` is built in. It reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(),
+    codecs: RVec::from(vec![CodecId::H264]),
+    caps: AddonCaps(0),          // NOT ENC_CONFIGURABLE: every parameter change
+                                 //   respawns the child (see "Stream Params
+                                 //   Translation"), so nothing changes hot
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** A missing or non-executable `ffmpeg`, or one
+built without `libx264`, is `ROk(ProbeReport { available: false, reason: "ffmpeg
+not found on PATH or built without libx264" })`, never an `RErr` — and it is
+caught here rather than at the first frame, so a broken install is a startup
+message and not a crash loop.
+
+**Set every capability bit this add-on actually serves.** `AddonCaps(0)` is
+correct and complete here: `ENC_CONFIGURABLE` would claim a hot parameter change
+this bridge cannot perform.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); the constructed object's
+`caps()` is authoritative and may be a strict subset of this one.
+
+Being available is not being selected: this add-on is never in the auto order and
+runs only under `[encode] force_addon = "x264"`.
 
 ---
 
 ## When to use this add-on
 
-Use when:
-- No GPU hardware encoder available (headless CPU-only server)
-- Want the fastest possible SW encode (3.3ms vs OpenH264's 7.4ms)
+Force this add-on when:
+- The deployment is CPU-bound and has **measured** that x264 beats OpenH264 on it
+  (3.3ms vs OpenH264's 7.4ms at 1080p on 12 threads)
+- No GPU hardware encoder is available (headless CPU-only server)
 - GPL in the deployment is acceptable (ffmpeg is already GPL)
 - Multi-core CPU available (scales well to 12+ threads)
+- The session tolerates a process restart per on-demand keyframe — every client
+  join and every gap recovery costs one
 
-Use OpenH264 instead when:
+Stay on the OpenH264 default when:
 - GPL is not acceptable in the deployment
 - Single-core / low-thread environments (OpenH264 4-slice is more efficient below 4 threads)
 - ffmpeg is not available or installable
+- Clients join and leave often, or the link is lossy — each keyframe request is a
+  respawn here and a flag on the next frame there
 
 ---
 
@@ -185,8 +258,8 @@ Use OpenH264 instead when:
 
 | Encoder | 1080p ms | License | Ship? |
 |---------|---------|---------|-------|
-| **x264 ultrafast 12T** | **3.3ms** | GPL | ✅ subprocess |
-| OpenH264 4T | 7.4ms | BSD | ✅ Rust FFI direct |
+| **x264 ultrafast 12T** | **3.3ms** | GPL | ✅ subprocess, opt-in |
+| OpenH264 4T | 7.4ms | BSD | ✅ Rust FFI direct, the default |
 | VP9 speed8 4T | 9.0ms | BSD | ⚠️ marginal |
 | x265 ultrafast 4T | 9.8ms | GPL | ❌ slower than OpenH264 |
 | SVT-AV1 p12 12T | 13.2ms | BSD | ❌ too slow |
@@ -197,8 +270,8 @@ Use OpenH264 instead when:
 
 ✅ **Benchmarked.** Subprocess batch encoding measured at 3.3ms P50 @ 1080p
 (12 threads) on Ryzen 9 5900X. Persistent subprocess bridge (single ffmpeg
-process per session) to be implemented. Repo split (GPL subprocess → separate
-repo) deferred.
+process per session) to be implemented. Opt-in only — never chosen by
+`[encode] mode = "auto"`. Repo split (GPL subprocess → separate repo) deferred.
 
 ---
 
@@ -216,14 +289,18 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream::ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). The x264 subprocess bridge does **not** support hot reconfiguration -- ALL parameter changes restart the ffmpeg child process.
+This add-on does **not** implement `encode::ConfigurableEncoder`, and its `ProbeReport` leaves `AddonCaps::ENC_CONFIGURABLE` clear (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)): the encoder is a child process behind an unframed pipe with no in-band control channel, so ALL parameter changes restart the ffmpeg child.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|
-| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | `update_stream_params` returns `StreamError::RequiresRestart` -- pipeline tears down + respawns ffmpeg with new `-s WxH -r FPS -crf QP -g KI` (CRF mode) or `-s WxH -r FPS -b:v B -g KI` (bitrate mode). `-crf` and `-b:v` are mutually exclusive. | no |
-| `BitDepth=10` / `HDR=true` | rejected with `StreamError::HdrUnsupported` -- H.264 HDR profile not in WebCodecs spec | n/a |
+| Any of `Width`/`Height`/`FPS`/`BitrateBps`/`QP`/`KeyframeInterval` | The pipeline sees the cleared `ENC_CONFIGURABLE` bit and rebuilds: it tears the bridge down and respawns ffmpeg with new `-s WxH -r FPS -crf QP -g KI` (CRF mode) or `-s WxH -r FPS -b:v B -g KI` (bitrate mode). `-crf` and `-b:v` are mutually exclusive. | no (rebuild) |
+| `BitDepth=10` / `HDR=true` | Refused at construction with `StreamError::HdrUnsupported` -- there is no H.264 HDR profile in the WebCodecs spec, so the session stays SDR or moves to a HEVC-capable HW add-on | n/a |
 
-**Restart semantics:** the bridge forces an IDR on the first frame from the new ffmpeg instance so the client decoder picks up the new SPS/PPS cleanly.
+**Restart semantics:** the bridge forces an IDR on the first frame from the new
+ffmpeg instance so the client decoder picks up the new SPS/PPS cleanly — which is
+why `apply_params` does NOT additionally call `force_keyframe()` after a rebuild
+(MODULE_PIPELINE `apply_params`): doing so would respawn ffmpeg a second time for
+one parameter change.
 
 ---
 
@@ -243,9 +320,38 @@ Recovery" — read that first; it is the contract, this is the binding:
 | Detecting death | A dedicated reaper task owns `Child::wait()`. Death is also inferred from `EPIPE`/`BrokenPipe` on the stdin write or clean EOF on the stdout NAL reader — whichever fires first wins; the other is a no-op. |
 | Backoff | 100/200/400/800/1600 ms ±20 % jitter, counter decays after 60 s of a healthy child. |
 | During the gap | `encode()` returns `StreamError::Backend("x264: subprocess restarting")`. Frames are **dropped, never buffered** — a queue here would defeat the whole zero-latency design and re-add the accumulated-latency problem the frame-drop strategy exists to prevent. |
-| Give-up | 6th death inside the window → every subsequent call returns `StreamError::Unrecoverable("x264: ffmpeg died 6x in 60s: <last stderr line>")`, and the add-on stops spawning. The pipeline then falls through to `vt_sw`/`openh264`. |
-| Post-restart correctness | The new child is fed a **fresh IDR**, and the NAL splitter's partial-Annex-B accumulator is **cleared** before the first byte of the new stdout stream — otherwise a half-read NAL from the dead process would be concatenated onto the new SPS and hand the client a corrupt access unit. |
+| Give-up | 6th death inside the window → every subsequent call returns `StreamError::Unrecoverable("x264: ffmpeg died 6x in 60s: <last stderr line>")` — carried across the ABI in `AbiError.detail` ([`MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "AbiErr registry") — and the add-on stops spawning. The pipeline then falls through to the SW auto order (`openh264`, and `vt_sw` on macOS). |
+| Post-restart correctness | The new child is fed a **fresh IDR**, and the NAL splitter's partial-Annex-B accumulator is **cleared** before the first byte of the new stdout stream — otherwise a half-read NAL from the dead process would be concatenated onto the new SPS and hand the client a corrupt access unit. The timestamp FIFO is cleared with it, so a post-restart access unit is never stamped with a pre-restart capture time. |
 | Diagnostics | ffmpeg's stderr (`-loglevel error`) is drained continuously into a small ring buffer (last 8 lines) and logged with each restart, so "died 6x" carries the actual reason rather than just an exit code. A missing/unexecutable `ffmpeg` binary is caught at **`probe()`** time, not at first frame — that is a negative `ProbeReport`, not a crash loop. |
+| Hung child (alive, not draining stdin) | Neither a pipe error nor an exit fires, so the two detectors above cannot see it. The bridge therefore never issues a plain blocking write: **stdin is non-blocking and each frame is written under a 250 ms deadline** (`poll(2)`, never `write(2)` on a blocking fd), and each access unit is read under a **500 ms** deadline. Either deadline expiring means the child is hung and counts as ONE death on the ladder above. |
+| Kill escalation | `SIGTERM`, then **2 s**, then `SIGKILL`. The escalation timer runs on the reaper task, never on the frame-loop thread. |
+| Reaping | The dedicated reaper task owns `Child::wait()`. A respawn does not begin until the previous `wait()` has returned, so no zombie can accumulate across a restart storm, and the `Child` value is dropped only after `wait()` returns. |
+| Pipe close order (teardown or restart) | **stdin first**, then drain stdout to EOF with a 500 ms budget, then close stdout and stderr, then `wait()`, then escalate if `wait()` has not returned within 2 s. Closing stdout first makes ffmpeg die on `EPIPE` mid-flush and loses the last access unit. |
+| Deliberate restart ≠ crash | A restart the HOST asked for — a `RequiresRestart` parameter change, or `force_keyframe()` — is **not** counted by the circuit breaker. The bridge sets `expecting_exit = true` before the kill; the reaper sees the flag, records the exit as deliberate, and leaves the crash ladder untouched. Only an exit the reaper did not expect, an `EPIPE`/EOF outside a deliberate restart, or a hang deadline advances it. Without this, six client keyframe requests in a minute — an ordinary loss burst on the default `keyframe_interval = 0` — would poison the encoder. |
+| Restart-for-IDR is the ONLY IDR mechanism | This add-on cannot force an IDR cheaply: it has no in-band control channel to a running `ffmpeg`, so `force_keyframe()` is a kill + respawn costing one backoff step (~100 ms) and a few dropped frames. `openh264` (the software default) sets a flag on the next `encode` call. This is the load-bearing reason x264 is opt-in and `openh264` is the default. |
 
 **Never:** a flat sleep-and-respawn loop, an unbounded retry count, a per-frame
 log line on a dead child, or a blocking write to a dead pipe.
+
+---
+
+## NAL splitter
+
+`-f h264 pipe:1` is an unframed byte stream: a start code marks a NAL boundary,
+never an access-unit boundary, so a large IDR read across three pipe reads would
+otherwise be handed back as a bare SPS+PPS. The splitter therefore keys on the
+**Access Unit Delimiter** the child is configured to emit:
+
+- The accumulator emits one `EncodedUnit` only when it has seen the **next** AUD
+  (NAL type 9), or on the child's EOF — never on a start code alone.
+- `keyframe` is derived from the presence of a NAL type 5 (IDR slice) inside the
+  completed access unit, never from a counter or a request flag.
+- The bridge keeps a **FIFO of submitted `timestamp_ns`** and attaches the head
+  one to each completed AU. The child holds one or two frames, so without the
+  FIFO the pipeline would stamp each access unit with a later frame's capture
+  time — by the pipe depth — which is the TD-25 timestamp error reintroduced on
+  the software path.
+- While the child is holding a frame and no AU is complete, `encode()` returns
+  `Ok(None)`. That is the pipelined-encoder meaning of `Ok(None)`
+  ([`MODULE_ENCODE.md`](../../../../media/MODULE_ENCODE.md)): never an error and
+  never a dropped frame — that frame's access unit is delivered by a later call.

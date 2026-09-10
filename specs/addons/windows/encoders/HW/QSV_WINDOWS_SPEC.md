@@ -43,8 +43,21 @@ No royalties. SDK and headers can be vendored and redistributed without restrict
 | **Arc A-series (DG2)** | ✅ | ✅ | ✅ | ✅ |
 | **Battlemage / Lunar Lake+** | ✅ | ✅ | ✅ | ✅ |
 
-Runtime probe via `MFXLoad` + `MFXEnumImplementations` returns the available
-encoder + supported codecs.
+`probe()` calls `MFXLoad` + `MFXEnumImplementations` and reports the enumerated
+encoder's supported codecs as `ProbeReport.codecs` (H.264 on every part in the
+table; HEVC on Skylake+; AV1 on Arc+), with `caps` setting
+`AddonCaps::ENC_CONFIGURABLE`, because `MFXVideoENCODE_Reset` changes bitrate, QP,
+frame rate and GOP size without a full session teardown. Availability is not an
+error: no Intel graphics adapter, or no `libmfx-gen.dll` runtime, is
+`ROk(ProbeReport { available: false, reason })`, never an `RErr`. Set every bit
+the add-on actually serves, and claim only what the probe can prove — a bit
+claimed here and refused later is a capability lie (MODULE_ABI "Misbehaving
+add-ons").
+
+Enumerating HEVC or AV1 support says what the silicon can do, not what the session
+will use: this add-on emits H.264 for every SDR session and HEVC Main10 only for
+an HDR one (see [`../README.md`](../README.md) "Codec fallback order at
+runtime").
 
 ---
 
@@ -108,8 +121,20 @@ co2.Header.BufferId = MFX_EXTBUFF_CODING_OPTION2;
 co2.Header.BufferSz = std::mem::size_of::<mfxExtCodingOption2>() as u32;
 co2.LookAheadDepth = 0;
 co2.MaxFrameSize   = 0;
-let mut ext_bufs: [*mut mfxExtBuffer; 1] = [&mut co2.Header];
-enc_params.NumExtParam = 1;
+
+// Colour signalling — mandatory, not a tuning knob (MODULE_ENCODE).
+let mut vsi = mfxExtVideoSignalInfo::default();
+vsi.Header.BufferId              = MFX_EXTBUFF_VIDEO_SIGNAL_INFO;
+vsi.Header.BufferSz              = std::mem::size_of::<mfxExtVideoSignalInfo>() as u32;
+vsi.VideoFormat                  = 5;   // Unspecified
+vsi.VideoFullRange               = 0;   // limited / studio range
+vsi.ColourDescriptionPresent     = 1;
+vsi.ColourPrimaries              = 1;   // BT.709  (9 for HDR BT.2020)
+vsi.TransferCharacteristics      = 1;   // BT.709  (16 for HDR PQ)
+vsi.MatrixCoefficients           = 1;   // BT.709  (9 for HDR BT.2020 NCL)
+
+let mut ext_bufs: [*mut mfxExtBuffer; 2] = [&mut co2.Header, &mut vsi.Header];
+enc_params.NumExtParam = 2;
 enc_params.ExtParam    = ext_bufs.as_mut_ptr();
 
 unsafe { MFXVideoENCODE_Init(session, &mut enc_params); }
@@ -193,13 +218,16 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
+The keys, their defaults and their domains are in MODULE_CONFIG "Schema", under
+`[addon_module_qsv]`; this spec does not restate them.
+
 
 
 ---
 
 ## Stream Params Translation
 
-This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). Intel oneVPL (QSV) supports `MFXVideoENCODE_Reset` for hot reconfiguration of some parameters, but resolution and profile changes require full session teardown.
+This add-on implements the `hwencode::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). Intel oneVPL (QSV) supports `MFXVideoENCODE_Reset` for hot reconfiguration of some parameters, but resolution and profile changes require full session teardown.
 
 | Param change | oneVPL/QSV API | Hot? |
 |--------------|---------------|------|
@@ -208,4 +236,5 @@ This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`..
 | `QP` | `mfxVideoParam.mfx.QPI/QPP/QPB` (CQP) or `mfxExtCodingOption.ICQQuality` (ICQ) + `MFXVideoENCODE_Reset` | yes |
 | `KeyframeInterval` | `mfxVideoParam.mfx.GopPicSize` + `MFXVideoENCODE_Reset` | yes |
 | `Width`, `Height` | `MFXVideoENCODE_Close` + re-alloc surfaces + `MFXVideoENCODE_Init` (returns `stream::StreamError::RequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 profile via `MFX_PROFILE_HEVC_MAIN10`; requires full session recreation (returns `stream::StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 profile via `MFX_PROFILE_HEVC_MAIN10`; requires full session recreation (returns `stream::StreamError::RequiresRestart`). Only an HDR session reaches it; every SDR session stays on H.264 High | no |
+| Colour signalling | `mfxExtVideoSignalInfo` attached to `mfxVideoParam.ExtParam`: `VideoFormat = 5`, `VideoFullRange = 0`, `ColourDescriptionPresent = 1`, and `ColourPrimaries`/`TransferCharacteristics`/`MatrixCoefficients` = `1/1/1` for SDR BT.709 or `9/16/9` for HDR BT.2020 PQ. Written into the SPS VUI of every keyframe access unit (MODULE_ENCODE "Colour signalling"). Not a knob | set at `Init`; changes with the HDR rebuild |

@@ -1,37 +1,46 @@
 # Low-Level Design — Module / Crate Dependency Graph
 
-Converts the ASCII "Module Dependency Graph" in `specs/CENTRAL_SPEC.md`
-(~line 812) into Mermaid, with the crate/module distinction from the "File
-Structure" and "Crate ↔ spec map" sections preserved: solid boxes are
-standalone library crates; dashed boxes are modules living inside the
-`featherdesk-host` binary (`server` and `pipeline` are **not** separate
-crates).
+Converts the ASCII "Module Dependency Graph" in `specs/CENTRAL_SPEC.md` into
+Mermaid, with the crate/module distinction from the "File Structure" and
+"Crate ↔ spec map" sections preserved: rectangles are standalone library crates;
+the two circular nodes are modules living inside the `featherdesk-host` binary
+(`server` and `pipeline` are **not** separate crates). Every edge points
+dependent → dependency.
 
 ```mermaid
 graph TD
-    stream["featherdesk-stream\n(Params, EncodedFrame, StreamError)\nSHARED LEAF"]
+    stream["featherdesk-stream<br/>(Params, EncodedFrame, StreamError)<br/>SHARED LEAF"]
+    abi["featherdesk-abi<br/>(ABI contract, built into<br/>host AND every add-on)<br/>SHARED LEAF"]
 
     capture["featherdesk-capture"]
     encode["featherdesk-encode"]
     hwencode["featherdesk-hwencode"]
+    audio["featherdesk-audio<br/>(design locked, impl deferred)"]
     protocol["featherdesk-protocol"]
     transport["featherdesk-transport"]
     config["featherdesk-config"]
     auth["featherdesk-auth"]
     input["featherdesk-input"]
-    clipboard["featherdesk-clipboard\n(core leaf, per-OS)"]
+    clipboard["featherdesk-clipboard<br/>(core leaf, per-OS)"]
     filetransfer["featherdesk-filetransfer"]
-    abi["featherdesk-abi\n(ABI contract, built into\nhost AND every add-on)"]
 
-    server(("server\n[host-internal module]"))
-    pipeline(("pipeline\n[host-internal module,\nSOLE ORCHESTRATOR]"))
+    server(("server<br/>[host-internal module]"))
+    pipeline(("pipeline<br/>[host-internal module,<br/>SOLE ORCHESTRATOR]"))
 
     capture --> stream
     encode --> stream
     hwencode --> stream
+    audio --> stream
     encode --> capture
     hwencode --> capture
     transport --> protocol
+
+    capture --> abi
+    encode --> abi
+    hwencode --> abi
+    input --> abi
+    audio --> abi
+    pipeline --> abi
 
     server --> transport
     server --> protocol
@@ -45,17 +54,19 @@ graph TD
     pipeline --> capture
     pipeline --> encode
     pipeline --> hwencode
+    pipeline --> audio
     pipeline --> server
     pipeline --> config
     pipeline --> transport
-
-    abi -.->|"stable contract used by\nadd-on loader"| capture
-    abi -.->|"stable contract used by\nadd-on loader"| encode
-    abi -.->|"stable contract used by\nadd-on loader"| hwencode
-    abi -.->|"stable contract used by\nadd-on loader"| input
+    pipeline --> stream
+    pipeline --> protocol
+    pipeline --> auth
+    pipeline --> input
+    pipeline --> clipboard
+    pipeline --> filetransfer
 
     classDef leaf fill:#2d5,stroke:#131,color:#000
-    class stream leaf
+    class stream,abi leaf
 ```
 
 **Invariants this graph must preserve** (from `CENTRAL_SPEC.md`):
@@ -65,14 +76,23 @@ graph TD
 - **`stream` is the shared leaf** — every media/server crate depends on it for
   `Params` / `EncodedFrame` / `StreamError`; it depends on nothing else here.
 - **`pipeline` is the sole orchestrator** — it is the only node that imports
-  every core interface (capture, encode, hwencode, server, config, transport)
-  and builds the `Transport`. No other module reaches across this many
-  boundaries.
+  every core interface (capture, encode, hwencode, audio, server, config,
+  transport, abi, stream, protocol, auth, input, clipboard, filetransfer) and
+  builds the `Transport`. No other module reaches across this many boundaries.
 - **`hwencode` and `encode` are siblings, not parent/child** — both depend on
   `capture` + `stream` independently; an add-on implements one or the other,
   never both.
 - **`protocol` is shared with the client** — it's pure data (wire types,
   encode/decode), no logic dependencies, which is why the browser client can
   use the identical frame/message definitions.
-- Audio (`featherdesk-audio`) is omitted from the graph above for the same
-  reason `CENTRAL_SPEC.md` omits it: implementation is deferred.
+- **`abi` is a shared leaf, and every arrow into it points inward** — every crate
+  that faces an add-on (`capture`, `encode`, `hwencode`, `input`, `audio`) plus
+  `pipeline`, which owns the Layer-2 adapters, depends on `featherdesk-abi`; it
+  depends on nothing here. Drawing these edges outward would say the ABI contract
+  imports its consumers, which is the opposite of the dlopen model.
+- **Audio is in the graph** — `audio -> stream` for `StreamError` and
+  `pipeline -> audio` for selection, with `AudioLoop::open` constructing on the
+  audio thread and `AudioLoop::run` driving it. Its implementation is
+  deferred; its dependency edges are not, and omitting them makes any "who calls
+  this" cross-check blind to the audio path. `server` never imports `audio`:
+  encoded chunks reach it as bytes through `broadcast_audio`.

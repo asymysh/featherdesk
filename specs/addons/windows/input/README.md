@@ -86,5 +86,5 @@ Records for capabilities the binary doesn't have are silently dropped (touch wit
 1. Write the spec at `specs/addons/windows/input/{NAME}_WINDOWS_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the input index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib crate from `addons/{name}/`
-5. Wire the capability registration in `MODULE_PIPELINE.md`
+4. Follow CENTRAL_SPEC "Where to register a new add-on" steps 4–7 for the code
+   side (root module, `AddonCaps`, cdylib path, probe-order wiring).

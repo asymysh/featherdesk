@@ -85,7 +85,12 @@ which:
 3. Re-creates the device with new `UI_ABS_SETUP` ranges (the range cannot be
    changed on a live device).
 
-The same "release-all" pass runs in `Drop`.
+The same "release-all" pass runs in `Drop`. It is defensive only: the
+authoritative owner of held-input state is `input::Dispatcher::release_all`,
+which the server invokes on every controller-slot transition
+([`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)) —
+this add-on's `Drop` and `resize` passes exist so a device teardown cannot strand
+a key even between those calls.
 
 ### Scroll sign
 
@@ -121,22 +126,60 @@ run as full root.
 
 ## Constructor & Probe
 
-```rust
-// crate: featherdesk-addon-uinput  (cfg(target_os = "linux"))
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md) "Root module surface"):
 
-// probe returns true if /dev/uinput is openable for writing.
-// Side-effect-free: the FD is closed before return.
+```rust
+// crate: featherdesk-addon-uinput   (cfg(target_os = "linux"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
 fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-// new creates and initializes the virtual device at cfg.width × cfg.height.
-fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::KeyMouseInjector>, InputError>;
+/// `descriptor().kind` is `InputKeyMouse` (0x06), so this is the constructor
+/// `InputAddon` calls for the keyboard/mouse slot; it creates and initializes
+/// the virtual device at cfg.width × cfg.height. `new_touch` returns
+/// `PipelineError::AddonBackend` — touch is a future extension here, not a v1
+/// capability.
+fn new_key_mouse(&self, cfg: input::InjectorConfig)
+    -> Result<Box<dyn input::KeyMouseInjector>, PipelineError>;
+
+/// The gamepad extension (see "Gamepad Capability"). It is the same add-on
+/// filling startup step 8's `Gamepad` slot, and it creates one independent
+/// uinput device per controller index.
+fn new_gamepad(&self, cfg: input::InjectorConfig)
+    -> Result<Box<dyn input::GamepadInjector>, PipelineError>;
 ```
 
 `probe` attempts `open("/dev/uinput", O_RDWR|O_CLOEXEC|O_NONBLOCK)` — the **same
 mode** the constructor uses, so a probe success implies a setup success. The FD
-is closed before returning. Failure (ENOENT / EACCES) means the module isn't
-loaded or permissions are wrong → add-on not selected (the in-core `enigo`
-default stays in use), with a logged hint (`modprobe uinput` / input-group).
+is closed before returning. It reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(), codecs: RVec::new(),
+    caps: AddonCaps(AddonCaps::RUMBLE),   // set_rumble_sink is served AND fired
+                                          //   (the FF_RUMBLE read loop below)
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** ENOENT or EACCES on `/dev/uinput` — the module
+isn't loaded, or the permissions are wrong — is
+`ROk(ProbeReport { available: false, reason: "/dev/uinput not writable; run
+modprobe uinput and add the service user to the input group" })`, never an
+`RErr`. The in-core `enigo` default then stays in use and the operator sees an
+actionable hint in the log.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` here
+means `[gamepad] allow_rumble = true` produces nothing, silently — the failure
+mode `AddonCaps::RUMBLE` exists to make visible.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); the constructed object's
+`caps()` is authoritative and may be a strict subset of this one.
 
 ### Device identity
 
@@ -148,15 +191,19 @@ default stays in use), with a logged hint (`modprobe uinput` / input-group).
 
 ## Error Handling
 
-| Failure | Behavior |
-|---------|----------|
-| `/dev/uinput` absent | `probe` false → not selected (stay on `enigo` default); log `modprobe uinput` hint |
-| EACCES on open | `new` error → fall back to in-core `enigo` default; log input-group/udev hint |
-| ioctl failure during setup | `new` returns descriptive error; no half-created device |
-| write() returns short/EBADF | recreate device once; if it fails again, surface error + metric |
-| `resize` recreate fails | keep old device, log error, return error to pipeline |
+| Failure | Returned as | Behavior |
+|---------|-------------|----------|
+| `/dev/uinput` absent | `ProbeReport { available: false, reason }` | Not selected (stay on `enigo` default); log the `modprobe uinput` hint |
+| EACCES on open | `PipelineError::AddonBackend` from `new_key_mouse` | Fall back to the in-core `enigo` default; log the input-group/udev hint |
+| ioctl failure during setup | `PipelineError::AddonBackend` from the constructor | Descriptive `detail`; no half-created device |
+| write() returns short/EBADF | `input::InputError::Backend(detail)` if the retry fails | Recreate the device once; if it fails again, surface the error + metric |
+| `resize` recreate fails | `input::InputError::Backend(detail)` | Keep the old device, log, return the error to the pipeline |
 
-All injection errors are surfaced to the dispatcher (no silent discard).
+Construction failures are load-domain (`PipelineError`), hot-path failures are
+`input::InputError`; both cross the ABI as an `AbiErr` code plus an
+`AbiError.detail` the host logs ([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md)
+"AbiErr registry"). There is no add-on-private error type, and all injection
+errors are surfaced to the dispatcher (no silent discard).
 
 ---
 
@@ -193,6 +240,11 @@ This add-on implements `input::GamepadInjector` in addition to
 gamepad device costs only an extra device-create call. See
 [`specs/interaction/MODULE_GAMEPAD.md`](../../../interaction/MODULE_GAMEPAD.md)
 for the cross-platform contract.
+
+It therefore sets **`AddonCaps::RUMBLE`** at probe: `set_rumble_sink` is served
+*and* actually fired, by the `FF_RUMBLE` read loop below. A stub that stored the
+sink and never emitted would have to leave the bit clear (MODULE_ABI
+"Optional-method capability flags").
 
 One independent uinput device is created **per controller index** so SDL/games
 enumerate them as separate gamepads. Each gamepad device registers:

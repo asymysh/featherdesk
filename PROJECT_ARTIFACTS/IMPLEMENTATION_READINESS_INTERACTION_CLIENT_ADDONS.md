@@ -22,21 +22,27 @@ clarifying question first.
 
 Addon specs use their own valid template (`Purpose`/`Implementation Plan`/`File
 Structure`/`Status` etc. rather than module-spec's `Public Interface` heading) —
-an automated heading-name check initially flagged all ~28 addon files as
+an automated heading-name check initially flagged all 32 addon specs as
 "incomplete," but this is a false positive from comparing against the wrong
 template, not a real gap (verified by reading actual content). A repo-wide scan
 for `TBD`/`TODO`/`FIXME`/"to be determined" across all of `specs/addons/`,
 `specs/client/`, `specs/interaction/` returned zero hits.
 
-Addon spot-check coverage: read `LINUX_SPEC.md`, `MACOS_SPEC.md`,
-`WINDOWS_SPEC.md` (per-OS overviews) in full or near-full; deep-read
-`LIBVA_LINUX_SPEC.md` and `INTERCEPTION_WINDOWS_SPEC.md`; the remaining ~26
-per-vendor/per-device addon specs were not individually deep-read (time-boxed
-per the lighter-touch instruction) but are covered indirectly — every one is
-referenced by name with a consistent add-on-ID/license/capability table from
-its owning module spec (`MODULE_ENCODE.md`, `MODULE_HARDWARE_ENCODE.md`,
-`MODULE_AUDIO.md`, `MODULE_INPUT.md`, `MODULE_GAMEPAD.md`), and none showed up
-in the TBD/placeholder scan.
+Addon spot-check coverage: `specs/addons` holds 44 files — 32 specs and 12
+READMEs. Read `LINUX_SPEC.md`, `MACOS_SPEC.md`, `WINDOWS_SPEC.md` (per-OS
+overviews) in full or near-full; deep-read `LIBVA_LINUX_SPEC.md` and
+`INTERCEPTION_WINDOWS_SPEC.md`. The remaining **27 specs and all 12 READMEs were
+not read** (time-boxed per the lighter-touch instruction). They are covered only
+by name-resolution — each is referenced with an add-on-ID/license/capability row
+from a module spec — which is a weaker property than review and does not support
+a "0 blocking questions" verdict for those files. One spec,
+`specs/addons/macos/input/CGEVENT_MACOS_SPEC.md`, carries a self-contradictory
+status: `specs/addons/macos/input/README.md:24` marks it "✅ In core" while the
+spec's own Status (`:258`) says "📋 Specced — not yet built". It is referenced
+from `specs/interaction/MODULE_INPUT.md:179`,
+`specs/addons/macos/capture/SCK_MACOS_SPEC.md:18` and `:379`, and
+`specs/addons/macos/MACOS_SPEC.md:289` and `:296`. None showed up in the
+TBD/placeholder scan.
 
 ## Cross-Cutting Blocking Gap: Stuck Input on Tab Blur (confirmed real, matches an actual old-code bug)
 
@@ -69,26 +75,34 @@ this is a client-side responsibility since the server has no way to know the
 tab lost focus. This gap should be added to `MODULE_WEB_CLIENT.md`'s Internal
 Architecture and cross-referenced from `MODULE_INPUT.md`.
 
-## Scroll-Wheel Magnitude — CONFIRMED FIXED (not a gap)
+## Scroll-Wheel Magnitude and Sign — both closed
 
 The old Go code collapsed `deltaY` to a fixed `±1` at the server call site
 (`internal/input/protocol.go`, see
 `PROJECT_ARTIFACTS/review/input_injection_uinput/phase2/T4-event-injection.md`).
-The new spec fixes this cleanly: `MODULE_INPUT.md`'s wire format defines Scroll
-(Type `0x23`) as **signed 16-bit high-resolution `Dx`/`Dy`** (not a boolean/step),
-explicitly says "positive = scroll right/down (W3C deltaX/deltaY)," and the
-`KeyMouseInjector::inject_scroll(dx, dy, unit)` interface takes the real
-magnitude through to injection, with a documented per-add-on sign-negation rule
-and a unit-translation table (pixel/line/page across all three OSes). No add-on
-spec was found deviating from this. This is a genuine, verified improvement — no
-further action needed.
+Magnitude is genuinely fixed: `MODULE_INPUT.md`'s wire format defines Scroll
+(Type `0x23`) as **signed 16-bit high-resolution `Dx`/`Dy`**, says "positive =
+scroll right/down (W3C deltaX/deltaY)", and `KeyMouseInjector::inject_scroll(dx,
+dy, unit)` carries the real magnitude through to injection.
+
+The **sign** rule is now covered on the same footing. `MODULE_INPUT.md:174-182`
+restates the sign obligation on **every** `KeyMouseInjector` implementation —
+the built-in `enigo` default included, not add-ons only — naming
+`UINPUT_LINUX_SPEC.md`'s "Scroll sign" line (`:95`) and recording that
+INTERCEPTION and CGEVENT state the negation in their injection sketches. The
+default path is no longer the uncovered one: `MODULE_INPUT.md:191-212` ("The
+`enigo` default's sign and unit rule") gives `notches(d, unit)`, the per-axis
+`i32` residual accumulator and the outcome-normative sign rule, and closes with
+"This is the sign and unit contract for a stock install". A stock install with
+no input add-on dropped in therefore has a specified scroll direction and a
+specified unit translation.
 
 ## Verdict
 
 **Not fully implementation-ready** — one concrete, well-understood blocking gap
 (tab-blur stuck-input handling) needs a `MODULE_WEB_CLIENT.md` addition before
-this area can be called done; everything else in interaction/client/addons is
-clear, consistent, and free of placeholders.
+this area can be called done; everything else in interaction/client that was read
+is clear, consistent, and free of placeholders.
 
 ---
 
@@ -107,7 +121,7 @@ by user story US-INP-9, which no longer carries a `GAP` citation.
 
 | Directive | What it closes |
 |---|---|
-| **R-CLI-13** — On-Screen Connection/Stats HUD | `stats.js` and the "status overlay" were named in the file listing but never specced beyond outbound telemetry — nothing was ever specced to be shown **to the user**, which is why RTT/latency visibility was never built pre-refactor. F9-toggleable HUD showing FPS, `inputLatencyMs`, resolution+codec+bitrate, connection state — all values the client already holds. Explicitly **not** an active bandwidth probe. |
+| **R-CLI-13** — On-Screen Connection/Stats HUD | `stats.js` and the "status overlay" were named in the file listing but never specced beyond outbound telemetry — nothing was ever specced to be shown **to the user**, which is why RTT/latency visibility was never built pre-refactor. F9-toggleable HUD showing FPS, `inputLatencyMs`, resolution+codec+carrier from the last `config`, throughput from the client's own 1 s byte delta (`config` deliberately carries no bitrate field), and connection state — all values the client already holds. Explicitly **not** an active bandwidth probe. |
 | **R-CLI-14** — Deterministic Teardown and Backgrounded-Tab Behavior | Nothing specified when the `AudioContext`, `AudioWorklet`, `VideoDecoder`, in-flight `VideoFrame`s, or the session itself are released. Now: one idempotent `teardown()` off `pagehide` (not `unload` — bfcache + mobile reliability), in reverse-setup order with `releaseAllHeld()` **first** while the transport is still open. Plus a per-resource backgrounding table: **audio keeps playing, video stops decoding**, keyframe requested on return. Closes user story US-AUD-7. |
 
 Cross-module fixes in the final pass that touch this area: the client's
@@ -118,7 +132,12 @@ consumed but no host-side module produced (see the core+media addendum).
 
 ## Verdict (revised)
 
-**Implementation-ready for interaction + client + add-ons.** The blocking gap is
-closed, the client's file listing no longer names unspecced files, and every
-user story in `PROJECT_ARTIFACTS/user_stories/` covering this area cites a real
-directive or spec heading.
+**No blockers found for interaction + client, and add-ons are only partly
+assessed.** The tab-blur gap is closed, the client's file listing no longer names
+unspecced files, and every user story in `PROJECT_ARTIFACTS/user_stories/`
+covering this area cites a real directive or spec heading. The "Blocking
+Questions: 0" column is earned for the five files that were read; for the 27
+add-on specs and 12 READMEs that were not, it records only that each is
+referenced by name from a module spec. One known hole sits in that unread set:
+`CGEVENT_MACOS_SPEC.md`'s README and its own Status disagree about whether it
+exists.

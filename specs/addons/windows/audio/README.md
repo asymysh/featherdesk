@@ -22,8 +22,14 @@ streams video only. Audio is an opt-in add-on shared library. Audio is
 
 | Add-on ID | Effect |
 |-----------|--------|
-| `opus` | Opus codec (BSD libopus, in-process). FEC/PLC, ~96–128 kbps. **Recommended.** See [`OPUS_AUDIO_CODEC_SPEC.md`](../../OPUS_AUDIO_CODEC_SPEC.md). |
-| _(none)_ | Raw S16LE PCM passthrough (1.536 Mbps, no loss concealment). |
+| `opus` | Opus codec (BSD libopus, in-process). ~96–128 kbps VBR, in-band FEC always on. **Recommended.** See [`OPUS_AUDIO_CODEC_SPEC.md`](../../OPUS_AUDIO_CODEC_SPEC.md). |
+| _(none)_ | Raw S16LE PCM passthrough (1.536 Mbps at stereo, 4.6 at 5.1, 6.1 at 7.1). |
+
+Which loss concealment a listener actually gets depends on the client path, not
+on this table: full Opus FEC + PLC on the wasm-libopus and native paths,
+worklet-side concealment in the WebCodecs `AudioDecoder` path, which exposes
+neither. See [`../../../media/MODULE_AUDIO.md`](../../../media/MODULE_AUDIO.md)
+"Loss concealment, by path".
 
 Build each add-on (capture, encoder, `wasapi`, `opus`) separately as a cdylib
 and drop the resulting `.dll` files into the add-ons directory, e.g.:

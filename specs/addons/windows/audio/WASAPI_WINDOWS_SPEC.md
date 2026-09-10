@@ -53,13 +53,31 @@ loop {
 ### Normalization to the canonical format
 
 The mix format is whatever the endpoint runs (commonly 32-bit float at 48 kHz
-stereo, but it can be 44.1 kHz, 24-bit, 5.1/7.1, etc.). The add-on converts to
-the **canonical 48 kHz / S16LE**, **following the host layout** (stereo / 5.1 /
-7.1, capped at 7.1):
+stereo, but it can be 44.1 kHz, 24-bit, 5.1/7.1, etc.). The add-on converts to the
+canonical format MODULE_AUDIO defines — **48 kHz, S16LE, interleaved, Vorbis
+channel order** — with the channel count **following the host output layout** up
+to 7.1:
 - float32 → S16LE (clamp + scale),
-- reorder the endpoint's channel mask into the canonical Vorbis order
-  (`config.audioLayout`); downmix to stereo only if `[audio] channels = "stereo"`,
-- resample if the device rate ≠ 48 kHz (linear/`soxr` — only when needed).
+- reorder the endpoint's `WAVEFORMATEXTENSIBLE` channel mask (`L R C LFE …`) into
+  the **Vorbis** order (`L C R Ls Rs LFE`) MODULE_AUDIO defines — the two differ
+  by a C/R transposition and by LFE moving from fourth to last. Downmix to stereo
+  only if `[audio] channels = "stereo"`,
+- resample if the device rate ≠ 48 kHz (`rubato`, sinc interpolation, MIT —
+  declared as a dependency of this add-on; bypassed entirely when the device
+  already runs at 48 kHz).
+
+The channel count is **not** fixed at 2: `format()` reports what the endpoint's
+layout actually is, and `config.audioLayout` tells the client which layout to
+expect.
+
+### Capture ring
+
+The capture thread writes into a ring the add-on owns, and `next_chunk()` pops
+it. The ring holds **4 chunks** (≈80 ms at the default 20 ms `frame_ms`) and is
+**drop-oldest**: if the host's audio pump stalls, the oldest chunk is discarded
+rather than letting the device callback block or the buffer grow. The add-on
+counts the drops and the host surfaces them as
+`featherdesk_audio_drops_total`.
 
 ### The silence gotcha (load-bearing)
 
@@ -82,6 +100,7 @@ but the read-loop stamp is sufficient for the ~40 ms sync window.
 | Component | License |
 |-----------|---------|
 | WASAPI / Core Audio (`mmdeviceapi`, `audioclient`) | Windows system API — no third-party license |
+| `rubato` (sample-rate conversion, sinc interpolation) | MIT — pure Rust, no C dependency |
 | Our Rust FFI / COM binding | MIT |
 
 No driver, no redistributable.
@@ -105,25 +124,51 @@ cargo build --release -p featherdesk-addon-wasapi   # cdylib  featherdesk-addon-
 ```rust
 // crate: featherdesk-addon-wasapi (the add-on's cdylib)
 
-/// `probe` returns true if a default render endpoint exists and IAudioClient
-/// activates with the loopback flag (side-effect-free; releases what it opens).
+// Layer 1 — what the host actually calls (MODULE_ABI "Root module surface"):
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
 fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-/// Open the loopback client at [audio] frame_ms and start the capture thread.
-/// Honors [addon_module_wasapi] device (default = default endpoint).
-fn new(&self, cfg: audio::AudioConfig) -> Result<Box<dyn audio::AudioCapturer>, audio::AudioError>;
+/// `descriptor().kind` is `AudioCapture` (0x04). Opens the loopback client at
+/// [audio] frame_ms and starts the capture thread. Honors
+/// [addon_module_wasapi] device (default = default endpoint). Called on the
+/// audio thread; `new_codec` returns `PipelineError::AddonBackend` here.
+fn new_capturer(&self, cfg: audio::AudioConfig)
+    -> Result<Box<dyn audio::AudioCapturer>, PipelineError>;
 ```
+
+`probe` checks that a default render endpoint exists and that `IAudioClient`
+activates with the loopback flag; it is side-effect-free and releases what it
+opens. It reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(), codecs: RVec::new(),
+    caps: AddonCaps(0),          // AudioCapturer has no optional methods
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** No render endpoint is
+`ROk(ProbeReport { available: false, reason: "no default render endpoint" })`,
+never an `RErr`. **Set every capability bit this add-on actually serves** —
+`AddonCaps(0)` is correct and complete here, because `AudioCapturer` has no
+optional methods. **Only claim what this call can prove:** a bit claimed here and
+refused later is a capability lie (MODULE_ABI "Misbehaving add-ons").
 
 ---
 
 ## Error Handling
 
-| Failure | Behavior |
-|---------|----------|
-| No render endpoint (headless / no audio device) | `probe` false → add-on not selected; log "no audio output device" |
-| Default device changes mid-session (`IMMNotificationClient`) | Re-open on the new default endpoint; emit silence across the gap |
-| `GetBuffer` glitch / `AUDCLNT_S_BUFFER_EMPTY` | Treat as silence for that interval; continue |
-| `AUDCLNT_E_DEVICE_INVALIDATED` (device unplugged) | Reconnect to the new default; bounded retry/backoff |
+| Failure | Returned as | Behavior |
+|---------|-------------|----------|
+| No render endpoint (headless / no audio device) | `ProbeReport { available: false, reason }` | Add-on not selected; the host streams video only. Log "no audio output device" |
+| Default device changes mid-session (`IMMNotificationClient`) | — | Re-open on the new default endpoint and **synthesize silence across the gap**, so the capture-stamped timeline stays continuous and the master clock never stalls. If the new endpoint's layout differs (a 5.1 receiver replacing stereo headphones), that is a format change: the add-on re-resolves the layout and re-derives the Vorbis permutation, `format()` reports the new channel count, and the pipeline pushes a fresh `config` with the new `audioChannels`/`audioLayout`/`audioDescription` |
+| `GetBuffer` glitch / `AUDCLNT_S_BUFFER_EMPTY` | — | Treat as silence for that interval; continue |
+| `AUDCLNT_E_DEVICE_INVALIDATED` (device unplugged) | `audio::AudioError::DeviceLost` if reconnection fails | Reconnect to the new default with bounded retry/backoff, synthesizing silence across the gap; the same layout-change rule applies |
+| Reconnection exhausts its retry budget | `audio::AudioError::Unrecoverable(detail)` | The pipeline drops the audio path for the session and pushes a fresh `config` with `audio: false`; video is untouched |
+| COM / `IAudioClient` call fails mid-session | `audio::AudioError::Backend(detail)` | Log and continue on the next event; `detail` crosses the ABI in `AbiError.detail` |
 
 ---
 
@@ -133,7 +178,7 @@ fn new(&self, cfg: audio::AudioConfig) -> Result<Box<dyn audio::AudioCapturer>, 
 addons/wasapi/
 ├── src/
 │   ├── lib.rs        // AudioCapturer impl (COM via the windows crate)
-│   └── resample.rs   // device mix-format → 48k/stereo/S16LE
+│   └── resample.rs   // device mix-format → 48 kHz / S16LE / Vorbis order (rubato)
 └── tests.rs
 ```
 

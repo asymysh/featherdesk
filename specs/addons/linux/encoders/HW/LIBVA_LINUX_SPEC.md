@@ -51,10 +51,12 @@ The same binary works on all of these — the driver handles vendor differences.
 
 **Runtime capability check (mandatory at startup):**
 ```rust
-// Never hardcode what the GPU supports. Always query.
-let caps = probe_vaapi(render_node)?;
-// caps.h264_encode, caps.hevc_encode, caps.av1_encode
-// If a profile is absent, fall back to software gracefully.
+// Never hardcode what the GPU supports. Always query, and report what the driver
+// says in ProbeReport.codecs — the host selects on that, not on this table.
+let report = self.probe()?;          // ProbeReport { available, codecs, caps, .. }
+// report.codecs holds H264 / Hevc / Av1 exactly as this render node reports them.
+// A profile the driver does not offer is simply absent; the pipeline then falls
+// through the encoder probe order and, in the end, to the software path.
 ```
 
 ---
@@ -124,21 +126,57 @@ Understanding this prevents wasted time on false-start implementations.
 ### Phase 1 — Capability Probe (standalone, no encoding)
 **Goal:** detect VA-API hardware at startup, no ffmpeg involved.
 
-```rust
-// addons/encode/libva/probe.rs
-pub struct VaapiCapabilities {
-    pub available:     bool,
-    pub render_node:   String,  // e.g. /dev/dri/renderD128
-    pub vendor_string: String,  // "Intel", "AMD/ATI", etc.
-    pub h264_encode:   bool,
-    pub hevc_encode:   bool,
-    pub av1_encode:    bool,
-    pub max_width:     u32,
-    pub max_height:    u32,
-}
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Root module surface"):
 
-pub fn probe_vaapi(render_node: &str) -> Result<VaapiCapabilities, EncodeError>;
+```rust
+// crate: featherdesk-addon-libva   (cfg(target_os = "linux"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 ```
+
+```rust
+// addons/encode/libva/probe.rs — the internal helper that does the work and
+// builds the ProbeReport the root module returns.
+fn probe(&self) -> RResult<ProbeReport, AbiError> {
+    // Render node from [addon_module_libva] render_node, else /dev/dri/renderD128.
+    // No VA-API display, or no encode entrypoint on it → ROk(ProbeReport {
+    //   available: false,
+    //   reason: "no VA-API encode entrypoint on <render_node> (vendor: <vendor>)".into(),
+    //   codecs: RVec::new(), caps: AddonCaps(0), displays: RVec::new() })
+    // Otherwise → ROk(ProbeReport {
+    //   available: true, reason: RString::new(),
+    //   codecs: <the profiles the driver actually reports: H264 always,
+    //            Hevc where VAProfileHEVCMain has an encode entrypoint,
+    //            Av1 where VAProfileAV1Profile0 does>,
+    //   caps: AddonCaps(AddonCaps::ENC_CONFIGURABLE), // vaCreateBuffer of a fresh
+    //                                                 //   rate-control param
+    //                                                 //   retunes without a rebuild
+    //   displays: RVec::new() })
+}
+```
+
+**Availability is not an error.** A missing render node, a driver without an
+encode entrypoint, or a denied `open()` is
+`ROk(ProbeReport { available: false, reason })`, never an `RErr`. `RErr` is
+reserved for the probe itself failing.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` means
+no hot parameter change — silently, with no error and no warning.
+
+**Only claim what this call can prove.** `codecs` is what the *driver* reports on
+*this* render node, not what VA-API defines; a bit or a codec claimed here and
+refused later is a capability lie (MODULE_ABI "Misbehaving add-ons"), and the
+constructed object's `caps()` is authoritative.
+
+The vendor string, render node and per-codec maximum dimensions the helper reads
+are logged at startup and carried in `reason` when unavailable; they are
+diagnostics, not a return type — there is no `VaapiCapabilities` struct, because
+`ProbeReport` is the only shape that crosses the ABI.
 
 VA-API calls needed:
 1. `open(renderNode, O_RDWR)` → fd
@@ -148,7 +186,7 @@ VA-API calls needed:
 5. `vaQueryConfigEntrypoints(display, VAProfileHEVCMain, ...)` → check HEVC
 6. `vaTerminate(display)` → cleanup
 
-This is ~80 lines of FFI. **Deliverable:** the `test_probe_vaapi` integration test passes on a machine with VA-API GPU.
+This is ~80 lines of FFI. **Deliverable:** the `test_probe_vaapi` integration test passes on a machine with a VA-API GPU.
 
 ---
 
@@ -320,7 +358,7 @@ VAStatus va_import_dmabuf(VADisplay dpy, int dmabufFD,
 
 ```
 addons/encode/libva/
-├── probe.rs          // Phase 1: VaapiCapabilities, probe_vaapi()
+├── probe.rs          // Phase 1: the root module's probe() -> ProbeReport
 ├── encoder.rs        // Phases 2+4: VaapiEncoder struct, VaapiEncoder::new(), encode(), Drop
 ├── surface.rs         // Phase 5: encode_surface() zero-copy path
 ├── ratecontrol.rs    // Phase 6: QP / CBR rate control
@@ -338,7 +376,7 @@ addons/encode/libva/
 
 | Test | What | Requires |
 |------|------|---------|
-| `test_probe_vaapi` | probe_vaapi() returns Ok, h264_encode=true | VA-API GPU |
+| `test_probe_vaapi` | `probe()` returns `ROk(ProbeReport { available: true })` with `CodecId::H264` in `codecs` and `ENC_CONFIGURABLE` in `caps` | VA-API GPU |
 | `test_encoder_init` | VaapiEncoder::new() doesn't error | VA-API GPU |
 | `test_encode_synthetic` | 300 frames encoded, NALs parseable by ffprobe | VA-API GPU |
 | `test_surface_encode` | DMA-BUF from real KMS → NALs (zero-copy verified) | Root + GPU |
@@ -357,7 +395,7 @@ All tests behind `cfg(feature = "integration")` — a normal `cargo test` skips 
 | Encode latency 1080p p50 | <3ms | <4ms | GPU-side only |
 | Encode latency 1440p p50 | <5ms | <6ms | |
 | CPU usage at 60fps 1080p | <2% | <3% | GPU does the work |
-| DMA-BUF import overhead | <0.5ms | <0.5ms | vs glReadPixels: 50ms |
+| DMA-BUF import overhead | <0.5ms | <0.5ms | vs synchronous `glReadPixels`: 50ms — the `kms_egl` readback path is PBO double-buffered and costs ~11ms (see `KMS_EGL_LINUX_SPEC.md` "CPU readback") |
 | Memory bandwidth (sw path) | ~36MB/frame | ~36MB/frame | eliminated by DMA-BUF |
 | Memory bandwidth (hw path) | ~30KB/frame | ~30KB/frame | compressed output only |
 
@@ -398,13 +436,16 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
+The keys, their defaults and their domains are in MODULE_CONFIG "Schema", under
+`[addon_module_libva]`; this spec does not restate them.
+
 
 
 ---
 
 ## Stream Params Translation
 
-This add-on implements `stream::ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). VA-API supports limited hot reconfiguration -- rate control parameters can change between frames, but resolution and profile changes require full context teardown.
+This add-on implements `hwencode::ConfigurableHardwareEncoder` and sets `AddonCaps::ENC_CONFIGURABLE` at probe (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). VA-API supports limited hot reconfiguration -- rate control parameters can change between frames, but resolution and profile changes require full context teardown.
 
 | Param change | VA-API mechanism | Hot? |
 |--------------|-----------------|------|

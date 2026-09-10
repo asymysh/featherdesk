@@ -43,7 +43,21 @@ be redistributed without restriction.
 | RDNA 3 (RX 7000) | ✅ | ✅ | ✅ | 1.4+ |
 | RDNA 4 (RX 9000) | ✅ | ✅ | ✅ | 1.4+ |
 
-Probe via `AMFCreateContext` + `InitDX11` + enumerate available codec components.
+`probe()` calls `AMFCreateContext` + `InitDX11` and enumerates the available codec
+components, reporting them as `ProbeReport.codecs` — H.264 on every GCN+ part,
+HEVC on Polaris+, AV1 on RDNA3+ — with `caps` setting
+`AddonCaps::ENC_CONFIGURABLE`, because `SetProperty` on the running VCE component
+changes bitrate, QP, frame rate and IDR period without a rebuild. Availability is
+not an error: no AMD adapter, or an `amfrt64.dll` too old, is
+`ROk(ProbeReport { available: false, reason })`, never an `RErr`. Set every bit
+the add-on actually serves, and claim only what the probe can prove — a bit
+claimed here and refused later is a capability lie (MODULE_ABI "Misbehaving
+add-ons").
+
+The add-on emits **H.264 High** for every SDR session and HEVC Main10 only for an
+HDR one; enumerating HEVC or AV1 support says what the silicon can do, not what
+the session will use (see [`../README.md`](../README.md) "Codec fallback order at
+runtime").
 
 ---
 
@@ -99,8 +113,13 @@ unsafe { ((*(*factory).vtbl).CreateComponent)(factory, ctx, AMFVideoEncoderVCE_A
 unsafe {
     let e = &*(*encoder).vtbl;
     (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_USAGE, AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY);
-    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_PROFILE, AMF_VIDEO_ENCODER_PROFILE_BASELINE);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_PROFILE, AMF_VIDEO_ENCODER_PROFILE_HIGH);
     (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR);
+    // Colour: BT.709 limited range for SDR (BT.2020 PQ for HDR). Mandatory —
+    // see MODULE_ENCODE "Colour signalling".
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_OUTPUT_COLOR_PROFILE, AMF_VIDEO_CONVERTER_COLOR_PROFILE_709);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_OUTPUT_TRANSFER_CHARACTERISTIC, AMF_COLOR_TRANSFER_CHARACTERISTIC_BT709);
+    (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_OUTPUT_COLOR_PRIMARIES, AMF_COLOR_PRIMARIES_BT709);
     (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_TARGET_BITRATE, bitrate);
     (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_B_PIC_PATTERN, 0);
     (e.SetProperty)(encoder, AMF_VIDEO_ENCODER_IDR_PERIOD, 0);
@@ -142,7 +161,9 @@ DXGI Desktop Duplication → ID3D11Texture2D → AMFSurface → encoder.
 
 **Interesting finding:** HEVC is faster than H.264 on the RX 6800 XT. AMD's
 VCN3 encoder is HEVC-optimized — the H.264 path goes through a less-optimized
-code path.
+code path. It is not a reason to select HEVC: both figures are comfortably inside
+the encode budget, and the codec policy is H.264 unless the session is HDR,
+because Firefox's WebCodecs cannot decode HEVC at all.
 
 ### Estimated (no measured hardware — earlier rough projections)
 
@@ -204,13 +225,16 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
+The keys, their defaults and their domains are in MODULE_CONFIG "Schema", under
+`[addon_module_amf]`; this spec does not restate them.
+
 
 
 ---
 
 ## Stream Params Translation
 
-This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
+This add-on implements the `hwencode::ConfigurableHardwareEncoder` trait (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
 
 | Param change | AMF API | Hot? |
 |--------------|---------|------|
@@ -219,5 +243,6 @@ This add-on implements the `stream::ConfigurableHardwareEncoder` trait (see [`..
 | `QP` | `SetProperty(AMF_VIDEO_ENCODER_QP_I/QP_P, qp)` | yes |
 | `KeyframeInterval` | `SetProperty(AMF_VIDEO_ENCODER_IDR_PERIOD, ki)` | yes |
 | `Width`, `Height` | `Terminate` + `ReInit` (returns `stream::StreamError::RequiresRestart`) | no |
-| `BitDepth=10` / `HDR=true` | HEVC Main10 -- `AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires session-start negotiation (returns `stream::StreamError::RequiresRestart`) | no |
+| `BitDepth=10` / `HDR=true` | HEVC Main10 -- `AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10`; requires session-start negotiation (returns `stream::StreamError::RequiresRestart`). Only an HDR session reaches it; every SDR session stays on H.264 High | no |
+| Colour signalling | `AMF_VIDEO_ENCODER_OUTPUT_COLOR_PROFILE` + `_OUTPUT_TRANSFER_CHARACTERISTIC` + `_OUTPUT_COLOR_PRIMARIES` (and the `_HEVC_` equivalents): BT.709 / BT.709 / BT.709 limited range for SDR, BT.2020 / SMPTE ST 2084 / BT.2020 for HDR, `video_full_range_flag = 0` in both. Written into the SPS VUI of every keyframe access unit (MODULE_ENCODE "Colour signalling"). Not a knob | set at `Init`; changes with the HDR rebuild |
 | `NetworkRTTMs`, `PacketLossPct` | Feeds `HQVBR_QVBR` quality boost | yes |

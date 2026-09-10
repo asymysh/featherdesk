@@ -3,29 +3,43 @@
 ## Purpose
 
 Software H.264 / HEVC encoder via Apple's VideoToolbox, called from Rust through FFI
-on macOS. This is the **macOS-native software fallback** — used when no GPU is
-available, no hardware MFT is registered, or hardware encoding is explicitly disabled.
+on macOS. This is the **macOS-native software encoder** — used when no hardware
+encoder is available or hardware encoding is explicitly disabled.
+
+It is **second in the macOS software auto order**, after `openh264`
+(MODULE_ENCODE "Software encoder order"). `openh264` is the cross-platform
+software default on every OS; `vt_sw` precedes the opt-in `x264` on macOS because
+it is Apple's own encoder, tuned for the silicon it runs on and needing no
+third-party library.
 
 VideoToolbox abstracts both software and hardware paths behind the same
 `VTCompressionSession` API. Configure with
 `kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: false` and you
 get Apple's tuned software encoder. Same Rust FFI binding as the HW spec, different config.
 
+This add-on reports **`VideoProfile::H264High`** —
+`kVTProfileLevel_H264_High_AutoLevel`, CABAC permitted — and `codec()` derives the
+string from it, with the level computed from the active geometry per
+[`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Codec-string
+computation". The level VideoToolbox picks for itself is not what goes on the
+wire; ours is.
+
 ---
 
-## Why use this over OpenH264 on macOS
+## Why this add-on exists alongside OpenH264
 
-OpenH264 works on macOS too (we verified during benchmark sessions), but
-VideoToolbox SW is preferable when targeting Apple Silicon:
+`openh264` is the software default everywhere, including here. `vt_sw` is worth
+loading beside it because on Apple Silicon it is meaningfully faster, and because
+it emits High profile where OpenH264 is Constrained-Baseline-only:
 
-| Encoder | 1080p p50 (Apple Silicon estimated) | Notes |
-|---------|------------------------------------|-------|
-| **VideoToolbox SW H.264** | **~5–8ms** | Apple-tuned, optimized for ARM Neon and Apple Performance counters |
-| OpenH264 | ~10ms | Cisco's NEON build, slightly slower on Apple Silicon |
+| Encoder | 1080p p50 (Apple Silicon estimated) | Profile | Notes |
+|---------|------------------------------------|---------|-------|
+| **VideoToolbox SW H.264** | **~5–8ms** | High | Apple-tuned, optimized for ARM Neon and Apple Performance counters |
+| OpenH264 | ~10ms | Constrained Baseline | Cisco's NEON build, slightly slower on Apple Silicon |
 
-On Intel Macs the two are roughly equivalent (~5ms each). On Apple Silicon, VT SW
-wins meaningfully. Since VideoToolbox is built into the OS, no SDK installation
-is required.
+On Intel Macs the two are roughly equivalent (~5ms each). Neither has been
+measured on Apple hardware — both figures are estimates. Since VideoToolbox is
+built into the OS, no SDK installation is required.
 
 ---
 
@@ -117,14 +131,47 @@ VTCompressionSessionCreate(
 
 VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime,                  kCFBooleanTrue);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering,      kCFBooleanFalse);
-VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,              kVTProfileLevel_H264_Baseline_3_1);
+VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,              kVTProfileLevel_H264_High_AutoLevel);
+// Colour is mandatory, not a tuning choice — see MODULE_ENCODE "Colour signalling"
+VTSessionSetProperty(session, kVTCompressionPropertyKey_ColorPrimaries,            kCVImageBufferColorPrimaries_ITU_R_709_2);
+VTSessionSetProperty(session, kVTCompressionPropertyKey_TransferFunction,          kCVImageBufferTransferFunction_ITU_R_709_2);
+VTSessionSetProperty(session, kVTCompressionPropertyKey_YCbCrMatrix,               kCVImageBufferYCbCrMatrix_ITU_R_709_2);
 VTCompressionSessionPrepareToEncodeFrames(session);
 
 // Per frame
 VTCompressionSessionEncodeFrame(session, pixelBuffer, pts, dur, NULL, NULL, NULL);
 ```
 
-For HEVC: same code with `kCMVideoCodecType_HEVC` and `kVTProfileLevel_HEVC_Main_AutoLevel`.
+For HEVC: same code with `kCMVideoCodecType_HEVC` and
+`kVTProfileLevel_HEVC_Main10_AutoLevel`, and the BT.2020/PQ colour triple
+(`kCVImageBufferColorPrimaries_ITU_R_2020`,
+`kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ`,
+`kCVImageBufferYCbCrMatrix_ITU_R_2020`).
+
+### Capabilities declared at probe
+
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Root module
+surface"):
+
+```rust
+// crate: featherdesk-addon-vt_sw   (cfg(target_os = "macos"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
+```
+
+`probe()` calls `VTCopyVideoEncoderList` and reports
+`ROk(ProbeReport { available: true, codecs: [CodecId::H264],
+caps: AddonCaps(AddonCaps::ENC_CONFIGURABLE), .. })` — bitrate, QP, frame rate
+and keyframe interval are all `VTSessionSetProperty` calls on the running
+session. Availability is not an error: a VideoToolbox that lists no software
+H.264 encoder is `ROk(ProbeReport { available: false, reason })`, never an
+`RErr`. Every bit the add-on actually serves must be set, and a bit claimed here
+and refused later is a capability lie (MODULE_ABI "Misbehaving add-ons").
 
 ---
 
@@ -136,8 +183,12 @@ For HEVC: same code with `kCMVideoCodecType_HEVC` and `kVTProfileLevel_HEVC_Main
 | Apple Silicon M2+ SW H.264 | ~4ms | ~6ms | ~15% |
 | Intel Mac (any modern) SW H.264 | ~8ms | ~14ms | ~25% |
 
-HEVC SW is meaningfully slower (~2× H.264 SW). Avoid HEVC SW for real-time streaming
-— if HEVC is requested and no HW path is available, fall back to H.264 SW instead.
+HEVC SW is meaningfully slower (~2× H.264 SW), which is why the HDR selection
+cascade routes an HDR session to `vt_hw` rather than here (see
+[`specs/core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)
+"HDR Pipeline"), and why `degrade_to_software` clears `hdr`/`bit_depth`/
+`color_space` before it builds a software path. Apple's licensing covers
+VideoToolbox HEVC either way — what is refused on macOS is libx265, not this.
 
 ---
 
@@ -174,8 +225,10 @@ Skip when:
 
 ## Status
 
-📋 Specced — not yet implemented. The current featherdesk codebase uses OpenH264
-on all platforms. This add-on will be the macOS-preferred SW encoder once built.
+📋 Specced — not yet implemented, and not measured on any Apple hardware. The
+current featherdesk codebase uses OpenH264 on all platforms, which remains the
+software default; this add-on becomes the second rung of the macOS software order
+once built.
 
 ---
 
@@ -184,10 +237,20 @@ on all platforms. This add-on will be the macOS-preferred SW encoder once built.
 This add-on reads its tuning knobs from the `[addon_module_vt_sw]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
+```toml
+[addon_module_vt_sw]
+realtime               = true            # kVTCompressionPropertyKey_RealTime
+profile                = "h264_high"     # the ceiling; the session profile is
+                                         # reported through VideoProfile
+allow_frame_reordering = false           # false = lower latency (no B-frames)
+```
+
+The parser treats `vt_sw` and `vt_hw` as schema-aliases — the two sections
+declare the same keys.
+
 If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
-
 
 
 ---
@@ -203,4 +266,11 @@ This add-on implements the `ConfigurableEncoder` trait (note: SW encoder trait, 
 | `qp` | `kVTCompressionPropertyKey_Quality` | yes |
 | `keyframe_interval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` | yes |
 | `width`, `height` | session recreation (returns `StreamError::RequiresRestart`) | no |
-| `bit_depth=10` / `hdr=true` | VT SW supports HEVC on macOS 12+ (set `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = false` + `kCMVideoCodecType_HEVC`). Requires session recreation with HEVC Main10 profile (returns `StreamError::RequiresRestart`). | no |
+| Colour | `kVTCompressionPropertyKey_ColorPrimaries` / `_TransferFunction` / `_YCbCrMatrix` — `ITU_R_709_2` for SDR, `ITU_R_2020` + `SMPTE_ST_2084_PQ` + `ITU_R_2020` for HDR, always limited range, so the SPS VUI matches what the pipeline advertises (see MODULE_ENCODE "Colour signalling"). Not a knob | set at session creation |
+| `bit_depth=10` / `hdr=true` | VT SW supports HEVC on macOS 12+ (set `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = false` + `kCMVideoCodecType_HEVC`). Requires session recreation with the HEVC Main10 profile (returns `StreamError::RequiresRestart`). In practice the HDR cascade routes HDR to `vt_hw` and `degrade_to_software` clears HDR before building a software path, so this branch is a capability, not a routine one | no |
+
+`codec()` returns `hvc1.2.4.L<level>.B0` while the session is HEVC Main10 and
+`avc1.6400<level>` otherwise; the pipeline reads it every frame, so the switch is
+visible on the wire as `frame_type::VIDEO_HEVC`. That is what keeps a `vt_sw`
+session configured for HEVC from being labelled `VIDEO_H264` — the SW path never
+assumes H.264.

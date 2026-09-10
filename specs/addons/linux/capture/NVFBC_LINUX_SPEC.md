@@ -122,7 +122,7 @@ pNvFBCAPI->nvFBCCreateHandle(&session, &createParams);
 NvFBC_CreateCaptureSessionParams sessionParams = { NVFBC_CREATE_CAPTURE_SESSION_VER };
 sessionParams.eCaptureType    = NVFBC_CAPTURE_SHARED_CUDA;
 sessionParams.eTrackingType   = NVFBC_TRACKING_DEFAULT;
-sessionParams.bWithCursor     = NVFBC_FALSE;   // cursor sent via CursorUpdate protocol
+sessionParams.bWithCursor     = cfg.embed_cursor ? NVFBC_TRUE : NVFBC_FALSE;  // see "Cursor Handling"
 sessionParams.dwSamplingRateMs = 0;             // capture on demand, not periodic
 sessionParams.bDisableAutoModesetRecovery = NVFBC_FALSE;
 pNvFBCAPI->nvFBCCreateCaptureSession(session, &sessionParams);
@@ -194,20 +194,124 @@ NvFBC supports multiple output buffer types:
 We default to `NVFBC_CAPTURE_SHARED_CUDA` because it's the cleanest interop with the
 NVENC add-on encoder.
 
+NvFBC also reports the display's rotation; the add-on maps it to
+`capture::Rotation::{R0,R90,R180,R270}` and puts it on every `Frame` and `FbInfo`.
+It reports the rotation and never rotates the buffer itself — the pipeline derives
+the upright stream geometry (MODULE_CAPTURE "Display rotation").
+
+---
+
+## Cursor Handling
+
+NvFBC has no separate pointer readout, and it is an X11-only API — under Wayland
+the probe reports `available = false`, so the Wayland question never reaches this
+add-on. The cursor therefore comes from X11 itself, or from NvFBC's own compositor.
+
+**Capabilities declared at probe.** `AddonCaps::CURSOR` when the X11 `XFIXES`
+extension is present (`XFixesQueryExtension`), plus `AddonCaps::EMBED_CURSOR |
+AddonCaps::EMBED_CURSOR_SURF` unconditionally — the driver can composite on every
+capture type.
+
+**`capture::CursorCapturer` (`embed_cursor = false`).** `sessionParams.bWithCursor
+= NVFBC_FALSE`, and:
+
+```rust
+fn next_cursor(&mut self) -> Result<Option<capture::CursorState>, StreamError>;
+```
+
+- One call gives everything: `XFixesGetCursorImage` returns position (`x`/`y`, the
+  hotspot), hotspot (`xhot`/`yhot`), size (`width`/`height`) and pixels.
+- The pixel buffer is `unsigned long*`, **not** `uint32_t*` — on a 64-bit host each
+  element is 8 bytes with the ARGB value in the low 32 bits. Reading it as a
+  `u32` slice yields a cursor that is half transparent and twice as wide. Take the
+  low 32 bits per element, then apply the ARGB-premultiplied → straight-RGBA
+  conversion from MODULE_CAPTURE "Cursor pixel format".
+- Change detection: `XFixesGetCursorImage`'s `cursor_serial` identifies the shape.
+  A serial equal to the previous poll's returns `shape: None`; only position and
+  visibility are reported.
+- The bitmap is returned at the OS's native size; the 128-pixel wire cap is
+  applied by the host's cursor publisher. X11 hands back whatever size the
+  accessibility pointer settings produce, and this add-on does not resample it.
+
+**First call.** MODULE_CAPTURE's `next_cursor` contract requires the first call
+after construction to return `Ok(Some(..))` carrying the current position, the
+current visibility **and** the current bitmap (`shape: Some(..)`), even though
+nothing has changed — the host has no other way to seed a joining client. The
+`cursor_serial` change detection above applies from the second call on.
+
+**`embed_cursor = true`.** `sessionParams.bWithCursor = NVFBC_TRUE` at session
+creation — the driver composites into every grabbed frame, including
+`NVFBC_CAPTURE_SHARED_CUDA`, so both embed capabilities hold and the zero-copy
+pairing is unaffected. This is the only cursor setting the add-on has; there is no
+`[addon_module_nvfbc]` cursor key.
+
+**Failure behavior.** No XFIXES extension → `CURSOR` is simply not declared, and
+the session resolves `"embedded"` at selection rather than failing. A failed
+`XFixesGetCursorImage` mid-session returns `Err(StreamError::Backend(..))` from
+`next_cursor` only; the frame path is untouched.
+
 ---
 
 ## Probe & Selection
 
-```rust
-// crate: featherdesk-addon-nvfbc  (cfg(target_os = "linux"))
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md) "Root module surface"):
 
-fn probe_nvfbc() -> Result<NvFbcCapabilities, String> {
+```rust
+// crate: featherdesk-addon-nvfbc   (cfg(target_os = "linux"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
+```
+
+```rust
+/// The root module's `probe`. A missing prerequisite is NOT an error — it is
+/// `ROk(ProbeReport { available: false, reason, .. })`. `RErr` means the probe
+/// itself broke.
+fn probe(&self) -> RResult<ProbeReport, AbiError> {
     // 1. dlopen libnvidia-fbc.so (check NVIDIA proprietary driver presence)
-    // 2. NvFBC_GetStatus → check bIsCapturePossible
-    // 3. If false on consumer card, return Err("NvFBC restricted") (suggest patcher)
-    // 4. Enumerate display outputs, return resolution/refresh per output
+    // 2. Confirm an X11 display is reachable — NvFBC is X11-only, so under
+    //      Wayland this is ROk(ProbeReport { available: false,
+    //        reason: "NvFBC requires X11; this session is Wayland".into(), .. })
+    // 3. NvFBC_GetStatus → check bIsCapturePossible; false on a consumer card is
+    //      ROk(ProbeReport { available: false,
+    //        reason: "NvFBC is restricted on GeForce; apply the NvFBCUnlock
+    //                 patcher, or use a Quadro/Tesla card".into(), .. })
+    // 4. Enumerate display outputs into a DisplayInfo per output:
+    //      id           = the NvFBC output id (the value [addon_module_nvfbc]
+    //                     output_index selects)
+    //      width/height = the output's size in PIXELS, as delivered (NOT upright)
+    //      rotation     = NvFBC's tracking of the output rotation, mapped to
+    //                     abi::Rotation; the host transposes for R90/R270
+    //      refresh_mhz  = the output's refresh in milliHertz
+    //      scale_num/den = 1/1 — NvFBC reports physical pixels
+    // 5. XFixesQueryExtension decides the CURSOR bit (see "Cursor Handling")
+    // 6. Otherwise → ROk(ProbeReport {
+    //      available: true, reason: RString::new(), codecs: RVec::new(),
+    //      caps: AddonCaps(AddonCaps::SURFACE            // CUDA device pointer export
+    //                    | AddonCaps::CURSOR             // ONLY with XFIXES
+    //                    | AddonCaps::EMBED_CURSOR
+    //                    | AddonCaps::EMBED_CURSOR_SURF  // bWithCursor composites on every type
+    //                    | AddonCaps::CONFIGURABLE),     // the session is re-set-up in place
+    //      displays })
 }
 ```
+
+**Availability is not an error.** A missing driver, a denied permission or an
+absent device is `ROk(ProbeReport { available: false, reason })`. `RErr` is
+reserved for the probe itself failing.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` means
+no zero-copy path, no separate cursor and no hot parameter change — silently, with
+no error and no warning.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); a capability that only
+`construct()` can settle is reported by the constructed object's `caps()`, which
+is authoritative and may be a strict subset of this one.
 
 Pipeline probes capture in this order on Linux:
 ```
@@ -224,7 +328,8 @@ None?                                → fatal: no capture add-on configured
 addons/capture/nvfbc/
 ├── nvfbc.rs                 // Capturer struct, NvFbcCapturer::new
 ├── ffi.rs                   // Rust FFI bindings (built into the add-on cdylib)
-├── probe.rs                 // probe_nvfbc()
+├── probe.rs                 // the root module's probe() -> ProbeReport
+├── cursor.rs                // XFixesGetCursorImage: next_cursor
 ├── cuda_to_nvenc.rs         // Direct CUDA → NVENC handoff
 ├── sdk/                     // NVIDIA SDK headers (NvFBC.h etc.)
 └── tests.rs                 // Integration tests
@@ -264,13 +369,16 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
+The keys, their defaults and their domains are in MODULE_CONFIG "Schema", under
+`[addon_module_nvfbc]`; this spec does not restate them.
+
 
 
 ---
 
 ## Stream Params Translation
 
-This add-on implements `stream::ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). NvFBC captures at native resolution; the pipeline handles scaling.
+This add-on implements `capture::ConfigurableCapturer` and sets `AddonCaps::CONFIGURABLE` at probe: the capture session is re-set-up in place (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). NvFBC captures at native resolution; the pipeline handles scaling.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|

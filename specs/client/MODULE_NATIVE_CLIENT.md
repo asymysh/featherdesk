@@ -20,14 +20,14 @@
 | | **Browser client (v1)** | **Native client (v2)** |
 |---|---|---|
 | Install | none (open a URL) | per-OS app (signed/notarized) |
-| Transport | WebTransport (QUIC) | **`quinn` directly** (no HTTP/3/WebTransport layer) |
+| Transport | WebTransport (QUIC), with a degraded WebSocket fallback carrier | **`quinn` directly** (no HTTP/3/WebTransport layer, and no fallback carrier) |
 | Input latency | ~15 ms (DOM → WebTransport) | **sub-ms** (raw HID → QUIC datagram) |
 | Decode | WebCodecs → canvas | direct platform decoder → surface (~10 ms lower) |
 | Gamepad | casual (Gamepad API, dual-rumble) | **full HID** — gyro/accel, touchpad, adaptive triggers, LED, battery |
 | Chroma | 4:2:0 (4:4:4 best-effort) | **4:4:4 reliable** |
 | Audio | WebCodecs/AudioWorklet | direct CoreAudio/WASAPI/ALSA (lower latency) |
 | Multi-monitor | single (v1) | native multi-display (future) |
-| Connectivity | LAN / port-forward / Cloudflare Tunnel / Tailscale Funnel | **P2P/NAT traversal — under evaluation** (see below) |
+| Connectivity | LAN / port-forward / Tailscale Funnel (any path that carries QUIC end to end) | **P2P/NAT traversal — under evaluation** (see below) |
 | Protocol opacity | visible in DevTools | opaque compiled binary |
 
 The browser stays the **default, casual, frictionless** client. The native client
@@ -84,9 +84,18 @@ Direct surface attach (no canvas), raw-HID input, and direct audio output shave
 ~10 ms decode + ~15 ms input + ~80 ms audio vs the browser stack — the difference
 between "remote desktop" and "feels local."
 
+### True HDR presentation
+The browser decodes a 10-bit BT.2020 PQ stream at full precision and then **tone-maps**
+it into the canvas's sRGB or Display-P3 output — the shipped
+`CanvasRenderingContext2DSettings.colorSpace` enum has no HDR value, so there is no HDR
+display output path in a v1 browser (see [`MODULE_STREAM_PARAMS.md`](../core/MODULE_STREAM_PARAMS.md)
+"HDR" cascade step 7). The native client attaches a **direct HDR surface** and presents
+the PQ signal to an HDR display without the tone-map. The capture/encode/transport half
+of HDR is identical on both clients; only presentation differs.
+
 ### Platform extras (future)
-Direct HDR surfaces, native multi-monitor, codec flexibility beyond the WebCodecs
-set. Captured here as direction, not scoped for the first v2.
+Native multi-monitor and codec flexibility beyond the WebCodecs set. Captured here as
+direction, not scoped for the first v2.
 
 ---
 
@@ -94,8 +103,10 @@ set. Captured here as direction, not scoped for the first v2.
 
 The native client must reach the host across NATs. Options:
 
-1. **Same as the browser** — LAN / port-forward / Cloudflare Tunnel / Tailscale
-   Funnel. Zero new code; user provides reachability.
+1. **Same as the browser** — LAN / port-forward / Tailscale Funnel, or any tunnel
+   that carries QUIC end to end. Zero new code; user provides reachability. Note
+   the native client has **no** WebSocket fallback, so an HTTP-proxying tunnel
+   (Cloudflare Tunnel) does not work for it at all.
 2. **Embedded overlay (leading candidate, NOT locked): Tailscale `tsnet`.** The
    client embeds `tsnet`, joins the user's tailnet, and connects to the host as a
    tailnet node — WireGuard P2P hole-punching with DERP relay fallback, i.e.

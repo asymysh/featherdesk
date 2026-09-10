@@ -159,7 +159,12 @@ ping, it rides the unreliable datagram channel, NOT a reliable stream: a rumble
 for a button press that is already in the past is useless, so dropping it under
 loss is preferable to delaying fresher data. It fits in one datagram (fragment
 `0 | LAST`, 8-byte `DatagramHeader`); see [`MODULE_PROTOCOL.md`](../core/MODULE_PROTOCOL.md)
-"Channel Model".
+"Channel Model". On the **WebSocket fallback carrier** there is no datagram lane:
+the same 8-byte `DatagramHeader` + payload travels as a `0x20`-tagged reliable
+message, and the send queue **coalesces per gamepad index** so at most one unsent
+rumble per index is ever queued — the loss profile changes, the bytes do not
+(see [`MODULE_TRANSPORT.md`](../core/MODULE_TRANSPORT.md) "Send-side queue policy
+on the fallback carrier").
 
 **Type `15` FrameTypeGamepadRumble (9-byte payload)**
 
@@ -170,10 +175,29 @@ loss is preferable to delaying fresher data. It fits in one datagram (fragment
 5    4   u32    DurationMs       LE; clamped to [0, 5000]
 ```
 
-Servers may send Rumble frames only when the source game requests vibration via
-the OS API (ViGEmBus notification / FF_RUMBLE evdev event / GameController
-haptic). Frames for an index without an active connection are dropped by the
-client.
+**`Index` is the recipient's own local index, not the host's global slot.** The
+host thinks in global slots 0…`max_controllers-1`; the browser thinks in
+`navigator.getGamepads()` indices, and a co-op player driving global slot 3 has
+exactly one local pad at index 0. So the server applies the **inverse** of the
+co-op remap before it builds the datagram: it looks up which session owns global
+slot N, then rewrites `Index` to that session's local index for N — the same
+mapping its `inputReader` used in the client→server direction, read backwards.
+Sending the global slot instead would ask a one-pad client to rumble index 3,
+which its `applyRumble` drops.
+
+Servers send Rumble frames only when the source game requests vibration via the
+OS API (ViGEmBus notification / FF_RUMBLE evdev event / GameController haptic),
+and only through the three gates below. Each is a no-op, not a datagram the
+client ignores:
+
+| Condition | Behavior |
+|-----------|----------|
+| `[gamepad] allow_rumble = false` | no datagram is emitted at all |
+| The loaded gamepad add-on does not set `AddonCaps::RUMBLE` | no sink was installed, so nothing ever fires (logged once at startup, see "Dispatcher Integration") |
+| No session currently owns global slot N | no datagram is emitted; the request is dropped at `send_gamepad_rumble` |
+
+A frame that does reach a client for a local index without an active connection
+is dropped by the client.
 
 ---
 
@@ -187,8 +211,14 @@ client.
 /// `enigo` default does NOT cover gamepad). The dispatcher checks for it at
 /// runtime; gamepad records are dropped when no GamepadInjector is loaded.
 /// Cleanup is RAII (`Drop`) — no Close().
-pub trait GamepadInjector {
+///
+/// `: Send` because the Dispatcher that owns it is shared across N session tasks
+/// as an `Arc<Mutex<Box<dyn Dispatcher>>>` (MODULE_INPUT). An add-on holding a
+/// thread-affine handle (`PVIGEM_CLIENT`) states in its own spec which of
+/// MODULE_ABI "Thread requirements"' two options it takes.
+pub trait GamepadInjector: Send {
     /// connect creates a virtual controller for index. id is logging-only.
+    /// `id`'s boundary form is `RStr<'_>` — borrowed for the call only (MODULE_ABI).
     fn connect(&mut self, index: u8, id: &str) -> Result<(), InputError>;
 
     /// disconnect tears down the virtual controller for index. Idempotent
@@ -197,15 +227,41 @@ pub trait GamepadInjector {
 
     /// update applies a state snapshot. The injector handles diffing internally
     /// and only touches the OS device when fields actually changed.
+    /// `state`'s boundary form is `RGamepadState`, which mirrors `GamepadState`
+    /// field for field (MODULE_ABI).
     fn update(&mut self, state: GamepadState) -> Result<(), InputError>;
 
-    /// set_rumble_emitter registers a callback fired when the host game requests
-    /// vibration via the OS API. The dispatcher wires this to the server which
-    /// sends FrameTypeGamepadRumble to the client.
-    fn set_rumble_emitter(
-        &mut self,
-        f: Box<dyn Fn(u8 /*index*/, u16 /*weak*/, u16 /*strong*/, u32 /*duration_ms*/) + Send + Sync>,
-    );
+    /// caps reports which optional methods this injector serves. For an add-on
+    /// this is `ProbeReport.caps` masked to the constructed object's own
+    /// `caps()`; there is no in-core gamepad default, so every implementation is
+    /// an add-on.
+    fn caps(&self) -> abi::AddonCaps;
+
+    /// set_rumble_sink hands the injector the host object it calls when the host
+    /// game requests vibration through the OS API (ViGEmBus notification,
+    /// evdev FF_RUMBLE, GameController haptics). Returns
+    /// `Err(InputError::Unsupported)` unless `caps().has(AddonCaps::RUMBLE)`; the
+    /// host checks the bit and does not call it otherwise.
+    ///
+    /// This replaces a `Box<dyn Fn(..)>` emitter, which cannot cross the add-on
+    /// ABI: a host closure's vtable is host-layout and an add-on calling through
+    /// it is calling into a foreign layout (MODULE_ABI "Two layers").
+    fn set_rumble_sink(&mut self, sink: std::sync::Arc<dyn RumbleSink>) -> Result<(), InputError>;
+}
+
+/// RumbleSink is the host side of the rumble path. The Layer-2 adapter wraps this
+/// into the ABI's `RumbleSinkBox` before it crosses `dlopen`.
+pub trait RumbleSink: Send + Sync {
+    /// Called from whatever thread the add-on's OS notification arrives on.
+    /// MUST be non-blocking: the implementation is a `try_send` onto a bounded
+    /// `tokio::sync::mpsc` channel (capacity **64**). On a full channel the event
+    /// is DROPPED — rumble is best-effort, exactly like its datagram — and
+    /// `featherdesk_gamepad_rumble_dropped_total` is incremented.
+    ///
+    /// `index` is the **global slot** the host passed to `connect`; the server
+    /// rewrites it to the owning client's local index when it builds the datagram
+    /// (see "Server → Client").
+    fn emit(&self, index: u8, weak: u16, strong: u16, duration_ms: u32);
 }
 
 /// GamepadState is one decoded state snapshot.
@@ -237,11 +293,23 @@ gamepad routing slots into the existing `byte[1]` switch:
                          else: drop (with metric)
 ```
 
-The pipeline wires the gamepad rumble emitter to a new
-`server.send_gamepad_rumble(index, weak, strong, duration_ms)` method. The server
-routes the rumble datagram to the client that **owns gamepad slot `index`** —
-the controller for slot 0, or the player client for slots 1…N in co-op mode (see
-below). Single-controller mode is just the co-op case with one owner.
+The pipeline creates one `RumbleSink` implementation holding the sender half of a
+64-slot `tokio::sync::mpsc` channel, hands it to the gamepad injector at startup
+step 12 (only when `caps().has(AddonCaps::RUMBLE)` **and** `[gamepad] allow_rumble`),
+and drains the receiver in a task that calls
+`server.send_gamepad_rumble(index, weak, strong, duration_ms)`. `duration_ms` is
+clamped to `[0, 5000]` at the drain, before the datagram is built. When the
+loaded gamepad add-on does not set `AddonCaps::RUMBLE`, no sink is installed and
+the host logs once at `info`: `gamepad add-on '<id>' reports no rumble
+capability; [gamepad] allow_rumble has no effect`. That log line is the whole
+point of the bit — `gcvirtual` has no haptics path, and without it the operator
+sees `allow_rumble = true` produce nothing, with no diagnostic.
+
+The server routes the rumble datagram to the client that **owns gamepad slot
+`index`** — the controller for slot 0, or the player client for slots 1…N in
+co-op mode (see below) — rewriting `Index` to that client's local index on the
+way out. Single-controller mode is just the co-op case with one owner, where the
+global slot and the local index are both 0.
 
 ---
 
@@ -257,11 +325,22 @@ letting **multiple clients** own slots, via a **player-slot model** in the serve
   `view` (nothing). The `player` role is honored only when `[gamepad] allow_coop`.
 - **Slot ownership** is server-side. The controller reserves slot 0; each `player`
   client claims the next free slot on connect (≤ `max_controllers` total). The
-  server **remaps** a client's local gamepad index to its assigned global slot and
-  routes its `GamepadState`/`Connect`/`Disconnect` records to `gamepad.update(slot)`
-  etc. A player's keyboard/mouse/touch records are **ignored** (gamepad-only).
-- **Rumble** for slot N goes back to whichever client owns slot N.
-- **Disconnect** frees the slot and `disconnect`s the virtual pad.
+  server holds one **bidirectional** map per session, `local index ↔ global slot`,
+  and uses it in both directions: C→H it remaps a client's local gamepad index to
+  its assigned global slot before routing `GamepadState`/`Connect`/`Disconnect` to
+  `gamepad.update(slot)` etc.; H→C it inverts the same map so a rumble for global
+  slot N leaves as that owner's local index. A single map read two ways is what
+  makes the two directions incapable of disagreeing. A player's keyboard/mouse/
+  touch records are **ignored** (gamepad-only).
+- **Rumble** for slot N goes back to whichever client owns slot N, and to no one
+  else; if the slot is unowned the request is dropped at the server.
+- **Disconnect** frees the slot and `disconnect`s the virtual pad — which is what
+  clears that slot's held buttons and axes, so a player who vanishes mid-input
+  does not leave a trigger down. The server forwards a `GamepadDisconnect`
+  (`0x42`) for that player's global slot; the dispatcher drops the slot from its
+  pressed-set. **Other slots are untouched** — this is the per-slot path, not
+  `Dispatcher::release_all`, which releases everything and is reserved for
+  controller-slot transitions and `Drop` ([`MODULE_INPUT.md`](./MODULE_INPUT.md)).
 - **One pad per player client** in v1 (the client's primary gamepad). A *single*
   client driving several local pads (slots 0…N from one machine) remains the
   non-co-op path. Multi-keyboard/mouse co-op is **out of scope** (single OS cursor).
@@ -288,16 +367,19 @@ Per-add-on tuning lives in `[addon_module_<id>]` (see each add-on spec).
 ## Security Considerations
 
 - **Input-role-gated.** Gamepad records are accepted only from the `control`
-  client and (when `allow_coop`) `player` clients; the server drops binary frames
-  from `view` clients before the dispatcher (see [`MODULE_SERVER.md`](../core/MODULE_SERVER.md)).
-  A `player` client's non-gamepad records (keyboard/mouse/touch) are dropped too —
-  players drive only their assigned pad slot.
+  client (slot 0) and, when `[gamepad] allow_coop`, from `player` clients (slots
+  1…N) — an allowlist on the effective role, never a test against `view`
+  ([`MODULE_SERVER.md`](../core/MODULE_SERVER.md) "Role gate table" rows 3-4).
+  A `player` client's non-gamepad records (keyboard/mouse/touch) are dropped by
+  row 2 — players drive only their assigned pad slot. `view` clients may not open
+  the input stream at all (row 1).
 - **Bounded state.** `Update` validates Index < max_controllers, refuses
   buttons-bitfield bits ≥ 17, clamps axes/triggers. A malformed snapshot is
   rejected before it touches the OS device.
 - **Lifecycle.** Virtual controllers exist only between `Connect` and
-  `Disconnect`. On controller-client disconnect the dispatcher synthesizes a
-  `Disconnect` for every index that had been Connected.
+  `Disconnect`. `Dispatcher::release_all` — invoked on every controller-slot
+  transition and on `Drop` — synthesizes a `Disconnect` for every index that had
+  been Connected, so no virtual pad outlives the session that created it.
 - **No keyboard/mouse via gamepad.** A gamepad add-on cannot inject other event
   types — the OS-level virtual device is a gamepad and only gamepad codes flow.
 - **Rumble forwarding** is opt-in (`allow_rumble`) so paranoid operators can
@@ -315,6 +397,8 @@ Per-add-on tuning lives in `[addon_module_<id>]` (see each add-on spec).
 | Integration | Linux: virtual gamepad enumerated by `evtest` and SDL2 | Yes (uinput) |
 | Integration | Windows: virtual controller visible to a Steam Input test app | Yes (ViGEmBus) |
 | Integration | macOS: virtual controller visible to a GCController test app | Yes (macOS 14+) |
+| Unit | Rumble slot inversion: a request for global slot 3 owned by a one-pad player leaves as `Index = 0`; a request for an unowned slot, and any request with `allow_rumble = false`, emits no datagram at all | No |
+| Unit | An injector that does not set `AddonCaps::RUMBLE` gets no sink, `set_rumble_sink` returns `Unsupported`, and the inert-`allow_rumble` line is logged exactly once | No |
 | Integration | Rumble round-trip: ViGEmBus/uinput FF event → server → client `playEffect` | Yes (Chrome) |
 | Mock | Fake gamepad injector for dispatcher tests | No |
 

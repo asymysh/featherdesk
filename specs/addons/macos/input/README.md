@@ -36,6 +36,12 @@ shared library.
 games that read IOKit HID directly do **not** see the virtual controller — this
 is a real limitation, document it in user-facing release notes.
 
+`gcvirtual` also does **not** set `AddonCaps::RUMBLE`: GameController has no
+inbox through which a virtual controller can observe a host game's vibration
+request. The host installs no `RumbleSink` and logs once at `info` that
+`[gamepad] allow_rumble` has no effect on macOS — see
+[`./GCVIRTUAL_MACOS_SPEC.md`](./GCVIRTUAL_MACOS_SPEC.md).
+
 ---
 
 ## Permission requirements
@@ -49,6 +55,11 @@ The in-core `enigo` default calls `CGEventPost`, which macOS gates behind
 
 Until Accessibility is granted, injected events are silently swallowed by the
 OS — the spec covers detecting and surfacing this state to the operator.
+
+The wire and the whole pipeline are in **stream pixels**; `CGEventPost` consumes
+**points**. The conversion happens inside the injector, from geometry it queries
+from CoreGraphics — see
+[`./CGEVENT_MACOS_SPEC.md`](./CGEVENT_MACOS_SPEC.md) "Coordinate space".
 
 ---
 
@@ -80,5 +91,5 @@ though a typical gaming deployment uses both.
 1. Write the spec at `specs/addons/macos/input/{NAME}_MACOS_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the input index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib from `addons/input/{name}/`
-5. Wire the capability registration in `MODULE_PIPELINE.md`
+4. Follow CENTRAL_SPEC "Where to register a new add-on" steps 4–7 for the code
+   side (root module, `AddonCaps`, cdylib path, probe-order wiring).

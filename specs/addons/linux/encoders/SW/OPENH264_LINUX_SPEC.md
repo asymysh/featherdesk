@@ -2,12 +2,16 @@
 
 ## Purpose
 
-Software H.264 Baseline encoder via Cisco's OpenH264 library, called through
-Rust FFI. The cross-platform fallback encoder — the same Rust crate compiles on Linux, Windows,
-and macOS without changes.
+Software H.264 Constrained Baseline encoder via Cisco's OpenH264 library, called
+through Rust FFI. The **software default on every OS** — the same Rust crate
+compiles on Linux, Windows, and macOS without changes.
 
 When the system has no GPU at all (containers, headless ARM, Graviton-class instances,
-broken drivers, etc.), this is the encoder that runs.
+broken drivers, etc.), this is the encoder that runs. It is the default rather
+than the faster `x264` subprocess because it is in-process, has no external binary
+to find or lose, and can force an IDR in place for the cost of one flag on the
+next frame ([`MODULE_ENCODE.md`](../../../../media/MODULE_ENCODE.md) "Software
+encoder order").
 
 ---
 
@@ -138,28 +142,66 @@ Verified results from previous benchmark sessions:
 | Intel HD 630 (original Linux dev) | 1080p | ~125 | ~8ms | — | ~25% |
 
 Within budget for 30fps remote control on every machine tested. Slower than libx264
-ultrafast (~4ms vs 4.3ms) but eliminates GPL contamination and ffmpeg subprocess.
+ultrafast, which is the trade the default accepts: no GPL, no ffmpeg subprocess,
+and an in-place forced IDR instead of a process respawn.
 
 ---
 
 ## Probe & Selection
 
-```rust
-// crate: featherdesk-addon-openh264  (cfg(target_os = "linux"))
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Root module surface"):
 
-fn probe_openh264() -> Result<OpenH264Capabilities, EncodeError> {
-    // 1. dlopen libopenh264.so (verify present)
-    // 2. Create + destroy a test encoder (verify functional)
-    // 3. Return version, max resolution
-}
+```rust
+// crate: featherdesk-addon-openh264   (the add-on's cdylib)
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
 ```
+
+`probe` dlopens `libopenh264.so`, creates and destroys a test encoder to confirm
+it is functional, and reads its version and maximum resolution. It reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(),
+    codecs: RVec::from(vec![CodecId::H264]),
+    caps: AddonCaps(AddonCaps::ENC_CONFIGURABLE), // SetOption changes bitrate, QP,
+                                                  //   frame rate and GOP length
+                                                  //   without a rebuild
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** A missing or unloadable `libopenh264.so` is
+`ROk(ProbeReport { available: false, reason: "libopenh264.so not found" })`,
+never an `RErr`. `RErr` is reserved for the probe itself failing.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` would
+cost this add-on every hot parameter change — silently, with no error and no
+warning; the pipeline would tear it down and rebuild it for a bitrate change.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); the constructed object's
+`caps()` is authoritative and may be a strict subset of this one.
+
+**Profile.** This encoder emits **Constrained Baseline** only
+(`VideoProfile::H264ConstrainedBaseline`) — OpenH264's encoder supports no other
+profile. `codec()` therefore returns `avc1.42E0LL` with `LL` computed per
+MODULE_ABI "Codec-string computation", never a constant.
 
 Pipeline probes (Linux, with this add-on loaded):
 ```
-NVENC / AMF / libva HW add-ons available? → use HW
-None available?                              → use OpenH264 (Rust FFI, this add-on)
-This add-on not loaded either?               → fatal: no encoder
+NVENC / AMF-ROCm / libva HW add-ons available? → use HW
+None available?                                 → use OpenH264 (this add-on) — the SW default
+This add-on not loaded either?                  → fatal: no encoder
 ```
+
+`x264` is not in that ladder: it is opt-in, reached only by
+`[encode] force_addon = "x264"` (MODULE_ENCODE "Software encoder order").
 
 ---
 
@@ -169,7 +211,7 @@ This add-on not loaded either?               → fatal: no encoder
 addons/encode/openh264/
 ├── openh264.rs           // Encoder struct, OpenH264Encoder::new
 ├── ffi.rs                // Rust FFI bindings (built into the add-on cdylib)
-├── probe.rs              // probe_openh264()
+├── probe.rs              // the root module's probe() -> ProbeReport
 └── tests.rs              // Unit + benchmark tests
 ```
 
@@ -177,15 +219,18 @@ addons/encode/openh264/
 
 ## When to use this add-on
 
-Use this add-on when:
-- Universal fallback needed across machines that may or may not have GPUs
+Ship this add-on when:
+- Any deployment that may fall back to software — it is the SW default, so
+  leaving it out means a host with no working HW encoder has no encoder at all
 - Container deployments (no GPU passthrough)
 - ARM Linux (Graviton, Ampere) — Cisco's NEON build works well
 - Cross-platform single SW codepath wanted (same encoder on Linux + Windows)
 
 Skip when:
-- Always have a GPU and a HW encoder add-on installed
-- On macOS — prefer VideoToolbox SW (Apple-tuned for ARM, faster on Apple Silicon)
+- Always have a GPU and a HW encoder add-on installed, and a software fallback is
+  not wanted at all (startup step 3f warns that the HW add-on has no SW fallback)
+- On macOS — `vt_sw` precedes it in the auto order (Apple-tuned for ARM, faster on
+  Apple Silicon)
 
 ---
 
@@ -212,7 +257,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream::ConfigurableEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `update_stream_params(p: stream::Params)`.
+This add-on implements `encode::ConfigurableEncoder` and sets `AddonCaps::ENC_CONFIGURABLE` at probe (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). All updates flow through `update_stream_params(p: stream::Params)`.
 
 | Param change | OpenH264 API | Hot? |
 |--------------|--------------|------|

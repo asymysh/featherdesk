@@ -28,6 +28,7 @@ default `SendInput` path, because a kernel-level filter driver:
   device input (scan codes, not virtual keys).
 - **Reaches the secure desktop.** Combined with `SendSAS` (below), it can drive
   Ctrl+Alt+Del / the Secure Attention Sequence — something `SendInput` cannot.
+  This is the one add-on in the tree that sets `AddonCaps::SECURE_ATTENTION`.
 
 > ⚠️ **Anti-cheat risk — read before enabling.** Interception is a **kernel
 > input filter driver**. Anti-cheat systems (Riot Vanguard, EAC, BattlEye) can
@@ -101,12 +102,27 @@ ms.flags = 0;
 ms.state = state_bit_for(button, down);
 
 // Wheel (multiples of 120 = one detent):
-//   IMPORTANT: NEGATE dx/dy from the wire — the wire is W3C (positive = down/right),
-//   Interception's rolling is hardware-style (positive = up/left). See MODULE_INPUT
-//   "Wire sign convention" note.
+//   Scroll sign: NEGATE dx/dy from the wire — the wire is W3C (positive =
+//   down/right), Interception's rolling is hardware-style (positive = up/left).
+//   See MODULE_INPUT "Wire sign convention" note.
 ms.state   = INTERCEPTION_MOUSE_WHEEL;   // or _HWHEEL for horizontal
 ms.rolling = -wire_dy;                   // for vertical; -wire_dx for horizontal
 ```
+
+### Single-thread requirement
+
+`InterceptionContext` is a driver handle obtained from
+`interception_create_context()`, and this add-on makes no `unsafe impl Send`
+claim about it. Instead it takes the second of the two options MODULE_ABI
+"Thread requirements" allows: the context is **pinned to a dedicated OS thread**
+(a `std::thread` the add-on owns for its lifetime), created and destroyed on that
+thread, and every `interception_send` is issued from it. The `KeyMouseInjector`
+object the host holds is a `Send` proxy that funnels records to that thread over
+a bounded `std::sync::mpsc::sync_channel(64)`; on a full channel the record is
+dropped and a `warn` is logged at most once per second, exactly as
+[`WIN_TOUCH_WINDOWS_SPEC.md`](./WIN_TOUCH_WINDOWS_SPEC.md) "Single-thread
+requirement" specifies for touch. `send_sas` crosses the same funnel, so SAS
+cannot race an in-flight key.
 
 ### HID-usage → scan code
 
@@ -122,10 +138,16 @@ keys) set `INTERCEPTION_KEY_E0`.
 
 The Interception driver **cannot** generate SAS — Windows intercepts the real
 hardware Ctrl+Alt+Del in `winlogon`/`csrss` before any filter driver, and refuses
-software-synthesized SAS for security. The add-on implements the optional
-`input::SecureAttention` capability; the core dispatcher detects the CAD chord
-(see [`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)
-"Ctrl+Alt+Del Chord Detection") and calls `SendSAS()`:
+software-synthesized SAS for security. The add-on therefore sets
+`AddonCaps::SECURE_ATTENTION` in its `ProbeReport` and serves `send_sas` on the
+`KeyMouseInjector` it returns — there is no separate `SecureAttention` trait,
+because a `#[sabi_trait]` object cannot be downcast and an optional capability
+reached by a downcast has no implementation
+([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md) "Optional-method
+capability flags"). The core dispatcher detects the CAD chord (see
+[`specs/interaction/MODULE_INPUT.md`](../../../interaction/MODULE_INPUT.md)
+"Ctrl+Alt+Del Chord Detection"), checks the bit, and calls `send_sas()`, which
+calls `SendSAS()`:
 
 ```rust
 // sas.dll — requires SoftwareSASGeneration policy enabled AND the caller
@@ -141,12 +163,14 @@ let send_sas: SendSasFn = unsafe { std::mem::transmute(GetProcAddress(module, s!
 unsafe { send_sas(BOOL(0)); } // AsUser=FALSE → from a service
 ```
 
-Implementation in Rust satisfies the capability:
+The method on `KeyMouseInjector` that the bit gates:
 
 ```rust
-/// Implements the `input::SecureAttention` capability on the interception injector.
-/// Returns `input::InputError::SasUnavailable` if the policy or privilege blocks it.
-fn send_sas(&self) -> Result<(), input::InputError>;
+/// Serves AddonCaps::SECURE_ATTENTION on the interception injector. The receiver
+/// is `&mut self`, matching every other injector method.
+/// Returns `input::InputError::SasUnavailable` if the policy or privilege blocks
+/// it at call time — the bit may be claimed at probe and still be refused later.
+fn send_sas(&mut self) -> Result<(), input::InputError>;
 ```
 
 **Requirements:**
@@ -161,10 +185,17 @@ fn send_sas(&self) -> Result<(), input::InputError>;
 - If `SendSAS` cannot run (policy / privilege), the function returns
   `input::InputError::SasUnavailable`; the dispatcher logs a one-time warning and drops
   the chord. The constituent Ctrl/Alt keys are never injected as a fallback.
+- `probe()` performs the same policy and privilege check, and sets
+  `AddonCaps::SECURE_ATTENTION` **only** when `[addon_module_interception]
+  enable_sas = true` **and** that check passes. With the bit clear the dispatcher
+  never calls `send_sas` at all, and the chord is dropped with one log line
+  instead of a failed call per press.
 
 The chord detection algorithm is platform-neutral and lives in the core
 dispatcher (any `(L|R)Ctrl + (L|R)Alt + Delete` combination triggers it); only
-the `SecureAttention` implementation is Windows-specific.
+`send_sas` is Windows-specific. An injector that does not set
+`AddonCaps::SECURE_ATTENTION` — the in-core `enigo` default, and every non-Windows
+injector — drops the chord there.
 
 ---
 
@@ -229,31 +260,60 @@ The Interception **driver** is a kernel driver and must be installed once
 ```rust
 // crate: featherdesk-addon-interception (the add-on's cdylib)
 
-/// `probe` returns true if interception.dll loads AND the driver is present.
-/// Side-effect-free: if a context is allocated to test connectivity, it is
-/// destroyed before returning.
+// Layer 1 — what the host actually calls (MODULE_ABI "Root module surface"):
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
 fn probe(&self) -> Result<ProbeResult, PipelineError>;
 
-/// Create the injector. Fails if the driver is not installed.
-fn new(&self, cfg: input::InjectorConfig) -> Result<Box<dyn input::KeyMouseInjector>, input::InputError>;
+/// `descriptor().kind` is `InputKeyMouse` (0x06), so this is the one of
+/// `InputAddon`'s three constructors that is valid here; `new_touch` and
+/// `new_gamepad` return `PipelineError::AddonBackend`.
+fn new_key_mouse(&self, cfg: input::InjectorConfig)
+    -> Result<Box<dyn input::KeyMouseInjector>, PipelineError>;
 ```
 
 `probe` checks `interception_create_context()` returns non-null (driver present),
 then **immediately calls `interception_destroy_context`** to avoid leaking a
-driver handle on repeated probes. If the driver is missing, `new` returns an
-actionable error telling the operator to run the installer.
+driver handle on repeated probes. It also runs the SAS policy/privilege check
+described above, and reports:
+
+```rust
+ROk(ProbeReport {
+    available: true, reason: RString::new(), codecs: RVec::new(),
+    caps: if sas_enabled_and_permitted { AddonCaps(AddonCaps::SECURE_ATTENTION) }
+          else                          { AddonCaps(0) },
+    displays: RVec::new(),
+})
+```
+
+**Availability is not an error.** A missing `interception.dll` or an uninstalled
+driver is `ROk(ProbeReport { available: false, reason: "Interception driver not
+installed; run install-interception.exe /install (one-time, reboot required)" })`.
+`RErr` is reserved for the probe itself failing.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` here
+means Ctrl+Alt+Del is silently dropped, with no error and no warning.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); the constructed object's
+`caps()` is authoritative and may be a strict subset of this one — which is what
+happens when the SAS policy is changed between probe and construction.
 
 ---
 
 ## Error Handling
 
-| Failure | Behavior |
-|---------|----------|
-| Driver not installed | `new` returns error → core falls back to the in-core `enigo`/`SendInput` injector, logs install instructions |
-| `interception.dll` missing | `probe` false → add-on not selected (in-core `enigo`/`SendInput` stays in use) |
-| `SendSAS` blocked by policy | Log warning once; drop Ctrl+Alt+Del chords |
-| Injection call fails mid-session | Log + continue (do not crash the stream); surface in metrics |
-| Not running as SYSTEM service | SAS unavailable; normal injection still works → warn at startup |
+| Failure | Returned as | Behavior |
+|---------|-------------|----------|
+| Driver not installed | `ProbeReport { available: false, reason }` | Add-on not selected → the in-core `enigo`/`SendInput` injector stays in use; install instructions are logged |
+| `interception.dll` missing | `ProbeReport { available: false, reason }` | Same |
+| Driver disappears after probe (uninstalled between probe and construct) | `PipelineError::AddonBackend` from `new_key_mouse` | The pipeline falls through; the in-core default keeps the host controllable |
+| `SendSAS` blocked by policy or privilege | `input::InputError::SasUnavailable` | The dispatcher logs a one-time warning and drops the chord. The constituent Ctrl/Alt keys are never injected as a fallback |
+| `send_sas` called without the bit | `input::InputError::Unsupported` | A host bug or a capability lie — the host clears the bit for the session and logs once (MODULE_ABI "Misbehaving add-ons"). It never happens on the specified path, because the dispatcher checks the bit first |
+| Injection call fails mid-session | `input::InputError::Backend(detail)` | Log + continue (do not crash the stream); surface in metrics |
+| Driver handle invalidated mid-session | `input::InputError::DeviceLost` | The pipeline rebuilds the injector; injection reverts to the in-core default if it cannot |
+| Not running as SYSTEM service | — | SAS unavailable, so `probe` leaves `SECURE_ATTENTION` clear; normal injection still works → warn at startup |
 
 ---
 

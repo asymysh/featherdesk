@@ -17,8 +17,8 @@ future no-root XShm for a kiosk) without `#ifdef` spaghetti.
 
 | Add-on | Add-on ID | Spec | When to use | Status |
 |--------|-----------|------|------------|--------|
-| **KMS+EGL DMA-BUF** | `kms_egl` | [`./KMS_EGL_LINUX_SPEC.md`](./KMS_EGL_LINUX_SPEC.md) | Universal default — every GPU, any display server, requires `CAP_SYS_ADMIN` | ✅ Working |
-| **NvFBC** | `nvfbc` | [`./NVFBC_LINUX_SPEC.md`](./NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver — ~2–3ms lower latency than KMS+EGL on NVIDIA, official path | 📋 Specced |
+| **KMS+EGL DMA-BUF** | `kms_egl` | [`./KMS_EGL_LINUX_SPEC.md`](./KMS_EGL_LINUX_SPEC.md) | Universal default — every GPU, any display server, requires `CAP_SYS_ADMIN` | 📋 Specced — Go prototype abandoned on tiled 10-bit scanout formats (see spec "Status") |
+| **NvFBC** | `nvfbc` | [`./NVFBC_LINUX_SPEC.md`](./NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver, X11 only — ~2–3ms lower latency than KMS+EGL on NVIDIA, official path | 📋 Specced |
 
 ### Recommended add-on combinations
 
@@ -61,12 +61,17 @@ When multiple capture add-ons are loaded, the pipeline
 selects in this priority order:
 
 ```
-1. nvfbc loaded AND NVIDIA proprietary driver present?       → use NvFBC
-2. kms_egl loaded AND root / CAP_SYS_ADMIN?                  → use KMS+EGL
-3. None of the above?                                         → fatal: no usable capture
+1. nvfbc loaded AND NVIDIA proprietary driver present AND X11?  → use NvFBC
+2. kms_egl loaded AND root / CAP_SYS_ADMIN?                     → use KMS+EGL
+3. None of the above?                                            → fatal: no usable capture
 ```
 
-The first available capture wins. Drop in only what you need.
+The first available capture wins. Drop in only what you need. A backend whose
+prerequisite is missing reports `ProbeReport { available: false, reason }` — that
+is not an error, and the next candidate is tried (`MODULE_ABI` "Root module
+surface"). Under Wayland `nvfbc` is always unavailable, so `kms_egl` is the whole
+Linux path there; it reads the pointer from the DRM cursor plane on X11 and
+Wayland alike.
 
 ---
 
@@ -75,5 +80,5 @@ The first available capture wins. Drop in only what you need.
 1. Write the spec at `specs/addons/linux/capture/{NAME}_LINUX_SPEC.md`
 2. Add a row to the add-on table above
 3. Add a row to the capture index in `specs/CENTRAL_SPEC.md` → "Platform & Add-On Spec Index"
-4. Build as a cdylib from `addons/capture/{name}/`
-5. Wire the runtime probe order in `MODULE_PIPELINE.md`
+4. Follow CENTRAL_SPEC "Where to register a new add-on" steps 4–7 for the code
+   side (root module, `AddonCaps`, cdylib path, probe-order wiring).

@@ -10,38 +10,53 @@
 
 ---
 
-## Codec Fallback Order (Confirmed)
+## Encoder Selection and Codec Policy
 
-**Server-side encode fallback** (tried in this order at startup based on hardware probe):
+**Add-on probe order** (the runtime picks the *add-on*; the codec rule below then
+picks what it emits). The order is per-OS, because an add-on for another OS cannot
+be loaded — see [`./core/MODULE_PIPELINE.md`](./core/MODULE_PIPELINE.md) startup
+step 3e, which is authoritative:
 
 ```
-1. HEVC hardware   — best compression (~40% better than H.264)
-                     licensing: covered by GPU/OS vendor (Intel/AMD/Apple)
-                     NO software HEVC fallback (libx265 has triple patent pool exposure)
-
-2. H.264 hardware  — hardware accelerated, no CPU cost
-                     licensing: covered by GPU/OS vendor
-
-3. H.264 software  — OpenH264 (Rust FFI), Cisco pays MPEG-LA royalties
-                     licensing: zero concern, runs on any hardware
+Linux    HW: nvenc → amf_rocm → libva     SW: openh264   (x264 by force_addon only)
+Windows  HW: nvenc → amf → qsv → mf_hw    SW: openh264   (x264 by force_addon only)
+macOS    HW: vt_hw                        SW: openh264 → vt_sw  (x264 by force_addon only)
 ```
+
+Vendor-specific SDKs precede generic abstractions. There is **no software HEVC**
+on any platform (libx265 has triple patent-pool exposure). H.264 licensing on the
+hardware tiers is covered by the GPU/OS vendor; on the software tier Cisco carries
+the MPEG-LA royalty for OpenH264.
+
+**Codec policy.** The encoder advertises **H.264** (`avc1.*`) for every SDR
+session, on every platform, regardless of what HEVC hardware is present. **HEVC
+Main10** (`hvc1.2.*`) is emitted only for an HDR session, because WebCodecs has no
+H.264 HDR profile. HEVC is never selected to save bandwidth: Firefox's WebCodecs
+cannot decode it, and a codec no attached client can decode is a black screen, not
+a saving. Which HW encoder is *selected* is a separate question from which codec it
+*emits* — the probe order picks the add-on, this rule picks the codec.
 
 **Client-side decode:**
-No codec negotiation needed. The server picks the best codec it can encode and
-advertises it in the `config` control-stream message. The client decodes
-whatever arrives.
+The client reports what it can decode in its `auth` message and the server never
+advertises a codec no attached client can decode (see
+[`./core/MODULE_PROTOCOL.md`](./core/MODULE_PROTOCOL.md) "Decode capability").
 
-> **Minimum browser: Chrome 107+, Edge 98+, Firefox 130+, Safari 18.2+** (the
-> WebCodecs + WebTransport intersection — see [`./client/MODULE_WEB_CLIENT.md`](./client/MODULE_WEB_CLIENT.md)).
+> **Minimum browser: Chrome 107+, Edge 98+, Firefox 130+, Safari 16.4+** (the
+> WebCodecs floor). The WebTransport carrier additionally needs Safari 26.4+; below
+> that the client uses the WebSocket fallback carrier — see
+> [`./core/MODULE_TRANSPORT.md`](./core/MODULE_TRANSPORT.md) "Carrier selection".
+> See also [`./client/MODULE_WEB_CLIENT.md`](./client/MODULE_WEB_CLIENT.md).
 > **Self-signed TLS caveat:** the self-signed (LAN/self-hosted default) mode reaches
 > WebTransport via `serverCertificateHashes` (Chrome/Edge 107+, Firefox recent).
 > **Safari's support is incomplete** — Safari clients may need a CA-trusted cert
 > (`server.tls.cert`/`key`). See [`./core/MODULE_SERVER.md`](./core/MODULE_SERVER.md)
 > "Browser certificate trust".
 > **HEVC caveat:** Chrome/Edge/Safari decode HEVC; Firefox's WebCodecs does
-> **not**. A host that selects HEVC (e.g. for HDR) is decodable only by
-> Chromium/WebKit clients — Firefox clients need an H.264 stream (the universal
-> default), so HDR is effectively Chromium/WebKit-only.
+> **not**. A host that selects HEVC (only ever for HDR) is decodable by Chromium and
+> WebKit clients alone, so HDR is Chromium/WebKit-only and the server enforces that
+> with the decode-capability gate rather than leaving Firefox viewers black. In the
+> browser, an HDR stream is decoded at 10-bit and **tone-mapped** into the canvas's
+> sRGB/Display-P3 output; true HDR display output is a native-client (v2) capability.
 
 ## Codec Support Matrix
 
@@ -62,8 +77,9 @@ whatever arrives.
 | macOS | Intel integrated Skylake+ | ✅ | ✅ | ❌ | OpenH264 (Rust FFI)* |
 | macOS | Intel integrated pre-Skylake | ✅ | ❌ | ❌ | OpenH264 (Rust FFI)* |
 
-> *macOS software fallback: VideoToolbox SW H.264 preferred over OpenH264 (Rust FFI) since
-> VideoToolbox is macOS-native. OpenH264 (Rust FFI) is the universal fallback if VT fails.
+> *macOS software fallback: `openh264` (Rust FFI) is the cross-platform default;
+> `vt_sw` is preferred where it probes available, since VideoToolbox is macOS-native.
+> `x264` is opt-in on every OS (`[encode] force_addon = "x264"`).
 
 ---
 
@@ -87,9 +103,11 @@ were all considered and rejected — see per-OS capture READMEs.
 
 Same pluggable, zero-by-default pattern as capture/input — a per-OS **capture**
 add-on shared library normalizes the OS device format to the canonical 48 kHz /
-stereo / S16LE, and a separate **codec** add-on (`opus`, else raw PCM) sets the
-wire format (advertised in the `config` message). **No subprocess** (`pw-cat`
-gone), no driver, no mic. Realtime, **audio-master** A/V sync. See
+S16LE / interleaved, Vorbis channel order, with the **channel count following the
+host output layout** up to 7.1 (or forced to 2 by `[audio] channels = "stereo"`),
+and a separate **codec** add-on (`opus`, else raw PCM) sets the wire format
+(advertised in the `config` message). **No subprocess** (`pw-cat` gone), no
+driver, no mic. Realtime, **audio-master** A/V sync. See
 [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md).
 
 | Platform | Add-on ID | Capture mechanism | Spec |
@@ -98,8 +116,14 @@ gone), no driver, no mic. Realtime, **audio-master** A/V sync. See
 | **Windows** | `wasapi` | WASAPI loopback (default render endpoint) | [`windows/audio/WASAPI_WINDOWS_SPEC.md`](./addons/windows/audio/WASAPI_WINDOWS_SPEC.md) |
 | **macOS** | `sck_audio` | ScreenCaptureKit audio on the shared `sck` stream (macOS 13+) | [`macos/audio/SCK_AUDIO_MACOS_SPEC.md`](./addons/macos/audio/SCK_AUDIO_MACOS_SPEC.md) |
 
-Codec: `opus` (BSD libopus, in-process; FEC/PLC; ~96–128 kbps) — **recommended** —
-or raw S16LE PCM (1.536 Mbps, no concealment) when the `opus` add-on isn't loaded.
+Codec: `opus` (BSD libopus, in-process; ~96–128 kbps) — **recommended** — or raw
+S16LE PCM (1.536 Mbps at stereo, more for surround; no concealment) when the `opus`
+add-on isn't loaded. The Opus encoder always runs with in-band FEC on, but what a
+receiver can do with it differs by path: the wasm-libopus and native-client paths
+get full Opus FEC + PLC, while the browser's WebCodecs `AudioDecoder` exposes
+neither, so that path gets bounded, clock-preserving worklet-side concealment
+instead — see [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md)
+"Loss concealment, by path".
 
 ---
 
@@ -117,16 +141,25 @@ kb/mouse is injected by the in-core **`enigo`** default on every OS — anti-che
 
 ## Protocol — Platform-Agnostic
 
-The wire protocol (`./core/MODULE_PROTOCOL.md`) is identical on all platforms:
+The wire protocol (`./core/MODULE_PROTOCOL.md`) is identical on all platforms.
+Reachability is not part of it: v1 performs no NAT traversal and operates no
+relay — the host binds a UDP port and the operator supplies the path to it (LAN,
+port-forward, or a tunnel that carries QUIC end to end). See
+[`./v2/MODULE_NETWORK.md`](./v2/MODULE_NETWORK.md) for the v2 plan.
+
+The protocol itself:
 - 22-byte media `FrameHeader` (Version, Type, Sequence, Timestamp, W, H, PayloadSize) — media channels only (datagram fragment 0 + bootstrap stream)
 - `config` JSON message on the **control stream** as handshake — carries codec string, dims, cursorMode (the binary type-6 Config frame is retired)
-- `FrameTypeVideoH264` (type 1) for video — slot 5 reserved (formerly VP8, rejected)
+- `FrameTypeVideoH264` (type 1) for video, `FrameTypeVideoHEVC` (type 7) for an HDR session — slot 5 reserved (formerly VP8, rejected)
 - `FrameTypeAudioOpus` (type 8, default) / `FrameTypeAudioPCM` (type 4) for audio — host→client, stereo / 5.1 / 7.1 (impl deferred)
 - **Binary** `[u16 RecLen]`-prefixed input records on the **input stream** (C→S); JSON on the **control stream** for keyframe/resize/etc. — input is NOT JSON
 
-The codec in the `config` message is the **full WebCodecs codec string**:
-- H.264: `"avc1.42E01F"` (Constrained Baseline 3.1) — universal default
-- AV1: `"av01.0.04M.08"` — RTX 40+ NVIDIA (Ada Lovelace), RDNA3+ AMD (RX 7000+), Intel Arc. **No Apple Silicon has AV1 HW encode** (M3+ has decode only).
+The codec in the `config` message is the **full WebCodecs codec string**, and its
+**level is computed from the active resolution and frame rate**, never a constant —
+see [`./core/MODULE_ABI.md`](./core/MODULE_ABI.md) "Codec-string computation" for
+the algorithm and the reference table (1080p60 H.264 High is `avc1.64002A`, not the
+Level-3.1 string a fixed constant would produce). AV1 (`av01.0.*`) is reserved for a
+future `av1` add-on; **no Apple Silicon has AV1 HW encode** (M3+ has decode only).
 
 **Chroma subsampling** (`[stream] chroma`): `420` (universal default) / `422` / `444`.
 4:2:2/4:4:4 sharpen text but are capability-negotiated with a transparent fall-back
@@ -138,12 +171,31 @@ client). See [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md).
 
 ## Implementation Status (current)
 
+> **Legend — one glyph, one meaning.** 📋 *specced*: the design is written; nothing
+> has been measured or built. 📈 *measured*: a benchmark artifact **in this repo**
+> records numbers for it (`PROJECT_ARTIFACTS/bench_out/`, all Windows). ✅ *runs
+> today*: it executes in the Go reference implementation on `feature-libav-vp8s8`.
+> ⏸️ *design locked, impl deferred*. ❌ *not available* — with the reason.
+> A cell may carry more than one glyph; "specced" alone never implies "measured".
+
 | Feature | Linux | Windows | macOS |
 |---------|-------|---------|-------|
-| Capture | ✅ KMS+EGL specced & working | ✅ DXGI DD specced & benchmarked | ✅ SCK specced & benchmarked |
-| HW encode | 📋 libva/NVENC/AMF specced | ✅ NVENC/AMF/MF/QSV specced & benchmarked | 📋 VideoToolbox specced (Hackintosh measured) |
-| SW encode (BSD) | 📋 OpenH264 specced | ✅ OpenH264 specced & benchmarked | 📋 OpenH264 specced |
-| SW encode (GPL) | 📋 x264 subprocess specced | ✅ x264 specced & benchmarked | 📋 x264 specced |
+| Capture | 📋 KMS+EGL specced · ❌ not the path that runs (see note) | 📋 DXGI DD specced · ❌ never measured (every `bench_out` session reports `available: false`) | 📋 SCK specced · ❌ no artifact in this repo (the Hackintosh CSVs `MACOS_SPEC.md` cites live under `/tmp`, off-repo) |
+| HW encode | 📋 libva/NVENC/AMF specced | 📋 NVENC/AMF/MF specced · 📈 measured · QSV 📋 specced only (no Intel silicon on the bench machine) | 📋 VideoToolbox specced · ❌ no artifact in this repo (Hackintosh only, off-repo) |
+| SW encode (BSD) | ✅ OpenH264 runs today · 📈 measured on Windows (7.9 ms p50 @ 1080p, 4 threads) | 📋 OpenH264 specced · 📈 measured | 📋 OpenH264 specced |
+| SW encode (GPL, opt-in) | 📋 x264 subprocess specced · 📈 measured on Windows (4.3 ms p50 @ 1080p, ultrafast, 4 threads) | 📋 x264 specced · 📈 measured | 📋 x264 specced |
 | Audio | ⏸️ design locked, impl deferred | ⏸️ design locked, impl deferred | ⏸️ design locked, impl deferred |
-| Input | ✅ enigo default + 📋 uinput override | ✅ enigo default + 📋 interception/win_touch/vigem | ✅ enigo default + 📋 gcvirtual |
-| Browser client | ✅ built | shared | shared |
+| Input | 📋 `enigo` default specced · ✅ uinput runs today · 📋 uinput add-on specced | 📋 `enigo` default specced · 📋 interception/win_touch/vigem specced | 📋 `enigo` default specced · 📋 gcvirtual specced |
+| Browser client | 📋 WebTransport + WebCodecs client specced · ❌ not built (the Go branch's client is WebSocket-based) | shared | shared |
+
+> **Linux capture note.** `kms_egl` is the specced Linux default and the only
+> Linux capture add-on in the recommended set, but it is **not** what runs on
+> `feature-libav-vp8s8` today: `cmd/server/main.go:137` constructs
+> `capture.NewX11Capturer`, and `NewKMSCapturer` has no non-test caller. Commit
+> `deb99d1` moved the default off KMS+EGL after the EGLImage backing a
+> `GL_TEXTURE_2D` proved not framebuffer-attachable on Intel HD 630 under GNOME
+> Wayland (XR30 10-bit framebuffers with Y-tiled modifiers). The path that runs
+> instead — `x11grab.go` + `screencast.py` — is explicitly rejected by
+> [`./media/MODULE_CAPTURE.md`](./media/MODULE_CAPTURE.md) "What Was Rejected".
+> Making `kms_egl` work on tiled 10-bit framebuffers is therefore in scope for
+> the Rust rewrite, not a port of already-working code.

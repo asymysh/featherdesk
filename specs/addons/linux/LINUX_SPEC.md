@@ -2,10 +2,13 @@
 
 ## Overview
 
-Linux is the **primary target** for FeatherDesk. The original codebase was written for
-Linux (Intel HD 630, KMS/DRM, VA-API). All five original tracks are implemented and
-working on Linux. This spec documents the confirmed implementation state and the
-hardware encoder path still to be built.
+Linux is the **primary target** for FeatherDesk, and the only platform with a
+working end-to-end reference codebase — the Go implementation on
+`feature-libav-vp8s8`. What runs there is not what this branch specifies: capture
+runs through `x11grab.go` + `screencast.py`, not `kms_egl`, and input runs through
+`/dev/uinput`, not the specced in-core `enigo` default. This spec documents the
+target architecture and, where the two differ, says which is which
+([`PLATFORM_COMPAT.md`](../../PLATFORM_COMPAT.md) "Implementation Status").
 
 ---
 
@@ -20,6 +23,7 @@ exactly the capture method(s) they need.
 ```
 capture/
 ├── KMS_EGL_LINUX_SPEC.md   ← default recommended add-on, universal GPU coverage
+│                          (specced; the Go prototype was abandoned — see its "Status")
 ├── NVFBC_LINUX_SPEC.md     ← NVIDIA proprietary, lower-latency alternative
 └── README.md               ← runtime probe order + recommended combinations
 ```
@@ -29,7 +33,7 @@ capture/
 | Add-on | Add-on ID | Hardware | Spec | When to use |
 |--------|-----------|----------|------|------------|
 | **KMS+EGL DMA-BUF** | `kms_egl` | Any GPU, any display server | [`capture/KMS_EGL_LINUX_SPEC.md`](./capture/KMS_EGL_LINUX_SPEC.md) | Universal default — requires `CAP_SYS_ADMIN` |
-| **NvFBC** | `nvfbc` | NVIDIA proprietary driver only | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower than KMS+EGL on NVIDIA proprietary; official NVIDIA path; pairs with NVENC encoder for full zero-copy GPU-resident pipeline |
+| **NvFBC** | `nvfbc` | NVIDIA proprietary driver, X11 only | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower than KMS+EGL on NVIDIA proprietary; official NVIDIA path; pairs with NVENC encoder for full zero-copy GPU-resident pipeline |
 
 KMS+EGL operates at the kernel/DRM level below the display server, so it works
 on X11, Wayland (GNOME/KDE/wlroots), or no display server at all. The only
@@ -40,9 +44,14 @@ sudo setcap cap_sys_admin+p ./featherdesk
 ```
 
 NvFBC is the only capture path that beats KMS+EGL on any hardware — and only on
-NVIDIA, where KMS+EGL has historically been finicky with the proprietary
-driver. Intel and AMD do not need capture add-ons; neither vendor has a
-proprietary capture API on Linux, so KMS+EGL is the entire path.
+NVIDIA under X11, where KMS+EGL has historically been finicky with the
+proprietary driver. Intel and AMD do not need capture add-ons; neither vendor has
+a proprietary capture API on Linux, so KMS+EGL is the entire path.
+
+Both add-ons report the pointer separately — `kms_egl` from the DRM cursor plane
+(X11 and Wayland alike), `nvfbc` from XFixes — and both can embed it instead when
+the session resolves `cursorMode = "embedded"`. Each spec's "Cursor Handling"
+section is normative for which capability bits it declares.
 
 **No no-root fallback paths exist today.** If a deployment needs to run without
 root, that requirement will be addressed when it comes up — likely as a future
@@ -51,10 +60,14 @@ XShm or PipeWire portal add-on.
 ### Runtime probe order
 
 ```
-1. nvfbc add-on loaded AND NVIDIA proprietary driver present?       → use NvFBC
-2. kms_egl add-on loaded AND root / CAP_SYS_ADMIN?                  → use KMS+EGL
+1. nvfbc loaded AND NVIDIA proprietary driver present AND X11?      → use NvFBC
+2. kms_egl loaded AND root / CAP_SYS_ADMIN?                         → use KMS+EGL
 3. None of the above?                                                → fatal: no capture
 ```
+
+NvFBC is an X11-only API, so under Wayland it reports
+`ProbeReport { available: false, reason }` — not an error — and `kms_egl` is the
+whole Linux path there.
 
 The first available capture wins. See [`capture/README.md`](./capture/README.md)
 for recommended add-on combinations and the documented reasoning for why other
@@ -73,8 +86,8 @@ want. The full set:
 ```
 encoders/
 ├── SW/
-│   ├── OPENH264_LINUX_SPEC.md     ← BSD-licensed Cisco SW (commercial use)
-│   └── X264_SUBPROCESS_LINUX_SPEC.md  ← GPL-isolated x264 subprocess (home / OSS, 2× faster)
+│   ├── OPENH264_LINUX_SPEC.md     ← BSD-licensed Cisco SW (the software default)
+│   └── X264_SUBPROCESS_LINUX_SPEC.md  ← GPL-isolated x264 subprocess (opt-in, 2× faster)
 └── HW/
     ├── LIBVA_LINUX_SPEC.md            ← Intel + AMD + NVIDIA via VA-API (MIT)
     ├── NVENC_LINUX_SPEC.md            ← NVIDIA direct
@@ -88,12 +101,11 @@ runtime probe order, and rationale.
 
 | Deployment | Add-ons | Why |
 |-----------|---------|-----|
-| Generic Linux server, commercial | `openh264` + `libva` | Universal coverage, smallest BSD add-on set |
-| Generic Linux server, home / OSS | `x264` + `libva` | 2× faster SW path (GPL on subprocess) |
+| Generic Linux server | `openh264` + `libva` | Universal coverage, smallest BSD add-on set |
+| Measured CPU-bound host, GPL acceptable | `openh264` + `x264` + `libva`, forced with `[encode] force_addon = "x264"` | 2× faster SW path where it has been measured; `openh264` stays as the fallback |
 | NVIDIA workstation | `openh264` + `nvenc` | Vendor-specific NVIDIA tuning |
 | AMD workstation | `openh264` + `libva` + `amf_rocm` | AMD-specific tuning + universal fallback |
-| Container / no GPU, commercial | `openh264` only | SW-only BSD, smallest binary |
-| Container / no GPU, home / OSS | `x264` only | SW-only, fastest CPU encode |
+| Container / no GPU | `openh264` only | SW-only BSD, smallest binary |
 
 ### How vendor APIs map to Linux
 
@@ -105,26 +117,47 @@ runtime probe order, and rationale.
 
 ### Confirmed Fallback Order
 
+The order selects an **add-on**, not a codec — which codec the selected add-on
+emits is a separate rule, below.
+
 ```
-1. HEVC hardware  (VAProfileHEVCMain)
-     → Intel Skylake+, AMD Polaris+, NVIDIA via wrapper
-     → Config codec string: "hvc1.1.6.L93.B0"
-     → Status: 📋 Specced — encoders/HW/LIBVA_LINUX_SPEC.md
+1. HW: nvenc  →  amf_rocm  →  libva
+     → nvenc:    NVIDIA proprietary driver
+     → amf_rocm: AMD, AMF runtime over ROCm/Vulkan
+     → libva:    Intel Sandy Bridge+, AMD GCN+, NVIDIA via the vaapi wrapper
+     → Config codec string: computed per MODULE_ABI (H.264 High; avc1.64002A at 1080p60)
+     → Status: 📋 Specced — encoders/HW/{NVENC,AMF_ROCM,LIBVA}_*.md
 
-2. H.264 hardware (VAProfileH264Baseline)
-     → Intel Sandy Bridge+, AMD GCN+, NVIDIA via wrapper
-     → Config codec string: "avc1.42E01F"
-     → Status: 📋 Specced — encoders/HW/LIBVA_LINUX_SPEC.md
-
-3. H.264 software (OpenH264, Rust FFI)
-     → No GPU present, or GPU has no VA-API encode support
+2. SW: openh264
+     → No GPU present, or no HW add-on probed available
      → Works on every machine including no-GPU ARM/x86 (Graviton etc.)
-     → Config codec string: "avc1.42E01F"
-     → Status: ✅ Working — current default
+     → Config codec string: computed per MODULE_ABI (H.264 Constrained Baseline;
+       avc1.42E02A at 1080p60)
+     → Status: ✅ Working — the software default
+
+   x264 is NOT in this order. It is opt-in, reached only by
+   [encode] force_addon = "x264" (MODULE_ENCODE "Software encoder order").
 ```
+
+Vendor-specific SDKs precede the generic abstraction: `nvenc`/`amf_rocm` before
+`libva`. The authoritative statement of the order is
+[`MODULE_PIPELINE.md`](../../core/MODULE_PIPELINE.md) startup step 3e; this is a
+restatement of the Linux row.
+
+The encoder advertises **H.264** (`avc1.*`) for every SDR session, on every
+platform, regardless of what HEVC hardware is present. **HEVC Main10**
+(`hvc1.2.*`) is emitted only for an HDR session, because WebCodecs has no
+H.264 HDR profile. HEVC is never selected to save bandwidth: Firefox's
+WebCodecs cannot decode it, and a codec no attached client can decode is a
+black screen, not a saving. Which HW encoder is *selected* is a separate
+question from which codec it *emits* — the probe order picks the add-on, this
+rule picks the codec. On Linux the HDR path is `libva`'s `VAProfileHEVCMain10`
+(Intel Skylake+, AMD Polaris+, NVIDIA via the wrapper); `hevc.gva`-class support
+is what makes HDR available at all.
 
 **No software HEVC.** libx265 has triple HEVC patent pool exposure (MPEG-LA, HEVC
-Advance, Velos Media). If HEVC hardware is unavailable, fall straight to H.264.
+Advance, Velos Media). If HEVC hardware is unavailable, an HDR session falls back
+to SDR H.264 rather than to a software HEVC encoder.
 
 ### GPU Encode Capability Matrix
 
@@ -141,7 +174,11 @@ Advance, Velos Media). If HEVC hardware is unavailable, fall straight to H.264.
 
 ### Software Fallback — OpenH264 (Rust FFI)
 
-**Status: ✅ Working. Current default (hardware path not yet built).**
+**Status: ✅ Working. The software default (hardware path not yet built).** It
+runs at up to 30 fps (see [`CENTRAL_SPEC.md`](../../CENTRAL_SPEC.md)
+"Motion-to-photon budget"); the pipeline's sustainable-rate control lowers the
+advertised fps to what the host actually sustains rather than advertising 60 and
+delivering 20.
 
 Same Rust crate as Windows and macOS. No subprocess. No ffmpeg. BSD-2 licensed.
 
@@ -149,6 +186,13 @@ Same Rust crate as Windows and macOS. No subprocess. No ffmpeg. BSD-2 licensed.
 |-----------|------------|------------|-------------|
 | 1920×1080 | ~125 fps | ~8ms | ~25% |
 | 2560×1440 | ~65 fps | ~15ms | ~25% |
+
+These are encode-only figures. On the CPU-readback path the end-to-end rate is
+capture-bound, not encode-bound — the PBO readback costs ~6 ms at 1080p and
+~11 ms at 1440p ([`capture/KMS_EGL_LINUX_SPEC.md`](./capture/KMS_EGL_LINUX_SPEC.md)
+"CPU readback"), so the sustainable end-to-end rates are ~70 fps and ~38 fps
+respectively, and the pipeline's sustainable-rate control settles on whichever the
+host actually reaches.
 
 **Crate:** `addons/encode/openh264/` (cdylib → `featherdesk-addon-openh264`)
 
@@ -227,7 +271,8 @@ All featherdesk integration tests were run on:
 Verified results from `review/kms_capture_software_encode/`:
 - DRM card: `/dev/dri/card1`, 2560×1440 @ 165Hz, plane ID 34
 - EGL context init: 170ms
-- glReadPixels (1440p BGRA): **50ms per frame**
+- Synchronous `glReadPixels` (1440p BGRA): **50ms per frame** — the measured
+  stall the add-on's PBO ring exists to remove
 - Frame pacing (30fps): 5 frames in 170ms ✅
 
 ---
@@ -236,9 +281,9 @@ Verified results from `review/kms_capture_software_encode/`:
 
 | Component | Current code | Target (refactor) |
 |-----------|-------------|------------------|
-| Capture | KMS+EGL (working) + X11grab subprocess | `kms_egl` add-on only (X11grab deleted) |
-| SW encode (default) | VP8 libvpx → **OpenH264 (Rust FFI)** ✅ | `openh264` add-on (BSD, Cisco) |
-| SW encode (opt-in) | — | `x264` subprocess add-on (GPL-isolated, 2× faster) |
+| Capture | X11grab + PipeWire screencast (KMS+EGL prototyped, then abandoned on tiled 10-bit scanout) | `kms_egl` add-on only (X11grab deleted) |
+| SW encode (default) | VP8 libvpx → **OpenH264 (Rust FFI)** ✅ | `openh264` add-on (BSD, Cisco) — the software default |
+| SW encode (opt-in) | — | `x264` subprocess add-on (GPL-isolated, 2× faster; `force_addon` only) |
 | HW encode | ffmpeg pipe → h264_vaapi (CPU copies) | `libva` add-on (Rust FFI direct, zero-copy, no ffmpeg) |
 | HW encode (vendor-specific) | — | `nvenc`, `amf_rocm` add-ons |
 | Protocol | 17-byte header | 22-byte header v1 (versioned, sequenced) |

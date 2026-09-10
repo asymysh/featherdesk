@@ -206,26 +206,62 @@ import extension is mature on Mesa and AMD's PRO driver.
 
 ## Probe & Selection
 
-```rust
-// crate: featherdesk-addon-amf_rocm  (cfg(target_os = "linux"))
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Root module surface"):
 
-fn probe_amf() -> Result<AmfCapabilities, EncodeError> {
-    // 1. dlopen libamf.so
-    // 2. dlopen("libamfrt64.so.1") → AMFInit() → CreateContext → InitVulkan
-    // 3. Enumerate available encoder components
-    // 4. Query capabilities per component
-    // 5. Return capabilities or error
+```rust
+// crate: featherdesk-addon-amf_rocm   (cfg(target_os = "linux"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
+```
+
+```rust
+fn probe(&self) -> RResult<ProbeReport, AbiError> {
+    // 1. dlopen("libamfrt64.so.1") → AMFInit() → CreateContext → InitVulkan
+    // 2. Enumerate available encoder components
+    // 3. Query capabilities per component
+    // 4. No AMF runtime, or no AMD adapter → ROk(ProbeReport {
+    //      available: false,
+    //      reason: "libamfrt64.so.1 not found, or no AMD adapter with an AMF
+    //               encoder component".into(),
+    //      codecs: RVec::new(), caps: AddonCaps(0), displays: RVec::new() })
+    // 5. Otherwise → ROk(ProbeReport {
+    //      available: true, reason: RString::new(),
+    //      codecs: <what the components report: H264 always; Hevc on Polaris+;
+    //               Av1 on RDNA3+>,
+    //      caps: AddonCaps(AddonCaps::ENC_CONFIGURABLE), // AMF properties retune
+    //                                                    //   bitrate/QP/frame rate
+    //                                                    //   in place
+    //      displays: RVec::new() })
 }
 ```
 
-Pipeline probes (Linux):
+**Availability is not an error.** A missing AMF runtime or an absent AMD adapter
+is `ROk(ProbeReport { available: false, reason })`, never an `RErr`. `RErr` is
+reserved for the probe itself failing.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` means
+no hot parameter change — silently, with no error and no warning.
+
+**Only claim what this call can prove.** `codecs` is what the *components* report
+on *this* adapter; a bit or a codec claimed here and refused later is a capability
+lie (MODULE_ABI "Misbehaving add-ons"), and the constructed object's `caps()` is
+authoritative.
+
+Pipeline probes encoders in this order on Linux (`MODULE_PIPELINE` startup
+step 3e):
 ```
-NVENC?               → other add-on, NVIDIA only
-AMF (this add-on)?   → use AMF if available AND GPU is AMD
-VA-API?              → use VA-API (Mesa, the default for AMD)
-x264 subprocess?     → use x264 (GPL builds only)
-OpenH264?            → universal SW fallback
+HW:  nvenc  →  amf_rocm (this add-on)  →  libva
+SW:  openh264  →  (x264 only via [encode] force_addon = "x264")
 ```
+
+Vendor-specific SDKs precede the generic abstraction, so this add-on is tried
+before `libva` on an AMD host; on an NVIDIA host it reports
+`available = false` and `nvenc` wins ahead of it anyway.
 
 ---
 
@@ -235,7 +271,7 @@ OpenH264?            → universal SW fallback
 addons/encode/amf/
 ├── amf.rs                // Encoder struct, AmfEncoder::new
 ├── ffi.rs                // Rust FFI bindings, cfg(target_os = "linux") (built into the add-on cdylib)
-├── probe.rs              // probe_amf()
+├── probe.rs              // the root module's probe() -> ProbeReport
 ├── vulkan_interop.rs     // DMA-BUF → VkImage → AMFSurface
 └── tests.rs              // Integration tests
 ```
@@ -292,7 +328,7 @@ keys in this section will cause startup to fail.
 
 ## Stream Params Translation
 
-This add-on implements `stream::ConfigurableHardwareEncoder` (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
+This add-on implements `hwencode::ConfigurableHardwareEncoder` and sets `AddonCaps::ENC_CONFIGURABLE` at probe (see [`../../../../core/MODULE_STREAM_PARAMS.md`](../../../../core/MODULE_STREAM_PARAMS.md)). AMF supports hot reconfiguration for most parameters via `SetProperty` on the running VCE component.
 
 | Param change | AMF API | Hot? |
 |--------------|---------|------|

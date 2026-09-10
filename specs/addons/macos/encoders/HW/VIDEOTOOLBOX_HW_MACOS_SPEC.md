@@ -43,7 +43,17 @@ AOMedia AV1).
 | Intel integrated Sandy/Ivy Bridge (2011-12) | ✅ QSV | ❌ | ❌ |
 
 Runtime probe via `VTCopyVideoEncoderList` returns the available encoders. The
-add-on advertises in the `config` control-stream message the codec it actually picked.
+add-on reports the codec it actually configured through `codec()`, and the
+pipeline puts that string in the `config` control-stream message.
+
+> The encoder advertises **H.264** (`avc1.*`) for every SDR session, on every
+> platform, regardless of what HEVC hardware is present. **HEVC Main10**
+> (`hvc1.2.*`) is emitted only for an HDR session, because WebCodecs has no
+> H.264 HDR profile. HEVC is never selected to save bandwidth: Firefox's
+> WebCodecs cannot decode it, and a codec no attached client can decode is a
+> black screen, not a saving. Which HW encoder is *selected* is a separate
+> question from which codec it *emits* — the probe order picks the add-on, this
+> rule picks the codec.
 
 ---
 
@@ -92,10 +102,15 @@ VTCompressionSessionCreate(
 );
 VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime,             kCFBooleanTrue);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,         kVTProfileLevel_H264_Baseline_3_1);
+VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,         kVTProfileLevel_H264_High_AutoLevel);
+// Colour is mandatory, not a tuning choice — see MODULE_ENCODE "Colour signalling"
+VTSessionSetProperty(session, kVTCompressionPropertyKey_ColorPrimaries,       kCVImageBufferColorPrimaries_ITU_R_709_2);
+VTSessionSetProperty(session, kVTCompressionPropertyKey_TransferFunction,     kCVImageBufferTransferFunction_ITU_R_709_2);
+VTSessionSetProperty(session, kVTCompressionPropertyKey_YCbCrMatrix,          kCVImageBufferYCbCrMatrix_ITU_R_709_2);
 VTCompressionSessionPrepareToEncodeFrames(session);
 
-// For HEVC:  kCMVideoCodecType_HEVC + kVTProfileLevel_HEVC_Main_AutoLevel
+// For an HDR session: kCMVideoCodecType_HEVC + kVTProfileLevel_HEVC_Main10_AutoLevel,
+//   with ITU_R_2020 primaries, the SMPTE_ST_2084_PQ transfer and the ITU_R_2020 matrix
 // AV1: NOT available via HW encode on any Apple Silicon (decode only on M3+)
 ```
 
@@ -111,18 +126,33 @@ VTCompressionSessionEncodeFrame(session, pb, pts, dur, NULL, NULL, NULL);
 This is the canonical macOS streaming pipeline: SCK → IOSurface → VTCompressionSession,
 no CPU pixel copy at any stage. Sunshine's macOS path does exactly this.
 
+The surface arrives upright: ScreenCaptureKit composites display rotation itself
+and `sck` always reports `Rotation::R0`, so this encoder's VPP never has a
+rotation to apply and never returns `StreamError::FallbackToSoftware` for one
+(see [`specs/media/MODULE_CAPTURE.md`](../../../../media/MODULE_CAPTURE.md)
+"Display rotation").
+
 ---
 
 ## Codec Strings (WebCodecs Config Handshake)
 
+`codec()` is **computed**, never a constant: this add-on calls
+`featherdesk_abi::codec_string(active_profile, p.width, p.height, p.fps)` after
+construction and after every successful `update_stream_params`, so the advertised
+profile and level always match what is actually being encoded (see
+[`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Codec-string
+computation"). The configured profile is `VideoProfile::H264High` for an SDR
+session and `VideoProfile::HevcMain10` for an HDR one. At 1080p60 that is:
+
 ```json
-{ "codec": "avc1.42E01F" }    // H.264 Constrained Baseline Level 3.1
-{ "codec": "hvc1.1.6.L93.B0" } // HEVC Main Profile Level 3.1
-// AV1 encode not available on any Apple Silicon -- removed from codec strings
+{ "codec": "avc1.64002A" }      // H.264 High, Level 4.2 — every SDR session
+{ "codec": "hvc1.2.4.L123.B0" } // HEVC Main10, Level 4.1 — HDR sessions only
+// AV1 encode is not available on any Apple Silicon -- no av01.* string is emitted
 ```
 
-Server announces whichever codec it selected; client configures VideoDecoder
-from this string.
+A different resolution or frame rate produces a different level, so neither
+string may be quoted as a constant. The server announces whichever codec it
+selected; the client configures `VideoDecoder` from that string.
 
 ---
 
@@ -186,23 +216,59 @@ crate); each variant is built into its own cdylib (`featherdesk-addon-vt_hw.dyli
 
 ## Probe & Selection
 
-```rust
-// cfg(target_os = "macos")
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../../core/MODULE_ABI.md) "Root module
+surface"):
 
-pub fn probe_videotoolbox_hw() -> Result<VtHwCapabilities, StreamError> {
-    // 1. VTCopyVideoEncoderList → enumerate available encoders
+```rust
+// crate: featherdesk-addon-vt_hw   (cfg(target_os = "macos"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
+```
+
+```rust
+/// The root module's `probe`. A missing prerequisite is NOT an error — it is
+/// `ROk(ProbeReport { available: false, reason, .. })`. `RErr` means the probe
+/// itself broke.
+fn probe(&self) -> RResult<ProbeReport, AbiError> {
+    // 1. VTCopyVideoEncoderList → enumerate the available encoders
     // 2. Look for "*.gva" suffix entries (= hardware-accelerated)
-    // 3. Per codec: H.264, HEVC
-    // 4. Return supported codecs + max resolution
+    // 3. h264.gva present → codecs.push(CodecId::H264)
+    //    hevc.gva present → codecs.push(CodecId::Hevc)  (this is what makes HDR
+    //                                                    available at all)
+    // 4. No .gva entry → ROk(ProbeReport { available: false,
+    //      reason: "no hardware video encoder in VTCopyVideoEncoderList".into(),
+    //      codecs: RVec::new(), caps: AddonCaps(0), displays: RVec::new() })
+    // 5. Otherwise → ROk(ProbeReport {
+    //      available: true, reason: RString::new(), codecs,
+    //      caps: AddonCaps(AddonCaps::ENC_CONFIGURABLE), // bitrate/QP/fps/GOP are
+    //                                                    // VTSessionSetProperty calls
+    //      displays: RVec::new() })
 }
 ```
 
+**Availability is not an error.** A Mac whose VideoToolbox lists no `.gva`
+encoder is `ROk(ProbeReport { available: false, reason })`, never an `RErr`.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` here
+means every parameter change tears the session down and rebuilds it, silently.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); the constructed object's
+`caps()` is authoritative and may be a strict subset of this one.
+
 Pipeline probes (macOS, this add-on loaded):
 ```
-VT HW supports HEVC? → pick HEVC (announce hvc1.1.6.L93.B0 in Config)
-VT HW supports H.264? → pick H.264 (announce avc1.42E01F)
-Neither?              → fall through to VT SW or OpenH264 add-on
+VT HW available? → vt_hw; codec = H.264 unless Params.hdr, then HEVC Main10
+Neither?         → fall through to the SW order (openh264 → vt_sw)
 ```
+
+`hevc.gva`'s presence decides whether an HDR session can be entered at all — it
+never decides the codec for an SDR one.
 
 ---
 
@@ -221,8 +287,10 @@ Skip when:
 
 ## Status
 
-📋 Specced — not yet implemented. The current featherdesk codebase has no macOS
-target. This add-on becomes the macOS HW path during the platform port.
+📋 Specced — not yet implemented, and measured only on a Hackintosh whose raw
+data lives outside this repository (see "Performance Targets"). The current
+featherdesk codebase has no macOS target; this add-on becomes the macOS HW path
+during the platform port.
 
 ---
 
@@ -231,10 +299,21 @@ target. This add-on becomes the macOS HW path during the platform port.
 This add-on reads its tuning knobs from the `[addon_module_vt_hw]` section
 of the TOML config (see [`specs/core/MODULE_CONFIG.md`](../../../../core/MODULE_CONFIG.md)).
 
+```toml
+[addon_module_vt_hw]
+realtime               = true            # kVTCompressionPropertyKey_RealTime
+profile                = "h264_high"     # the ceiling; the session profile is
+                                         # H264High for SDR and HevcMain10 for HDR
+                                         # (MODULE_ENCODE "Profile")
+allow_frame_reordering = false           # false = lower latency (no B-frames)
+```
+
+The parser treats `vt_hw` and `vt_sw` as schema-aliases — the two sections
+declare the same keys.
+
 If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
-
 
 
 ---
@@ -250,7 +329,9 @@ This add-on implements the `ConfigurableHardwareEncoder` trait (see [`../../../.
 | `qp` | `kVTCompressionPropertyKey_Quality` via `VTSessionSetProperty` | yes |
 | `keyframe_interval` | `kVTCompressionPropertyKey_MaxKeyFrameInterval` via `VTSessionSetProperty` | yes |
 | `width`, `height` | `VTCompressionSessionInvalidate` + recreate session (returns `StreamError::RequiresRestart`) | no |
-| `bit_depth=10` / `hdr=true` | `kVTProfileLevel_HEVC_Main10_AutoLevel` -- requires HEVC codec + session recreation (returns `StreamError::RequiresRestart`) | no |
+| Colour | `kVTCompressionPropertyKey_ColorPrimaries` / `_TransferFunction` / `_YCbCrMatrix` — `ITU_R_709_2` throughout for SDR, `ITU_R_2020` + `SMPTE_ST_2084_PQ` + `ITU_R_2020` for HDR, always limited range. VideoToolbox converts RGB→YUV inside the encoder, so this is the only place the matrix is chosen; a session that cannot be made to emit BT.709 returns `StreamError::Backend` at construction rather than shipping a mislabelled stream (see MODULE_ENCODE "Colour signalling") | set at session creation |
+| `bit_depth=10` / `hdr=true` | `kVTProfileLevel_HEVC_Main10_AutoLevel` -- requires the HEVC codec + session recreation (returns `StreamError::RequiresRestart`), and is available only where `hevc.gva` is in `VTCopyVideoEncoderList`. `codec()` then reports `hvc1.2.4.L<level>.B0` | no |
 | `network_rtt_ms`, `packet_loss_pct` | Used to adjust `kVTCompressionPropertyKey_AverageBitRate` headroom | yes |
+| Rotation | Never applied: `sck` composites display rotation and always reports `Rotation::R0`, so every `FbInfo` handed to `encode_surface` is already upright | n/a (never rotated) |
 
 **macOS 26 note:** Use C function pointer `outputCallback` at `VTCompressionSessionCreate` -- per-frame closure is broken on macOS 26.

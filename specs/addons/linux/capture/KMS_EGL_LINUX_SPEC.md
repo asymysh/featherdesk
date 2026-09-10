@@ -99,13 +99,22 @@ bindgen::Builder::default()
         #include <gbm.h>
         #include <EGL/egl.h>
         #include <EGL/eglext.h>
-        #include <GLES2/gl2.h>
-        #include <GLES2/gl2ext.h>
+        #include <GL/gl.h>
+        #include <GL/glext.h>
         #include <unistd.h>
         #include <fcntl.h>
         #include <drm/drm_fourcc.h>")
     .generate().unwrap();
 ```
+
+**Desktop OpenGL, not GLES2.** The readback path binds `EGL_OPENGL_API` and asks
+for an `EGL_OPENGL_BIT` config. GLES2 is not an option here: a `GL_TEXTURE_2D`
+backed by an EGLImage imported from a scanout DMA-BUF is not
+framebuffer-attachable under GLES2 on Mesa/i915 — `glCheckFramebufferStatus`
+returns `GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT` (`0x8CD6`) — so there is no way to
+blit it into a linear renderbuffer, and `glReadPixels` has nothing to read from.
+Desktop GL accepts the attachment. That is why `pkg-config` probes `gl` rather
+than `glesv2` and why the wrapper includes `<GL/gl.h>`.
 
 ---
 
@@ -119,13 +128,19 @@ drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 drmModePlaneRes *planes = drmModeGetPlaneResources(drm_fd);
 // Find primary plane with active fb_id, get CRTC dimensions
 // ... iterate planes, pick primary
+// Read the plane's "rotation" property while walking it: DRM_MODE_ROTATE_0 /
+// _90 / _180 / _270 map to capture::Rotation::{R0,R90,R180,R270}, which every
+// Frame and FbInfo carries. The add-on REPORTS the rotation; it never rotates
+// (MODULE_CAPTURE "Display rotation").
 
-// 2. Create GBM device + EGL context (surfaceless)
+// 2. Create GBM device + EGL context (surfaceless, DESKTOP GL — not GLES2)
 struct gbm_device *gbm = gbm_create_device(drm_fd);
 EGLDisplay egl_dpy = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbm, NULL);
 eglInitialize(egl_dpy, NULL, NULL);
+eglBindAPI(EGL_OPENGL_API);                 // NOT EGL_OPENGL_ES_API
 
 EGLConfig egl_cfg;
+// config_attribs carries EGL_RENDERABLE_TYPE = EGL_OPENGL_BIT
 eglChooseConfig(egl_dpy, config_attribs, &egl_cfg, 1, &num_cfgs);
 EGLContext egl_ctx = eglCreateContext(egl_dpy, egl_cfg, EGL_NO_CONTEXT, ctx_attribs);
 eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_ctx);
@@ -136,8 +151,9 @@ int dmabuf_fd;
 drmPrimeHandleToFD(drm_fd, fb2->handles[0], DRM_CLOEXEC, &dmabuf_fd);
 
 // 4. Path A: Zero-copy direct to HW encoder
-// Pass dmabuf_fd to libva / NVENC / AMF — no GPU→CPU copy
-return EncodedFrame{ DMAFD: dmabuf_fd, Width: w, Height: h, ... };
+// Hand the fd to libva / NVENC / AMF as SurfaceHandle::DmaBuf — no GPU→CPU copy
+return FbInfo{ width: w, height: h, rotation, timestamp_ns,
+               handle: DmaBuf{ fd: dmabuf_fd, stride, fourcc, modifier } };
 
 // 4. Path B: CPU readback for SW encoder
 EGLImageKHR egl_image = eglCreateImageKHR(egl_dpy, EGL_NO_CONTEXT,
@@ -147,69 +163,207 @@ glGenTextures(1, &tex);
 glBindTexture(GL_TEXTURE_2D, tex);
 glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, egl_image);
 
-// Blit to linear renderbuffer + glReadPixels
-glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-// ~50ms at 2560×1440 — only use when no HW encoder is available
+// Blit to a linear renderbuffer, then read it back through the PBO ring below.
+// The attachment is the step that fails under GLES2 — see "CPU readback".
+glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
 ```
 
 ---
 
 ## Two Output Paths
 
-The capturer implements both `Capturer` traits from `capture`:
+The capturer serves both frame paths from `capture` (`CursorCapturer` is the
+third, orthogonal trait — see "Cursor Handling"):
 
 | Trait | Method | Output | Use case |
 |-----------|--------|--------|----------|
-| `Capturer` (CPU readback) | `next_frame()` | RGBA `Vec<u8>` | Pair with SW encoder (OpenH264) |
-| `SurfaceCapturer` (zero-copy) | `next_surface()` | `FbInfo { dma_fd, w, h, stride, format, modifier, timestamp }` | Pair with HW encoder (libva, NVENC, Vulkan) |
+| `Capturer` (CPU readback) | `next_frame()` | `Frame` — RGBA, owned `RVec<u8>`, with `stride`, `rotation` and `timestamp_ns` | Pair with SW encoder (OpenH264) |
+| `SurfaceCapturer` (zero-copy) | `next_surface()` | `FbInfo { width, height, rotation, timestamp_ns, handle: DmaBuf { fd, stride, fourcc, modifier } }` | Pair with HW encoder (libva, NVENC, Vulkan) |
 
 The pipeline picks the right method based on what encoder add-on is paired.
+`AddonCaps::SURFACE` is what tells it the zero-copy method is served at all.
+
+### CPU readback (PBO double-buffer, mandatory)
+
+A bare `glReadPixels` into client memory stalls the CPU until the GPU has
+finished the copy — the 25 ms / 50 ms figures below are that stall. The add-on
+therefore uses a **ring of two pixel-buffer objects**:
+
+```c
+// Once, at construction:
+GLuint pbo[2]; glGenBuffers(2, pbo);
+for (int i = 0; i < 2; i++) {
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[i]);
+    glBufferData(GL_PIXEL_PACK_BUFFER, stride * height, NULL, GL_STREAM_READ);
+}
+size_t n = 0;              // frame counter
+bool   primed = false;     // no previous frame to map on the very first call
+
+// Per frame, in next_frame():
+glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[n % 2]);
+glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, NULL); // ASYNC: returns now
+if (!primed) { n++; primed = true; return Ok(None); }               // ONE-frame warmup
+glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[(n + 1) % 2]);               // the PREVIOUS frame
+void *p = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, stride * height, GL_MAP_READ_BIT);
+// copy p into the owned RVec<u8>, then:
+glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+n++;
+```
+
+Consequences:
+
+- The delivered frame is **one frame interval old**. `Frame.timestamp_ns` is
+  stamped when the `glReadPixels` for *that* frame was issued, not when it is
+  mapped, so the timestamp stays truthful and A/V sync stays correct.
+- The very first `next_frame()` after construction (and after any reconfigure)
+  returns `Ok(None)` to prime the ring: there is genuinely no completed readback
+  to hand over yet, which is what `Ok(None)` means. It is **not** a slow-readback
+  signal — a readback that cannot keep up is settled by the pipeline's
+  sustainable-rate control, never by this add-on reporting an idle screen
+  (MODULE_CAPTURE `next_frame`). One dropped frame at startup.
+- The stall is gone: the map hits a buffer the GPU finished a full interval ago.
 
 ---
 
 ## Performance Targets
 
 | Path | 1080p p50 | 1440p p50 | Notes |
-|------|----------|----------|-------|
-| **DMA-BUF zero-copy** | **~0.5ms** | **~0.5ms** | Just acquires the fd — actual cost paid by encoder |
-| CPU readback (glReadPixels) | ~25ms | ~50ms | Used only when paired with SW encoder |
+|------|----------:|----------:|-------|
+| **DMA-BUF zero-copy** | **~0.5 ms** | **~0.5 ms** | Just acquires the fd — actual cost paid by the encoder |
+| CPU readback, PBO double-buffered | ~6 ms | ~11 ms | The default SW-path cost. One frame of added latency; the DMA overlaps the next frame |
+| CPU readback, synchronous `glReadPixels` (rejected) | ~25 ms | ~50 ms | The measured stall the PBO ring exists to remove — recorded so the number is not re-derived as a target |
 
 Measured (Intel HD 630, original featherdesk integration tests):
-- EGL context init: 170ms (one-time)
-- DRM card discovery: 5ms (one-time)
-- DMA-BUF fd export per frame: ~0.5ms
-- glReadPixels 1440p BGRA: 50ms per frame
-
-The DMA-BUF path is the entire point — pair this capture add-on with a HW
-encoder add-on to skip the 50ms readback entirely.
+- EGL context init: 170 ms (one-time)
+- DRM card discovery: 5 ms (one-time)
+- DMA-BUF fd export per frame: ~0.5 ms
+- Synchronous `glReadPixels` 1440p BGRA: 50 ms per frame — the reason the
+  readback path is PBO double-buffered and the reason the DMA-BUF path is the
+  whole point of this add-on.
 
 ---
 
 ## Cursor Handling
 
-The cursor is on a separate DRM plane (cursor plane, ~64×64 RGBA with alpha).
-The capturer reads it via a parallel EGL context and the pipeline composites
-client-side via the `FrameTypeCursorUpdate` protocol frame — keeps the cursor
-out of the main framebuffer for the zero-copy path.
+The cursor is on its own DRM plane (commonly 64x64 RGBA with alpha, up to the
+plane's advertised size), which the compositor programs directly — under X11 and under Wayland alike. Reading it needs nothing
+this add-on does not already have: the same `CAP_SYS_ADMIN`/root the probe
+already requires for `drmModeGetFB2` on the primary plane.
 
-See `MODULE_HARDWARE_ENCODE.md` "Cursor Handling in Hardware Path" for the
-client-side cursor compositing approach.
+**Capabilities declared at probe.** A plane of type `DRM_PLANE_TYPE_CURSOR` on the
+selected CRTC → `AddonCaps::CURSOR | AddonCaps::EMBED_CURSOR`. No cursor plane →
+`AddonCaps::EMBED_CURSOR | AddonCaps::EMBED_CURSOR_SURF` and **not** `CURSOR`: the
+compositor is drawing a software cursor into the primary plane, so the frames
+already contain it and embedding is a no-op.
+
+**`capture::CursorCapturer` (`embed_cursor = false`).**
+
+```rust
+fn next_cursor(&mut self) -> Result<Option<capture::CursorState>, StreamError>;
+```
+
+- Position, every poll, no readback: `drmModeGetPlane(card_fd, cursor_plane_id)`
+  → `crtc_x` / `crtc_y`. These are the bitmap's top-left corner on the CRTC, so
+  the add-on adds the current shape's hotspot back before returning `x`/`y` —
+  every add-on reports the hotspot (MODULE_CAPTURE "Cursor coordinate space").
+- Visibility: `plane->fb_id == 0` → `visible = false` with the last position.
+- Shape, only when `fb_id` changes: `drmModeGetFB2` → `drmPrimeHandleToFD` →
+  EGL import → `glReadPixels` into a buffer of the plane's **advertised** size —
+  `drmModeGetFB2`'s `width`/`height`, commonly 64x64 and up to 256x256 on AMD and
+  Intel CRTCs, never a hardcoded 64x64 — then the ARGB8888
+  premultiplied → straight-RGBA conversion from MODULE_CAPTURE "Cursor pixel
+  format". The previous PRIME fd is closed on the swap; the last one is closed on
+  Drop. A `fb_id` that has not changed returns `shape: None` and costs one ioctl.
+  The bitmap is returned at the OS's native size; the 128-pixel wire cap is
+  applied by the host's cursor publisher.
+- Hotspot: from the plane's `HOTSPOT_X`/`HOTSPOT_Y` properties when the driver
+  exposes them, else `(0, 0)` — the plane position already accounts for the
+  hotspot in that case, so the two are consistent.
+
+**First call.** MODULE_CAPTURE's `next_cursor` contract requires the first call
+after construction to return `Ok(Some(..))` carrying the current position, the
+current visibility **and** the current bitmap (`shape: Some(..)`), even though
+nothing has changed — the host has no other way to seed a joining client. The
+"only when `fb_id` changes" rule above applies from the second call on.
+
+**`embed_cursor = true`.** `next_frame` calls `capture::blend_cursor` on the
+readback buffer at `(crtc_x, crtc_y)` before returning the `Frame`. There is no
+surface-path equivalent — the exported DMA-BUF is the compositor's, so
+`EMBED_CURSOR_SURF` is not declared when a cursor plane is in use, and a session
+that resolves `"embedded"` on this add-on is paired with the software encode path.
+
+**Failure behavior.** A failed plane query, PRIME export, EGL import or readback
+returns `Err(StreamError::Backend(..))` from `next_cursor` and never from
+`next_frame`: a dead cursor query must not take video down. The pipeline's
+`on_cursor_error` handles it (MODULE_PIPELINE). A plane that disappears
+mid-session is `visible = false`, not an error.
 
 ---
 
 ## Probe & Selection
 
-```rust
-// crate: featherdesk-addon-kms_egl  (cfg(target_os = "linux"))
+There is one probe signature, and it is the root module's
+([`specs/core/MODULE_ABI.md`](../../../core/MODULE_ABI.md) "Root module surface"):
 
-fn probe_kms_egl() -> Result<KmsEglCapabilities, String> {
-    // 1. Check CAP_SYS_ADMIN / root via geteuid + check effective caps
+```rust
+// crate: featherdesk-addon-kms_egl   (cfg(target_os = "linux"))
+
+// Layer 1 — what the host actually calls:
+fn probe(&self) -> RResult<ProbeReport, AbiError>;
+
+// Layer 2 — the adapter shape the host wraps it in (MODULE_PIPELINE):
+fn probe(&self) -> Result<ProbeResult, PipelineError>;
+```
+
+```rust
+/// The root module's `probe`. A missing prerequisite is NOT an error — it is
+/// `ROk(ProbeReport { available: false, reason, .. })`. `RErr` means the probe
+/// itself broke.
+fn probe(&self) -> RResult<ProbeReport, AbiError> {
+    // 1. Check CAP_SYS_ADMIN / root via geteuid + effective capability set
     // 2. Enumerate /dev/dri/card* devices
-    // 3. For each: open, set UNIVERSAL_PLANES, find primary plane with fb_id
-    // 4. Get CRTC dimensions + refresh rate
-    // 5. Return per-display dimensions or Err("no usable DRM card")
+    // 3. For each: open, set UNIVERSAL_PLANES, find the primary plane with fb_id
+    // 4. Read CRTC dimensions + refresh rate into a DisplayInfo per output:
+    //      id           = the DRM connector id (the value [addon_module_kms_egl]
+    //                     output_index selects among, in enumeration order)
+    //      width/height = the CRTC mode in PIXELS, as scanned out (NOT upright)
+    //      rotation     = the DRM plane's "rotation" property mapped to
+    //                     abi::Rotation; the host transposes for R90/R270
+    //      refresh_mhz  = the mode's vertical refresh in milliHertz
+    //      scale_num/den = 1/1 — DRM scanout is in physical pixels
+    // 5. No usable card → ROk(ProbeReport { available: false,
+    //      reason: "no usable DRM card (need CAP_SYS_ADMIN and a card with a
+    //               primary plane)".into(), codecs: RVec::new(),
+    //      caps: AddonCaps(0), displays: RVec::new() })
+    // 6. Otherwise → ROk(ProbeReport {
+    //      available: true, reason: RString::new(), codecs: RVec::new(),
+    //      caps: AddonCaps(AddonCaps::SURFACE           // DMA-BUF export works
+    //                    | AddonCaps::CURSOR            // ONLY if the cursor plane is readable
+    //                    | AddonCaps::EMBED_CURSOR      // capture::blend_cursor on the CPU readback
+    //                    | AddonCaps::EMBED_CURSOR_SURF // ONLY when no cursor plane exists —
+    //                                                   //   the compositor already composited
+    //                    | AddonCaps::CONFIGURABLE),    // ONLY if a mode change needs no re-create
+    //      // see "Cursor Handling" for which combination applies
+    //      displays })
 }
 ```
+
+**Availability is not an error.** A missing driver, a denied permission or an
+absent device is `ROk(ProbeReport { available: false, reason })`. `RErr` is
+reserved for the probe itself failing.
+
+**Set every capability bit this add-on actually serves.** `caps` left at `0` means
+no zero-copy path, no separate cursor and no hot parameter change — silently, with
+no error and no warning.
+
+**Only claim what this call can prove.** A bit claimed here and refused later is a
+capability lie (MODULE_ABI "Misbehaving add-ons"); a capability that only
+`construct()` can settle is reported by the constructed object's `caps()`, which
+is authoritative and may be a strict subset of this one.
+
+The cursor bits follow "Cursor Handling": a `DRM_PLANE_TYPE_CURSOR` plane on the
+selected CRTC yields `CURSOR | EMBED_CURSOR`; its absence yields
+`EMBED_CURSOR | EMBED_CURSOR_SURF` without `CURSOR`.
 
 Pipeline probes capture (Linux, this add-on loaded):
 ```
@@ -226,19 +380,18 @@ None?                                 → fatal: no capture add-on configured
 addons/capture/kms_egl/
 ├── kms.rs                      // KmsCapturer struct, KmsCapturer::new
 ├── drm.rs                      // DRM card discovery, plane enumeration
-├── egl.rs                      // EGL context, DMA-BUF import, glReadPixels
+├── egl.rs                      // EGL context (desktop GL), DMA-BUF import, PBO readback
 ├── ffi.rs                      // Rust FFI bindings (built into the add-on cdylib)
-├── cursor.rs                   // Cursor plane capture
-├── probe.rs                    // probe_kms_egl()
+├── cursor.rs                   // DRM cursor plane: next_cursor + blend_cursor
+├── probe.rs                    // the root module's probe() -> ProbeReport
 ├── tests/drm.rs                // integration test (cfg(feature = "integration"))
 ├── tests/egl.rs                // integration test (cfg(feature = "integration"))
 └── tests/kms.rs                // integration test (cfg(feature = "integration"))
 ```
 
-Already exists in working form (Go) on the `feature-libav-vp8s8` branch
-(`internal/capture/{drm,egl,kms,cursor}.go`) — the Rust rewrite lands it as the
-`kms_egl` add-on cdylib without changing the
-underlying code.
+A Go prototype exists on the `feature-libav-vp8s8` branch
+(`internal/capture/{drm,egl,kms,cursor}.go`). It is not the path that branch runs
+(see "Status"), so the Rust add-on lands the design, not a mechanical port.
 
 ---
 
@@ -246,9 +399,16 @@ underlying code.
 
 | ID | Issue | Severity |
 |----|-------|---------|
-| TD-01 | DMA-BUF fd leak on EGL import failure | High — fd exhaustion over time |
-| TD-03 | Static C globals in EGL state prevent thread safety | High — silent corruption with concurrent access |
+| TD-03 | Four file-scope C statics in the EGL readback path allow only one context per process | Medium — latent while a single pinned capture thread is the only caller; fatal on the first concurrent second context |
 | TD-13 | `fps` parameter accepted but never used (no frame pacing) | Medium — orchestrator handles pacing externally |
+
+Beyond the recorded TD rows, the blocker that stopped the Go prototype is open
+work in its own right: an XR30 (10-bit XRGB) scanout framebuffer with a Y-tiled
+modifier imports through EGL but is not framebuffer-attachable, so the readback
+returns zeros (see "Status"). Making tiled and 10-bit scanout formats work — by
+negotiating a linear/8-bit import where the driver allows one, and by falling
+back to `ROk(ProbeReport { available: false, reason })` where it does not — is in
+scope for this add-on, not something the port inherits solved.
 
 See main `MODULE_CAPTURE.md` for the full refactor plan.
 
@@ -271,10 +431,16 @@ Skip when:
 
 ## Status
 
-✅ **Working** — implemented today (Go) as `internal/capture/{drm,egl,kms,cursor}.go`
-on the `feature-libav-vp8s8` branch, verified on Intel HD 630 at 2560×1440 with
-measured performance numbers. The Rust rewrite lands it as `addons/capture/kms_egl/`,
-built as the `kms_egl` add-on cdylib, keeping the same capture logic.
+📋 **Specced; prototyped in Go and then abandoned.** `internal/capture/{drm,egl,kms,cursor}.go`
+on `feature-libav-vp8s8` is a working-shaped implementation, but it is not the
+capture path that runs: commit `deb99d1` switched `cmd/server/main.go` from
+`NewKMSCapturer` to `NewX11Capturer`, and `NewKMSCapturer` now has no non-test
+caller. The recorded root cause is that on Intel HD 630 under GNOME Wayland the
+scanout framebuffer is XR30 (10-bit XRGB) with a Y-tiled modifier: the EGL import
+succeeds, but a `GL_TEXTURE_2D` backed by the resulting EGLImage is not
+framebuffer-attachable (`GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT`, `0x8CD6`) and
+readback returns zeros. Landing this add-on therefore means solving tiled and
+10-bit scanout formats, not porting already-working code — see "Known Issues".
 
 ---
 
@@ -287,13 +453,16 @@ If the section is absent, the add-on uses its built-in defaults. The section is
 strictly validated only when this add-on is loaded; unknown
 keys in this section will cause startup to fail.
 
+The keys, their defaults and their domains are in MODULE_CONFIG "Schema", under
+`[addon_module_kms_egl]`; this spec does not restate them.
+
 
 
 ---
 
 ## Stream Params Translation
 
-This add-on implements `stream::ConfigurableCapturer` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). KMS+EGL captures at native display resolution; the pipeline handles scaling.
+This add-on implements `capture::ConfigurableCapturer` — and therefore sets `AddonCaps::CONFIGURABLE` at probe — only where the driver accepts a mode change without a fresh `drmModeAddFB2` (see [`specs/core/MODULE_STREAM_PARAMS.md`](../../../core/MODULE_STREAM_PARAMS.md)). Where it does not, the bit stays clear and the pipeline tears the capturer down and rebuilds it. KMS+EGL captures at native display resolution; the pipeline handles scaling.
 
 | Param change | Mechanism | Hot? |
 |--------------|-----------|------|
