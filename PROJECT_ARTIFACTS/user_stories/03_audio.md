@@ -145,3 +145,21 @@ plus one regression-guard story informed by
 
 **Validated by:** specs/media/MODULE_AUDIO.md — "Browser Playback" (step 4, AudioWorklet ring buffer)
 **Regression guard:** PROJECT_ARTIFACTS/summaries/pipewire_audio_capture/phase3.md — T7 documents a shipped bug where the `PCMProcessor` discarded ~83% of samples per callback; it was fixed by switching to a continuous ring buffer, but no regression test currently guards against a recurrence.
+
+---
+
+## US-AUD-10: The client microphone reaches host applications as a real input device
+
+**As a** controller
+**I want** my microphone to appear on the remote host as a normal input device
+**So that** I can talk in a call, dictate, or use voice input in an application running on the host
+
+**Acceptance Criteria:**
+- Given `[audio] mic_enabled = true` and a virtual-mic add-on is loaded, When I grant the browser microphone permission and speak, Then my audio is encoded in the session's codec, sent as an `AUDIO_MIC` datagram (frame type 9, the only client→server datagram in v1), decoded on the host, and is readable at the host's virtual input device at the same frequency with no channel swap.
+- Given a session whose effective role is `view` or `player`, When it sends an `AUDIO_MIC` datagram, Then the server drops it and increments `featherdesk_role_rejects_total{op="mic"}`, and the session is not closed — a viewer must never be able to speak into the host.
+- Given `mic_enabled = true` on a host with no `AudioSink` add-on loaded (including every macOS host in v1), When the server starts, Then it logs a warning, the mic stays off, and host→client audio and the rest of the session are unaffected.
+- Given the mic is streaming, When `decode()` fails on one packet or `write_chunk()` returns `Unrecoverable`, Then only that packet is dropped (or the sink is poisoned) and the video and audio session keeps running.
+- Given no session holds the controller slot, When the host's virtual device is read, Then it yields silence rather than a repeat of the last controller's buffer.
+- Given FeatherDesk created the virtual device, When the server shuts down cleanly or is killed, Then no `FeatherDesk Mic` device is left behind on the host.
+
+**Validated by:** specs/media/MODULE_AUDIO.md — "Microphone (client→host)"

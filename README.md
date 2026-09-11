@@ -1,6 +1,6 @@
 # FeatherDesk
 
-Low-latency remote desktop streaming. Single binary, embedded web client, sub-20 ms motion-to-photon on LAN.
+Low-latency remote desktop streaming. Single binary, embedded web client. **~45 ms motion-to-photon on LAN with sound** (the default), **sub-20 ms with audio off** — audio-master A/V sync slaves the video clock to the audio clock, which is what the extra latency buys.
 
 > **Branch status (`featherdesk-refactor`):** spec-first architectural redesign.
 > All module contracts are written and audited; implementation hasn't started in
@@ -14,6 +14,7 @@ Low-latency remote desktop streaming. Single binary, embedded web client, sub-20
 - Encodes with hardware acceleration where available (NVENC, AMF, VAAPI, QSV, MediaFoundation, VideoToolbox) or in-process software (OpenH264); an opt-in `x264` add-on trades an external ffmpeg dependency for more speed on CPU-bound hosts
 - Streams to a browser client over HTTP/3 + WebTransport, with a supported WebSocket carrier on the same port for UDP-blocked networks, older Safari, and any HTTP-proxying tunnel
 - Injects input (keyboard, mouse, touch, gamepad) into the host via per-OS injectors (Interception, uinput, CGEventPost, ViGEmBus, GCVirtualController)
+- **Ships with sound.** Host→client system audio (Opus, stereo / 5.1 / 7.1) on all three platforms, on by default, with audio-master A/V sync so playback never drifts. Client→host **microphone** on Linux and Windows (macOS gated on a signed CoreAudio plug-in)
 - Adds bidirectional clipboard sync + drag-and-drop file transfer
 - **Requires the client to be able to reach the host.** v1 does no NAT traversal and runs no relay: the host listens on one address as both TCP and UDP, and the user supplies reachability — same LAN, a forwarded port, an overlay/VPN, or a tunnel. Two recommended non-LAN paths, differing in the carrier they yield: an **overlay that forwards UDP** (WireGuard, Tailscale) keeps the fast WebTransport carrier; an **HTTP-proxying tunnel** (Cloudflare Tunnel) yields the WebSocket carrier only. Hosts behind CGNAT or a corporate firewall with no inbound path and no overlay are not reachable in v1. P2P/NAT traversal is a v2 item ([`./specs/v2/MODULE_NETWORK.md`](./specs/v2/MODULE_NETWORK.md))
 

@@ -129,7 +129,71 @@ framebuffer worth encoding.
 
 ---
 
-## Audio — One Per Platform (host→client only; 🔒 design locked, ⏸️ impl deferred)
+## Virtual display provisioning — FeatherDesk supplies a display when none exists
+
+**Decision (closes GAP_TRIAGE OQ-08's product half): if the host has no usable
+display, FeatherDesk provisions one rather than failing.** "Plug a monitor in,
+or go configure a compositor" is not an answer a remote-desktop product can give
+— the machine you most want to reach remotely is the one with nothing attached.
+
+This is a **fallback, not a mode.** Provisioning happens only when display
+discovery finds nothing usable, and a host with a real display is untouched.
+
+| Platform | Mechanism | Already existed? | Privilege |
+|---|---|---|---|
+| **Windows** | IddCx indirect-display driver, auto-installed | **yes** — `dxgi_dd` already does this | admin, one-time install |
+| **Linux** | Spawn a **headless Wayland compositor** (default: `sway --config <generated>` with `WLR_BACKEND=headless`, `WLR_HEADLESS_OUTPUTS=1`) and capture it with `wl_screencopy` | no — new | **none** |
+| **macOS** | Virtual display driver | no — not in v1, see below | admin |
+
+### Why the Linux answer is a compositor, not a kernel display
+
+The instinct is to force a CRTC (`video=HDMI-A-1:1920x1080e`) or load `vkms` so
+that `kms_egl`, the default capturer, keeps working. Both were rejected:
+forcing a connector needs root **and a reboot** — it cannot be done in response
+to discovering a headless host — and `vkms` exports no accelerated,
+DMA-BUF-capable framebuffer.
+
+Spawning a headless wlroots compositor needs neither root nor a reboot, and it
+lands on a capture path that already exists: `wl_screencopy` was added in the
+same pass for exactly this shape of deployment. The provisioned display is
+therefore captured by a **specced, no-root add-on**, not by a special case
+bolted onto `kms_egl`.
+
+### Rules
+
+1. **Last resort in the probe order.** Provisioning runs only after every
+   capture add-on has probed `available: false` for want of a display. A host
+   where `kms_egl` works never spawns anything.
+2. **FeatherDesk owns the child process.** The compositor is spawned into the
+   host's own process group, its lifetime is bound to FeatherDesk's, and it is
+   terminated on shutdown — including on panic, via the same drop path as the
+   rest of the pipeline. A compositor outliving the server is the failure mode
+   to avoid, and it is the main cost of this decision: the host binary now
+   manages a child process, which it did not before.
+3. **Opt-out, not opt-in.** `[capture] provision_display = "auto"` (default)
+   provisions when nothing else works; `"never"` restores the old behaviour of
+   a clean fatal "no capture"; `"force"` provisions even when a real display
+   exists, which is how you get a headless session on a machine someone is
+   sitting at.
+4. **The geometry is config, not discovery.** There is no display to ask, so
+   `[capture] provision_size` (default `"1920x1080@60"`) names it. The client
+   can then resize the encoder output freely within it (MODULE_STREAM_PARAMS
+   "Constraints").
+5. **Announced, never silent.** Provisioning logs once at `info` naming the
+   mechanism and the geometry, and sets
+   `featherdesk_display_provisioned` to 1. An operator must never have to guess
+   why a desktop appeared.
+
+### macOS is not in v1
+
+macOS needs a virtual display driver — a system extension with the same
+signing-and-notarization burden as the mic plug-in, and the same reason for
+deferral. On a headless Mac, capture probes `available: false` with reason
+`no_display` and startup fails cleanly, exactly as today.
+
+---
+
+## Audio — One Per Platform (host→client; 🔒 design locked, ✅ in v1)
 
 Same pluggable, zero-by-default pattern as capture/input — a per-OS **capture**
 add-on shared library normalizes the OS device format to the canonical 48 kHz /
@@ -181,7 +245,7 @@ The protocol itself:
 - 22-byte media `FrameHeader` (Version, Type, Sequence, Timestamp, W, H, PayloadSize) — media channels only (datagram fragment 0 + bootstrap stream)
 - `config` JSON message on the **control stream** as handshake — carries codec string, dims, cursorMode (the binary type-6 Config frame is retired)
 - `FrameTypeVideoH264` (type 1) for video, `FrameTypeVideoHEVC` (type 7) for an HDR session — slot 5 reserved (formerly VP8, rejected)
-- `FrameTypeAudioOpus` (type 8, default) / `FrameTypeAudioPCM` (type 4) for audio — host→client, stereo / 5.1 / 7.1 (impl deferred)
+- `FrameTypeAudioOpus` (type 8, default) / `FrameTypeAudioPCM` (type 4) for audio — host→client, stereo / 5.1 / 7.1. `FrameTypeAudioMic` (type 9) is the client→host mic direction (Linux + Windows in v1)
 - **Binary** `[u16 RecLen]`-prefixed input records on the **input stream** (C→S); JSON on the **control stream** for keyframe/resize/etc. — input is NOT JSON
 
 The codec in the `config` message is the **full WebCodecs codec string**, and its
@@ -214,7 +278,8 @@ client). See [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md).
 | HW encode | 📋 libva/NVENC/AMF specced | 📋 NVENC/AMF/MF specced · 📈 measured · QSV 📋 specced only (no Intel silicon on the bench machine) | 📋 VideoToolbox specced · ❌ no artifact in this repo (Hackintosh only, off-repo) |
 | SW encode (BSD) | ✅ OpenH264 runs today · 📈 measured on Windows (7.9 ms p50 @ 1080p, 4 threads) | 📋 OpenH264 specced · 📈 measured | 📋 OpenH264 specced |
 | SW encode (GPL, opt-in) | 📋 x264 subprocess specced · 📈 measured on Windows (4.3 ms p50 @ 1080p, ultrafast, 4 threads) | 📋 x264 specced · 📈 measured | 📋 x264 specced |
-| Audio | ⏸️ design locked, impl deferred | ⏸️ design locked, impl deferred | ⏸️ design locked, impl deferred |
+| Audio (host→client) | ✅ `pipewire` | ✅ `wasapi` | ✅ `sck_audio` |
+| Mic (client→host) | ✅ `pw_vmic` | ✅ `win_vmic` | ⏸️ specced, gated on a signed CoreAudio plug-in |
 | Input | 📋 `enigo` default specced · ✅ uinput runs today · 📋 uinput add-on specced | 📋 `enigo` default specced · 📋 interception/win_touch/vigem specced | 📋 `enigo` default specced · 📋 gcvirtual specced |
 | Browser client | 📋 WebTransport + WebCodecs client specced · ❌ not built (the Go branch's client is WebSocket-based) | shared | shared |
 

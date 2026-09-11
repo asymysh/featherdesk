@@ -185,6 +185,18 @@ pub trait Server: Send + Sync {
     /// one `Notify::notify_one()`.
     fn set_session_count_callback(&self, f: Box<dyn Fn(u32) + Send + Sync>);
 
+    /// Fires for each `AUDIO_MIC` (type 9) datagram from the CONTROLLER, after
+    /// the role gate and the mic rate limit. The callback hands the packet to
+    /// the audio loop's mic half, which decodes it through the session codec
+    /// add-on and writes it to the `AudioSink` (MODULE_AUDIO "Microphone").
+    /// It never blocks and never fails the session: the callback returns `()`
+    /// and absorbs its own errors as counted drops.
+    ///
+    /// `None` when `[audio] mic_enabled = false` or no `AudioSink` add-on
+    /// loaded — the server then drops mic datagrams at the gate, exactly as it
+    /// does for a non-controller sender.
+    fn set_mic_callback(&self, f: Box<dyn Fn(&[u8]) + Send + Sync>);
+
     /// Fires for each BINARY input frame from the controller (or a co-op player's
     /// gamepad records). The callback (input::Dispatcher::dispatch) decodes +
     /// injects the event and returns its seq; the server hands that seq to the
@@ -850,8 +862,17 @@ carrier-independent.
     framing the session depends on.
     (Clipboard is NOT here — it rides the clipboard stream from step 17.)
 20. Datagram-in loop: `session.read_datagram()` blocks until the client sends one.
-    In v1 there are no C→S datagrams (reserved); any datagram received is
-    counted in a metric and dropped.
+    v1 has exactly **one** client→server datagram, `frame_type::AUDIO_MIC` (9):
+    - Dispatch on the frame type byte. `AUDIO_MIC` → the role gate (controller
+      only; otherwise drop + `featherdesk_role_rejects_total{op="mic"}`), then
+      the per-session mic token bucket, then the mic callback
+      (`set_mic_callback`), which hands the packet to the audio loop's mic half.
+    - **Every other type is counted and dropped**, as before. The default is
+      still "unknown C→S datagrams are not an error", so adding a second one
+      later does not have to change this loop's shape.
+    A mic packet is never allowed to fail the session: a decode error, a full
+    bucket, or a poisoned sink drops the packet and nothing else
+    (MODULE_AUDIO "Failure behaviour").
 21. Session close (either side, or context cancel):
     - Cancel all per-session tasks via session.cancelled() (CancellationToken).
     - If this session held the controller slot, CAS it back to empty and invoke the
@@ -1418,6 +1439,7 @@ key, both the role test and the key test must pass.
 | 15 | `{"type":"decode_unsupported"}` | control stream | `{View, Player, Control}` | each rung recorded **per session**, so one client is never offered the same rung twice; the rung ITSELF is unconditional and fires on the first report from ANY role — rung 1 downgrades chroma to `"420"` session-wide, re-sends `config` and forces a keyframe (the ladder is MODULE_PROTOCOL "Decode capability"; this row does not restate it) | `controlReader` | — |
 | 16 | `"takeover": true` in the auth message | control stream | requested role must be `Control` | `[auth] allow_takeover` **and** `identity.authenticated` | step 11 | ignored — the client is arbitrated to `View` as usual, and told so in `auth_ok` |
 | 17 | `GAMEPAD_RUMBLE` delivery | datagram / reliable fallback | the session that owns that slot index | `[gamepad] allow_rumble` | `send_gamepad_rumble` | no-op |
+| 21 | `AUDIO_MIC` datagram (type 9, C→S) | datagram / tagged fallback | `{Control}` | `[audio] mic_enabled` **and** an `AudioSink` add-on is loaded (i.e. `set_mic_callback(Some(_))`) | datagram-in loop, step 20 | drop the packet, `featherdesk_role_rejects_total{op="mic"}`++. Never a session close — a viewer sending mic is a client bug, not an attack worth disconnecting over |
 | 18 | Prometheus scrape | separate `[metrics]` port | — (unauthenticated by design) | bind must be loopback or the server warns at startup | metrics listener | — |
 | 19 | `POST /logout` | HTTPS | — | body must carry the exact session token being revoked | `logout()` | `401`, no information about whether the token existed |
 | 20 | `POST /auth` | HTTPS | — (unauthenticated by design: it is the credential entry point) | body ≤ 4096 bytes; the per-identity and process-global limiters of MODULE_AUTH "Rate limiting" apply; `503` when `[auth] mode = "none"` | `Authenticator::handle_auth` | `401 {"error":"bad_credentials"}`, identical body and timing for every failure |
@@ -1514,7 +1536,7 @@ Allow configurable number of controllers (for pair programming). Input events wo
 | Integration | A client joining a host whose pointer has not moved since before it connected receives a shape record and a Kind 0x02 position record on the cursor stream, and renders a cursor without any pointer movement; a resumed session is seeded identically | No |
 | Unit | Per-session keyframe token bucket: a client sending 10 requests in 1 s consumes 3 and has 7 counted in `featherdesk_keyframe_requests_dropped_total`, with no session close | No |
 | Unit | `send_config(ConfigBase)` fans out to three sessions and each receives its OWN `session_token`, `session_ttl_sec`, `carrier` and `resumed = false` | No |
-| Unit | Role gate table: for each of `Role::View`/`Player`/`Control` × each of rows 1-16, the gate's outcome matches the table — in particular a `player` is refused `0x02`, `0x03`, `resize` and `set_*` | No |
+| Unit | Role gate table: for each of `Role::View`/`Player`/`Control` × each of rows 1-16 and row 21, the gate's outcome matches the table — in particular a `player` is refused `0x02`, `0x03`, `resize`, `set_*` and `AUDIO_MIC` | No |
 | Load | 25 concurrent clients receiving 60fps | No (but resource-heavy) |
 
 ---

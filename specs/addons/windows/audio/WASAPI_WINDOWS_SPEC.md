@@ -206,6 +206,6 @@ device = ""   # "" = default render endpoint (loopback). Or a specific endpoint 
 
 ## Status
 
-📋 Specced — implementation deferred. Order: endpoint enumerate + probe → loopback
+📋 Specced — **in v1**. Order: endpoint enumerate + probe → loopback
 client + event loop → mix-format normalize → silence synthesis → `format()`/`Drop`
 lifecycle.

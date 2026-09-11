@@ -23,12 +23,13 @@ block with no row.
 | `AUDIO_PCM` | 4 | US-AUD-3 |
 | `VIDEO_HEVC` | 7 | US-VID-13 |
 | `AUDIO_OPUS` | 8 | US-AUD-2 |
+| `AUDIO_MIC` | 9 | US-AUD-10 |
 | `CURSOR_UPDATE` | 11 | US-VID-12 |
 | `INPUT_ACK` | 14 | US-INP-8 |
 | `GAMEPAD_RUMBLE` | 15 | US-INP-11 |
 | `VIDEO_AV1` | 16 | US-VID-13 |
 
-Slots 3, 5, 6, 12 and 0x50 are reserved or retired and carry no traffic; they are
+Slots 3, 5, 6, 10, 12, 13 and 0x50 are reserved or retired and carry no traffic; they are
 covered by the protocol-version rule, not by a story.
 
 ## Control-stream JSON messages (`MODULE_PROTOCOL.md`)

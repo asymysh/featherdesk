@@ -1,31 +1,35 @@
 # Module Spec: Audio
 
-> # 🔒 DESIGN LOCKED · ⏸️ IMPLEMENTATION DEFERRED
+> # 🔒 DESIGN LOCKED · ✅ IN V1, ALL THREE PLATFORMS
 >
 > **Design status:** Current. This spec reflects the locked QUIC / pluggable
 > add-on architecture (host→client system audio, per-OS capture add-ons,
 > pluggable Opus/PCM codec, realtime **audio-master** A/V sync). It supersedes
 > the old Linux-only `pw-cat` subprocess design.
 >
-> **Implementation status:** Deferred behind **video capture+encode working
-> end-to-end on Linux** — not on all three OSes. The earlier all-three trigger
-> was unsatisfiable: `BRANCH.md` "Migration Strategy" step 4 states that Windows
-> and macOS are specced, not built, and gate no cutover, so a trigger requiring
-> them deferred audio indefinitely while reading as "coming later" (GAP_TRIAGE
-> OQ-02). Linux is the platform with a working Go reference implementation, so
-> the trigger now names the only platform that can actually fire it. Un-deferring
-> lands two add-ons — `pipewire` capture and the `opus` codec — and nothing else.
+> **Implementation status: IN V1, on Linux, Windows and macOS.** Audio is no
+> longer deferred and no longer carries a trigger. FeatherDesk ships with sound:
+> a remote desktop without audio reads as a demo regardless of how good the
+> video path is. This lands four add-ons — `pipewire` (Linux), `wasapi`
+> (Windows), `sck_audio` (macOS) and the `opus` codec — plus the mic path below.
 >
-> **`[audio] enabled` stays `false` by default.** Audio-master sync moves
-> motion-to-photon from ~20 ms to ~65 ms (~45 ms at `frame_ms = 10`), so the
-> latency argument is an argument about the default, not about shipping the
-> feature. Locking the design now stops it contradicting the rest of the spec
-> base; no code is pulled forward.
+> **`[audio] enabled` defaults to `true`, with `frame_ms = 10`.** This is a
+> deliberate reversal of the previous opt-in default. Audio-master sync slaves
+> the video clock to the audio clock, which moves motion-to-photon from ~20 ms
+> to **~45 ms at `frame_ms = 10`** (~65 ms at 20 ms frames — which is why 10 is
+> now the default, trading ~2× packet rate for 20 ms of latency). A/V never
+> drifts, at the cost of input feel.
 >
-> **Scope:** Audio is **host→client only** (the remote machine's system audio
-> output, streamed to the viewer). Client→host **microphone is out of scope**
-> (dropped — it would need per-OS virtual-input drivers, the same class of work
-> as the deferred webcam virtual-device).
+> The product claim changes accordingly and is stated here so no other document
+> contradicts it: **sub-20 ms is the video-only figure, ~45 ms is the default
+> experience with sound.** An operator who wants the 20 ms path sets
+> `[audio] enabled = false`; nothing else in the pipeline changes, because with
+> audio off the video clock is its own master (see "A/V Sync").
+>
+> **Scope:** host→client system audio, **and** client→host microphone (see
+> "Microphone (client→host)"). Mic ships on **Linux and Windows** in v1; the
+> macOS mic path is specced and gated on a signing/notarization pipeline that
+> does not exist yet, because macOS has no user-space virtual microphone.
 
 ---
 
@@ -187,7 +191,22 @@ pub enum AudioError {
 | **macOS** | `sck_audio` | ScreenCaptureKit `SCStreamConfiguration.capturesAudio` (macOS 13+) | none | [`../addons/macos/audio/SCK_AUDIO_MACOS_SPEC.md`](../addons/macos/audio/SCK_AUDIO_MACOS_SPEC.md) |
 | **Linux** | `pipewire` | PipeWire monitor source (native libpipewire); Pulse `.monitor` / ALSA `snd-aloop` fallback | none | [`../addons/linux/audio/PIPEWIRE_LINUX_SPEC.md`](../addons/linux/audio/PIPEWIRE_LINUX_SPEC.md) |
 
-None requires a driver. The add-on **normalizes** its native device format (the
+### Virtual-Mic Sink Add-Ons (client→host)
+
+The mic direction has its own add-on kind (`AddonKind::AudioSink`, `0x0A`) and
+its own per-OS backends — a sink consumes PCM rather than producing it, so it is
+not a direction flag on the capture add-ons above:
+
+| OS | Add-on ID | Mechanism | Driver? | Spec |
+|----|-----------|-----------|---------|------|
+| **Linux** | `pw_vmic` | PipeWire null-sink + its monitor source | **none** | [`../addons/linux/audio/PW_VMIC_LINUX_SPEC.md`](../addons/linux/audio/PW_VMIC_LINUX_SPEC.md) |
+| **Windows** | `win_vmic` | WASAPI render into an operator-provisioned virtual capture endpoint | yes, one-time (as `vigem`/ViGEmBus) | [`../addons/windows/audio/WIN_VMIC_WINDOWS_SPEC.md`](../addons/windows/audio/WIN_VMIC_WINDOWS_SPEC.md) |
+| **macOS** | — | CoreAudio `AudioServerPlugIn` in `/Library/Audio/Plug-Ins/HAL` | yes, signed + notarized | ⏸️ not shipped — see "Microphone (client→host)" |
+
+None of the **capture** add-ons requires a driver; the mic sinks are where the
+per-OS install burden lives, and it is the whole reason macOS is gated.
+
+The capture add-on **normalizes** its native device format (the
 mix is often 32-bit float at the device rate) to the canonical **48 kHz / S16LE /
 interleaved / Vorbis channel order**, with the channel count following the host
 output layout up to 7.1 (or forced to 2 by `[audio] channels = "stereo"`), before
@@ -492,6 +511,91 @@ are specified in [`MODULE_WEB_CLIENT.md`](../client/MODULE_WEB_CLIENT.md)
 
 ---
 
+## Microphone (client→host)
+
+The mic is the **first client→host media direction** in FeatherDesk, and it is
+shaped deliberately unlike the host→client path it rides beside.
+
+### Why it is a separate thing, not "audio in reverse"
+
+Host→client audio reads a device the host already has. The mic must **create**
+one: a virtual input device that host applications can select and read from, as
+if a microphone were plugged in. That is a per-OS device-provisioning problem,
+not a capture problem, so it gets its own `AddonKind` (`AudioSink`, `0x0A`) and
+its own add-ons rather than a direction flag on the capture add-ons.
+
+| Platform | Add-on | Mechanism | v1 |
+|---|---|---|---|
+| Linux | `pw_vmic` | PipeWire null-sink named "FeatherDesk Mic"; its monitor is exposed as a source | ✅ |
+| Windows | `win_vmic` | Virtual audio capture device (driver install, as with ViGEmBus for gamepad) | ✅ |
+| macOS | — | A CoreAudio `AudioServerPlugIn` in `/Library/Audio/Plug-Ins/HAL` | ⏸️ **specced, not shipped** |
+
+**macOS is gated, and the gate is not code.** macOS has no user-space virtual
+microphone: the plug-in must be installed to a system path, signed with a
+Developer ID, and notarized. That turns the macOS distribution from a
+self-contained binary into an installer with a signing pipeline, which does not
+exist yet. Until it does, `[audio] mic_enabled = true` on macOS produces
+`ProbeReport { available: false, reason: "no_virtual_mic_addon" }` — a startup
+**warning**, never an error, and host→client audio is unaffected. This is a
+distribution decision recorded as an engineering state, so it is not rediscovered
+as a bug.
+
+### Path
+
+```
+browser getUserMedia -> AudioWorklet -> resample to session rate
+  -> opus encode (client) -> AUDIO_MIC datagram (type 9, C->S)
+  -> server role gate (controller only) -> mic rate limit
+  -> AudioEncoder::decode() -> resample to sink format
+  -> AudioSink::write_chunk() -> virtual device -> host applications
+```
+
+- **Codec is the session's**, negotiated once in `config` — Opus when the codec
+  add-on is loaded, S16LE PCM otherwise. There is no separate mic codec
+  negotiation; a second negotiation is a second thing to get wrong.
+- **`[audio] mic_frame_ms` defaults to 20**, not 10. The mic is **not on the
+  A/V-sync path** — nothing is slaved to it — so the latency argument that makes
+  `frame_ms = 10` the playback default does not apply, and 20 halves the packet
+  rate.
+- **Decode is the codec add-on's job** (`AudioEncoder::decode`, mandatory on
+  `AddonKind::AudioCodec`). The host never links a codec directly.
+
+### Role, rate and privacy
+
+- **Controller only.** An `AUDIO_MIC` datagram from a `view` or `player` session
+  is dropped silently and counted
+  (`featherdesk_role_rejects_total{op="mic"}`), on the same path as every other
+  role refusal. A viewer must not be able to speak into the host.
+- **Rate limited** by the same shape as input: a per-session token bucket sized
+  from `mic_frame_ms` with a small burst. A client that floods mic datagrams is
+  throttled, not disconnected — audio loss is recoverable and a disconnect is not.
+- **The mic is a privacy surface on the HOST, and this is why it is opt-in.**
+  Once the virtual device exists, *any* host application can read it, not only
+  the one the user is thinking about — and it persists for the lifetime of the
+  device, not the lifetime of a session. So:
+  - `[audio] mic_enabled` defaults to **`false`**.
+  - The sink is created at startup when enabled and **torn down on shutdown**,
+    never left behind. An orphaned "FeatherDesk Mic" device on a host nobody is
+    connected to is the failure mode to avoid.
+  - When no session holds the controller slot, the sink is fed **silence**, not
+    the last buffer — a repeating tail of whatever the last controller said is
+    both a bug and a leak.
+  - The client shows mic state in the T1 panel (MODULE_WEB_CLIENT
+    "In-session control surface"); the browser's own permission prompt and
+    recording indicator are the first gate and are never suppressed.
+
+### Failure behaviour
+
+| Condition | Result |
+|---|---|
+| No `AudioSink` add-on loaded | `mic_enabled` is ignored with a startup warning; host→client audio unaffected |
+| Sink add-on probes unavailable (no PipeWire, driver absent, macOS) | Same — warning, mic off, session normal |
+| `decode()` fails on a packet | Drop that packet, count `featherdesk_mic_decode_errors_total`, continue. One bad packet is not a session error |
+| `write_chunk()` returns `Unrecoverable` | Poison the sink for the process, log once at `warn`, continue **without** mic. The session keeps running — losing the mic must never take down the desktop |
+| Controller departs mid-stream | Sink is fed silence from the next period; no flush of buffered client audio |
+
+---
+
 ## Configuration
 
 ```toml
@@ -548,6 +652,13 @@ audio silently disabled (matches the gamepad/input "needs an add-on" pattern).
 | Unit | A/V sync: video frame selection against a synthetic audio clock | No |
 | Integration | Full capture→encode→broadcast (5 s) per OS add-on | Yes (per OS) |
 | Integration | A mid-session default-output change re-attaches, synthesizes silence across the gap, and never stalls the master clock; a layout change with it pushes a fresh `config` | Yes (per OS) |
+| Integration | **Mic round trip:** a client tone through `getUserMedia` → Opus → `AUDIO_MIC` → `decode()` → `AudioSink` is readable at the host's virtual device at the same frequency, with no channel swap | Yes (Linux + Windows) |
+| Unit | **Mic role gate:** an `AUDIO_MIC` datagram from a `view` or `player` session is dropped and counted `featherdesk_role_rejects_total{op="mic"}`; the same datagram from the controller is delivered | No |
+| Unit | **Mic never takes down the session:** `decode()` failing on one packet drops only that packet; `write_chunk()` returning `Unrecoverable` poisons the sink and the video/audio session keeps running | No |
+| Integration | **No orphaned device:** the virtual mic is created on startup with `mic_enabled = true` and is **gone** after a clean shutdown and after a SIGKILL-then-restart cycle | Yes (Linux + Windows) |
+| Unit | With no controller connected, the sink receives **silence**, not a repeat of the last buffer — checked by reading the device while no session holds the controller slot | No |
+| Unit | With `mic_enabled = true` and no `AudioSink` add-on loaded (incl. every macOS host today), startup emits a warning, mic is off, and host→client audio is unaffected | No |
+| Unit | `AudioEncoder::decode` round-trips its own `encode` for the `opus` add-on at every supported channel count | No |
 | Mock | Fake AudioCapturer (tone/silence generator) for sync + server tests | No |
 
 ---

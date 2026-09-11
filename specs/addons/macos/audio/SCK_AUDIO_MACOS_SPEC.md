@@ -186,6 +186,6 @@ exclude_current_process = true   # don't capture FeatherDesk's own output
 
 ## Status
 
-📋 Specced — implementation deferred. Order: confirm shared-SCStream wiring with
+📋 Specced — **in v1**. Order: confirm shared-SCStream wiring with
 `sck` → audio output delegate → CMSampleBuffer → Float32 → S16LE → host-time→
 monotonic mapping → silence across stream rebuilds.

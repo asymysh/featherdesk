@@ -16,22 +16,34 @@ expose. It is not a priority order — the recommended sequence is at the end.
 | ID | Was | Open question | Recommendation | Lands | Status |
 |----|-----|---------------|----------------|-------|--------|
 | OQ-01 | C11 | Is the WebSocket carrier a fallback or a supported production path, given Cloudflare + P2P? | Reclassify it, and give it liveness | v1 | ✅ **Specced** — carrier reclassified, carrier-generic liveness, named loss owner, performance budget, reachability recipe |
-| OQ-02 | C5+C6 | Does v1 ship with sound? And is client→host mic ever in scope? | Re-trigger audio on *Linux* video working; mic Linux-first, post-v1 | v1 / later | ✅ **Decided** — trigger changed to Linux-only; `[audio] enabled` stays `false` by default. Mic split out as OQ-02b, post-v1 |
+| OQ-02 | C5+C6 | Does v1 ship with sound? And is client→host mic ever in scope? | Re-trigger audio on *Linux* video working; mic Linux-first, post-v1 | v1 | ✅ **Closed, beyond the recommendation.** Owner decision: audio is **in v1 on all three OSes**, un-deferred entirely, `[audio] enabled = true` and `frame_ms = 10` by default (~45 ms motion-to-photon; sub-20 ms is now the audio-off figure). **Mic is in v1 too** — Linux (`pw_vmic`) + Windows (`win_vmic`); macOS specced and gated on signing. OQ-02b is folded in, not deferred |
 | OQ-03 | C4 | Should the host desktop mode follow the client window (and DPI)? | No mode-set on Linux; let the client drive encoder output dims + DPR | v1 | ✅ **Specced** — Linux mode-set recorded permanently out of scope; native is now a per-dimension ceiling, not the aspect ratio; client sends device pixels |
 | OQ-04 | G5 | Should capture/encode suspend when nobody is connected? | Yes — pause the loop; release objects behind a config key | v1 | ✅ **Specced** — Stage 1 unconditional, Stage 2 behind `[capture] idle_release_after`, both regression interactions specced |
 | OQ-05 | G7 | Can bitrate be capped per user? | Admission-time egress guard + per-session pacing cap | v1 | ✅ **Specced** — `[server] max_egress_bps` + `[transport] per_session_max_bps`; policy drops excluded from the congestion reducer |
-| OQ-06 | G6 | Can we multi-encode one capture into per-user tiers? | Not as simulcast in v1; per-session `Sequence` + temporal layers first | v1.x / v2 | 🔓 **Open** — step (1), the role policy, is settled (controller-only, role gate table rows 10-11). Steps 2-4 remain v1.x/v2 and need the ABI-break batching decision |
+| OQ-06 | G6 | Can we multi-encode one capture into per-user tiers? | Not as simulcast in v1; per-session `Sequence` + temporal layers first | v1 | ✅ **Closed, scoped down.** Owner decision: tiers mean **resolution and bitrate only** — re-encode the captured frame, nothing else varies. Solved WITHOUT the ABI break: tier 0 stays zero-copy, tiers 1+ share one CPU readback. Per-session `Sequence` (step 2) lands with it. `[stream] max_tiers = 1` by default; >1 requires a HW encoder |
 | OQ-07 | C13 | How much in-session control surface, and where? | Ship the tier that only wires up messages that already exist | v1 | ✅ **Specced** — T1 panel + T1+ Keyboard Lock in `ui.js`; T2 explicitly deferred to OQ-02/03/06 |
-| OQ-08 | C2 | What does a headless deployment actually look like? | Fix the docs defect now; decide the product question separately | v1 (docs) | ✅ **Specced** — Xvfb claim corrected, two no-root add-ons specced. The *product* question (does FeatherDesk provision a virtual display?) is still open |
+| OQ-08 | C2 | What does a headless deployment actually look like? | Fix the docs defect now; decide the product question separately | v1 | ✅ **Fully closed.** Docs defect fixed and two no-root add-ons specced; **and** the product question is answered — FeatherDesk **provisions a display when none exists** (IddCx on Windows, a spawned headless wlroots compositor captured by `wl_screencopy` on Linux; macOS gated on signing). `[capture] provision_display = "auto"` |
 
-> **Status as of 2026-09-11.** Seven of eight open questions are resolved in the
-> spec tree; OQ-06 remains open beyond its first step. Resolved here means
-> *specced and internally consistent*, not *built* — no code exists yet
-> (`BRANCH.md` "Current Status"). Two product questions survive their OQ and are
-> deliberately not closed by spec text: whether FeatherDesk should provision a
-> virtual display (OQ-08), and whether Cloudflare's terms permit sustained video
-> on the intended plan tier (OQ-01 item 5) — both are owner/business calls, not
-> engineering ones.
+> **Status as of 2026-09-11 — all eight open questions are closed.** Resolved
+> means *specced and internally consistent*, not *built*: no code exists yet
+> (`BRANCH.md` "Current Status").
+>
+> The owner's second pass went **beyond several recommendations**, and the table
+> records the decision rather than the recommendation where they differ:
+> - **OQ-02** — audio is not merely re-triggered, it is un-deferred on all three
+>   platforms and on by default, and the mic comes with it rather than being
+>   deferred as OQ-02b.
+> - **OQ-06** — tiers are in v1, scoped to resolution and bitrate only, which is
+>   what makes the hybrid-readback solution possible without the ABI break the
+>   original analysis assumed was required.
+> - **OQ-08** — the product question is answered, not separated: FeatherDesk
+>   provisions a display when none exists.
+> - **OQ-01 item 5** — Cloudflare's terms confirmed by the owner as permitting
+>   the intended use; the WebSocket carrier's first-class status rests on a
+>   checked premise, not an assumed one.
+>
+> **No open question remains.** The next uncertainty of this kind should be
+> raised as a new OQ against this file, not appended to a closed one.
 
 ---
 
@@ -72,8 +84,10 @@ have not caught up with.
    honest if the docs name a concrete recipe. Cheapest credible answer:
    **document WireGuard/Tailscale as a v1 prerequisite** (zero code, works
    today, carries QUIC), and keep embedded `tsnet` as the v2 convenience.
-5. Check Cloudflare's terms for sustained video through the CDN against the
-   intended plan tier before designing it in.
+5. ~~Check Cloudflare's terms for sustained video through the CDN against the
+   intended plan tier before designing it in.~~ **Done — confirmed permitted by
+   the owner (2026-09-11).** The WebSocket carrier's promotion to a first-class
+   path therefore rests on a checked premise rather than an assumed one.
 
 ---
 

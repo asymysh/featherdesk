@@ -45,6 +45,7 @@ The client is a single-page application embedded in the server binary via `rust-
 | `files.js` | Drag-drop upload + Files panel for downloads — opens per-transfer `0x03` lanes on the session, bounded by `config.fileStreamBudget` |
 | `gamepad.js` | rAF poll of getGamepads, diff-send 0x40, connect/disconnect 0x41/0x42, rumble apply |
 | `stats.js` | Outbound telemetry to server (R-CLI-06); on-screen FPS/latency/quality HUD (R-CLI-13) |
+| `mic.js` | `getUserMedia` → AudioWorklet → resample → encode → `AUDIO_MIC` datagrams. Controller-only; entirely inert unless the user turns the mic on |
 | `ui.js` | The in-session control panel (settings, controller-gated stream controls, fullscreen / pointer-lock / gaming-mode buttons). **The documented boundary for UI growth** — see "In-session control surface" |
 
 ---
@@ -1056,6 +1057,7 @@ default-hidden behind the same **F9** toggle and on-canvas icon:
 | Force keyframe | `{"type":"keyframe"}` (client-side 500 ms throttle already specced) | any role |
 | Fullscreen | Fullscreen API; re-sends `resize` on change (device pixels, see "Resize requests") | any role |
 | Pointer lock | the existing `input.js` pointer-lock path | controller only |
+| Microphone | `mic.js` — starts `getUserMedia`, streams `AUDIO_MIC` (type 9) | controller only, **and** only when `config.micEnabled` says the host has a sink; off by default, never auto-started |
 | Downloads | the existing `files.js` panel | per `fileStreamBudget` |
 | Status readout | carrier (`webtransport`/`websocket`), effective role, clipboard direction, cert fingerprint in self-signed mode — all values the client already holds | any role |
 
@@ -1065,6 +1067,25 @@ Disabling it visually would invite a user to try, and the server's answer is a
 silent drop plus `featherdesk_role_rejects_total` — a control that appears to do
 nothing. The panel re-renders on `auth_ok` and on any role change, since a
 takeover can demote a controller mid-session.
+
+### Microphone control
+
+The mic is the one control in the panel that turns on a **capture** device, so
+it behaves unlike the rest:
+
+- **Never auto-starts.** It requires an explicit click even when
+  `[audio] mic_enabled` is true host-side — the host key says "a sink exists",
+  not "start transmitting".
+- The browser's own permission prompt and its recording indicator are the first
+  gate and are **never suppressed or worked around**.
+- The panel shows a live transmitting indicator whenever mic datagrams are
+  flowing, and stops sending on role loss (a takeover demotes this session),
+  on `visibilitychange` to hidden, and on session close — the same discipline
+  as gaming mode and the R-CLI-12 focus-loss key release. A tab that keeps a
+  microphone open after it stopped being the controller is the failure to avoid.
+- `getUserMedia` rejection (permission denied, no device) is a panel state, not
+  an error toast and never a reconnect: the session is fine, the mic simply is
+  not available.
 
 ### T1+ — gaming mode (Keyboard Lock)
 
@@ -1275,6 +1296,9 @@ its own capture clock on return.
 | Integration | Panel role gating is by construction: a `view` session's DOM contains **no** bitrate/fps/HDR control (absent, not disabled), and a controller demoted by takeover re-renders without them mid-session | Browser automation (Playwright) |
 | Unit | Gaming mode feature-detects: with `navigator.keyboard` undefined the toggle is not rendered and nothing throws; with it present, exiting fullscreen and `visibilitychange` to hidden both call `keyboard.unlock()` | No |
 | Unit | `ui.js` is a leaf: no other client module imports it (static check over the ES module graph) | No |
+| Unit | The mic never auto-starts: with `config.micEnabled = true` and permission already granted, no `AUDIO_MIC` datagram is sent until the user clicks the control | No |
+| Unit | Mic stops on role loss, on `visibilitychange` to hidden, and on session close — the `MediaStreamTrack` is stopped, not merely muted, so the browser indicator clears | Browser automation (Playwright) |
+| Unit | A `getUserMedia` rejection leaves the session running and surfaces as a panel state, with no toast and no reconnect | No |
 | Visual | Render quality, cursor alignment | Manual + screenshot comparison |
 | Performance | Decode latency, frame drop rate | WebCodecs metrics API |
 

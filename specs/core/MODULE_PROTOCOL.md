@@ -39,6 +39,11 @@ pub mod frame_type {
     // 6 retired (was Config; Config is now a control-stream JSON message)
     pub const VIDEO_HEVC: u8 = 7;     // datagram media (S→C); fragmented + bootstrap-stream join IDR
     pub const AUDIO_OPUS: u8 = 8;     // datagram media (S→C); single-datagram Opus packet (default audio codec)
+    pub const AUDIO_MIC: u8 = 9;      // datagram media (C→S) — the ONLY client→server datagram in v1.
+                                      // One mic packet in the session's negotiated audio codec (Opus,
+                                      // or S16LE PCM when no codec add-on is loaded). Carries the
+                                      // FrameHeader with the CLIENT's capture timestamp. Controller-only;
+                                      // dropped for any other role. See MODULE_AUDIO "Microphone".
     pub const CURSOR_UPDATE: u8 = 11; // datagram control (S→C); 14-byte fixed body, latest-wins,
                                       // no FrameHeader; shapes ride the cursor stream
     // 12 retired (was Clipboard; clipboard is now a clipboard-stream message)
@@ -881,6 +886,15 @@ pub struct ConfigBase {
     #[serde(rename = "audioLayout")] pub audio_layout: String,  // "stereo" | "5.1" | "7.1"
     /// base64 OpusHead (RFC 7845 5.1); "" for PCM and for mono/stereo Opus.
     #[serde(rename = "audioDescription")] pub audio_description: String,
+    /// True iff the host has a working AudioSink add-on AND [audio] mic_enabled.
+    /// It advertises that a mic sink EXISTS, never that the client should start
+    /// transmitting: the client requires an explicit user action regardless
+    /// (MODULE_WEB_CLIENT "Microphone control"). False on every macOS host in v1.
+    #[serde(rename = "micEnabled")] pub mic_enabled: bool,
+    /// Frame duration the client must use for AUDIO_MIC packets, from
+    /// [audio] mic_frame_ms. The mic is not on the A/V-sync path, so this is
+    /// independent of the playback frame_ms above.
+    #[serde(rename = "micFrameMs")] pub mic_frame_ms: u32,
     #[serde(rename = "cursorMode")] pub cursor_mode: String,    // "separate" | "embedded"
     /// [clipboard] direction, or "disabled" when [clipboard] enabled = false. The
     /// controller opens the 0x02 stream iff this is not "disabled".
@@ -1081,8 +1095,18 @@ Serialize each video frame as ONE message containing the **complete access unit*
 ### R-PRO-05: Canonical Monotonic Clock for All Media Timestamps
 Define a single process-wide `CLOCK_MONOTONIC` epoch. Every video frame (from every capture backend) and every audio chunk MUST be stamped from this clock, in nanoseconds, **at capture time**. The pipeline must NOT stamp audio at channel-read time. This is a hard requirement for A/V sync — mixing wall-clock (`UnixMilli`) and monotonic, or ms and ns, silently breaks sync.
 
-### R-PRO-06: Server Owns Sequence Counters
+### R-PRO-06: Server Owns Sequence Counters, **Per Session**
 The server is the sole owner of the video and audio sequence counters (independent, per type). They are assigned in `Broadcast`/`BroadcastAudio` at send time. The pipeline must NOT maintain its own frame sequence counter.
+
+The counters are **per session**, not global. With per-client quality tiers
+(`MODULE_STREAM_PARAMS` "Per-client quality tiers") two tiers share one frame
+loop but not one frame stream, so a single global counter would show every
+client a gap for every frame belonging to the other tier — and gap detection
+would have each of them request an IDR on every frame. Per-session counters make
+a frame a client never receives invisible to it, which is also what makes
+temporal-layer subsetting possible later without a wire change. This costs one
+`u64` per session and is internal: the server already owns the counters, and
+`bootstrap_seq` is already per-session, so the join path is unchanged.
 
 ### R-PRO-07: Handshake Discriminator
 The first control-stream message after `auth_ok` is always the `config` JSON

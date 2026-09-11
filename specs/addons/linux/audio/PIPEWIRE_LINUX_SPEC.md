@@ -197,6 +197,6 @@ target = ""   # "" = auto-detect the default sink's .monitor; or a specific node
 
 ## Status
 
-📋 Specced — implementation deferred. Order: libpipewire bindings + probe →
+📋 Specced — **in v1**. Order: libpipewire bindings + probe →
 capture-sink stream + SPA format → on_process normalize → monotonic stamp →
 Pulse/ALSA fallbacks.

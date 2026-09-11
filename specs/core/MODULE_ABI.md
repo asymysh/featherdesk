@@ -307,6 +307,31 @@ pub trait AudioEncoder: Send {                  // AddonKind::AudioCodec (0x05)
     fn caps(&self) -> AddonCaps;                // AddonCaps(0) in v1
     fn codec(&self) -> CodecId;
     fn encode(&mut self, chunk: &RPcmChunk) -> RResult<RVec<u8>, AbiError>;
+    /// Client→host MIC direction: decode one packet of this add-on's codec back
+    /// to PCM for the virtual-mic sink (MODULE_AUDIO "Microphone (client→host)").
+    ///
+    /// MANDATORY on this kind, deliberately NOT behind an `AddonCaps` bit. An
+    /// audio codec is symmetric in practice — the one add-on that exists,
+    /// `opus`, wraps a library that does both — and an optional bit would buy a
+    /// half-capable codec add-on nothing except a way for the mic path to fail
+    /// at runtime instead of at load. An encoder-only codec is not a supported
+    /// shape; return `AbiErr::Unsupported` only if a future codec genuinely
+    /// cannot decode, and expect the host to refuse the mic path, not the
+    /// session.
+    fn decode(&mut self, packet: &[u8]) -> RResult<RPcmChunk, AbiError>;
+}
+
+#[sabi_trait]
+pub trait AudioSink: Send {                     // AddonKind::AudioSink (0x0A)
+    fn caps(&self) -> AddonCaps;                // AddonCaps(0) in v1
+    /// Writes one decoded PCM chunk into the host's virtual input device. The
+    /// host guarantees chunks arrive in timestamp order on ONE thread (the audio
+    /// loop's mic half); the sink never reorders and never buffers more than the
+    /// device's own period.
+    fn write_chunk(&mut self, chunk: &RPcmChunk) -> RResult<(), AbiError>;
+    /// The format the virtual device presents to host applications. The host
+    /// resamples the client's stream to this before calling `write_chunk`.
+    fn format(&self) -> RAudioFormat;
 }
 
 #[sabi_trait]
@@ -780,6 +805,7 @@ into the sub-kinds below so one descriptor unambiguously names one trait.
 | `InputTouch`     | `0x07` | `InjectorBox`         | `InputAddon` (`kind()==Touch`) | `input::TouchInjector` |
 | `InputGamepad`   | `0x08` | `InjectorBox`         | `InputAddon` (`kind()==Gamepad`) | `input::GamepadInjector` |
 | `Network`        | `0x09` | `ProviderBox`         | `network::Provider` | (v2; **reserved**, see [`../v2/MODULE_NETWORK.md`](../v2/MODULE_NETWORK.md)) |
+| `AudioSink`      | `0x0A` | `AudioSinkBox`        | `AudioAddon` (`kind()=="sink"`) | `audio::AudioSink` — the client→host virtual microphone (`pw_vmic`, `win_vmic`) |
 
 `Injector` is the Layer-1 `#[sabi_trait]` union declared above, carrying the
 methods of all three `Input*` kinds behind one tagged object — one flat vtable,

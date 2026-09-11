@@ -567,6 +567,19 @@ aliasing to prevent.
         This runs BEFORE selection so a capturer that can deliver no cursor is
         never chosen. If no candidate remains, startup fails naming each add-on
         it rejected and why — never a running stream with no visible pointer.
+      - **Display provisioning (last resort).** If every capture candidate
+        reported `available: false` **for want of a display** — and only for
+        that reason, never for a missing capability or a cursor-mode
+        ineligibility — and `[capture] provision_display` is `auto` (or
+        `force`, which comes straight here), the pipeline provisions one and
+        re-runs this probe step exactly once: IddCx on Windows, a spawned
+        headless wlroots compositor captured by `wl_screencopy` on Linux
+        (`PLATFORM_COMPAT.md` "Virtual display provisioning"). A spawned
+        compositor is a CHILD PROCESS the pipeline owns: its handle sits beside
+        the other media objects in drop order and is terminated in the shutdown
+        sequence, so it cannot outlive the server. A second failure after
+        provisioning is fatal, reporting the original rejection list plus the
+        provisioning attempt.
         The mode resolved for the SELECTED candidate is RECORDED on the
         `SelectionPlan`; nothing is constructed here.
    e. Probe each loaded encoder add-on, in the order for THIS OS (an add-on for
@@ -707,6 +720,14 @@ aliasing to prevent.
 9. (Webcam was here — deferred to a future version, see CENTRAL_SPEC "Deferred".)
 10. Create the clipboard driver + handle with `clipboard::spawn` and the
     file-transfer Service if their `[*] enabled`.
+10b. If `[audio] mic_enabled` AND an `AudioSink` add-on is loaded, construct it
+    (`AddonKind::AudioSink`, `0x0A` — `pw_vmic` on Linux, `win_vmic` on Windows;
+    no macOS backend exists in v1). Construction happens on the audio thread,
+    which is the only thread that will touch it, and the handle sits in the
+    audio loop's drop order so the virtual device is torn down on shutdown
+    rather than left behind. A probe failure here is a **warning**, never a
+    startup error: mic is an accessory, and losing it must not stop the desktop
+    from streaming (MODULE_AUDIO "Failure behaviour").
 11. If `[audio] enabled` AND an audio capture add-on is loaded: SELECT the
     capturer + the encoder (`opus` add-on → Opus, else PCM passthrough) into an
     `AudioPlan`. They are CONSTRUCTED on the audio thread at step 13, not here,
@@ -741,6 +762,12 @@ aliasing to prevent.
                                         swap plus, on 0→N only, one notify; the
                                         server invokes it outside every session
                                         lock (MODULE_SERVER "Public Interface").
+   - server.set_mic_callback          → `Some` iff `[audio] mic_enabled` AND an
+                                        `AudioSink` add-on probed available: a closure
+                                        over the mic packet channel into the audio
+                                        thread's mic half. `None` otherwise, which makes
+                                        the server drop mic datagrams at the role gate
+                                        (MODULE_AUDIO "Microphone (client→host)").
    - server.set_keyframe_request_callback → the SAME closure over another `kf_req` clone
                                         (the server applies all three rate-limiting
                                         stages before invoking)
@@ -1833,9 +1860,30 @@ metric exists to catch.
 // The audio loop runs on its own dedicated OS thread (`fd-audio`) for the same
 // two reasons the frame loop does: the capture backend is thread-affine (WASAPI
 // requires COM on the calling thread; CoreAudio prefers a stable one), and a
-// blocking `next_chunk()` must not occupy a Tokio worker. It CONSTRUCTS its two
+// blocking `next_chunk()` must not occupy a Tokio worker. It CONSTRUCTS its
 // objects on this thread and drops them here, so nothing audio-related ever
 // crosses a thread boundary.
+//
+// THE THREAD HAS TWO HALVES, and only the playback half is on the A/V-sync path:
+//
+//   playback (host->client):  AudioCapturer::next_chunk -> AudioEncoder::encode
+//                             -> Server::broadcast_audio   [the master clock]
+//   mic      (client->host):  mic packet channel (fed by set_mic_callback)
+//                             -> AudioEncoder::decode -> resample to
+//                                AudioSink::format() -> AudioSink::write_chunk
+//
+// They share the thread and the codec add-on; they share no clock. The mic half
+// is drained on the same loop iteration as the playback half, AFTER it, and is
+// strictly best-effort: a slow or failing mic must never delay the master clock,
+// because a stalled master clock drops the whole session out of audio-master
+// (see "Leaving audio-master"). If the mic channel is empty the half is a no-op;
+// if it is backed up, the OLDEST packets are dropped and counted -- mic audio is
+// realtime, so a backlog is worthless by the time it would play.
+//
+// When no session holds the controller slot the mic half writes SILENCE at the
+// sink's period rather than nothing: a starved endpoint is dropped by the OS
+// audio engine, and repeating the last buffer would leak the previous
+// controller's audio (MODULE_AUDIO "Role, rate and privacy").
 //
 // There is no host-side channel between capture and encode: the ~60-80 ms
 // decoupling buffer lives INSIDE the add-on (its OS device callback fills a
@@ -2750,6 +2798,10 @@ unless noted.
 | `featherdesk_param_changes_failed_total` | counter | `Stats.param_changes_failed`, written by `report_param_failure` | parameter changes the encoder/capturer refused |
 | `featherdesk_addon_poisoned` | gauge=1 | `FrameLoop.poisoned` via `Stats.set_poisoned` | one series per poisoned add-on, labeled `addon` and `component` |
 | `featherdesk_adaptive_reference_client` | gauge=1 | `stream::Manager` | which session the adaptive loop is tuning to (label `client`) |
+| `featherdesk_mic_packets_total` | counter | mic half of the audio loop | `AUDIO_MIC` packets decoded and written to the sink |
+| `featherdesk_mic_decode_errors_total` | counter | mic half, on `AudioEncoder::decode` failure | packets dropped; never a session error |
+| `featherdesk_mic_drops_total` | counter | mic half, oldest-first on a backed-up channel | mic packets discarded as stale |
+| `featherdesk_display_provisioned` | gauge | set once at startup, after step 3d | 1 when the captured display was provisioned by FeatherDesk (IddCx / spawned compositor), 0 when it is a real display |
 | `featherdesk_capture_idle` | gauge | `FrameLoop` step (0-) via `Stats::set_idle` | 1 while the frame loop is parked with zero authenticated sessions, 0 otherwise |
 | `featherdesk_idle_releases_total` | counter | `Stats::record_idle_release`, from `FrameLoop::maybe_release_idle` | Stage 2 releases of the capturer + encoder after `[capture] idle_release_after` |
 | `featherdesk_cursor_updates_total` | counter | `CursorPublisher::tick` | CursorUpdate datagrams sent (including idle re-sends) |

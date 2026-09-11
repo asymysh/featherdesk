@@ -314,6 +314,19 @@ abi_strict   = false              # true = a single ABI-mismatched library abort
 #   forced  = use force_addon only, fail at startup if unavailable
 mode         = "auto"
 force_addon  = ""                 # e.g. "kms_egl", "nvfbc", "sck", "dxgi_dd" (restart required)
+provision_display  = "auto"       # What to do when NO usable display exists.
+                                  #   auto   = provision one (last resort, after every
+                                  #            capture add-on probes unavailable). Windows:
+                                  #            IddCx virtual display. Linux: spawn a headless
+                                  #            wlroots compositor and capture it with
+                                  #            wl_screencopy. macOS: not available in v1.
+                                  #   never  = clean fatal "no capture" instead (the old
+                                  #            behaviour).
+                                  #   force  = provision even when a real display exists.
+                                  # See PLATFORM_COMPAT "Virtual display provisioning".
+provision_size     = "1920x1080@60"  # Geometry of a PROVISIONED display only. There is no
+                                  # display to interrogate, so it is named rather than
+                                  # discovered. Ignored when a real display is used.
 idle_release_after = "0s"         # Stage 2 idle suspension: after this much CONTINUOUS idle
                                   # (zero AUTHENTICATED sessions), drop the capturer and the
                                   # encoder; rebuild on the 0->1 transition. "0s" = never
@@ -348,6 +361,15 @@ force_addon  = ""                 # e.g. "libva", "nvenc", "vt_hw", "openh264" (
 # ─────────────────────────────────────────────────────────────────────────
 
 [stream]
+max_tiers    = 1                 # Per-client quality tiers: the max number of distinct
+                                 # (resolution, bitrate) encodes fed from one capture.
+                                 # 1 (default) = the feature is off, one encoder for every
+                                 # session, byte-identical to before. >1 REQUIRES a hardware
+                                 # encoder — two software tiers do not fit the frame budget,
+                                 # so the pipeline clamps to 1 with a warn on the SW path.
+                                 # Tier 0 stays zero-copy; tiers 1+ share one CPU readback.
+                                 # The controller is always pinned to tier 0.
+                                 # See MODULE_STREAM_PARAMS "Per-client quality tiers".
 # Initial resolution, frame rate, quality, color depth.
 # These are the STARTING values; the pipeline may change them at runtime
 # based on client window resize requests, network feedback (bandwidth
@@ -730,10 +752,22 @@ layout          = "standard"  # v1: "standard" Standard Gamepad layout only
 # ─────────────────────────────────────────────────────────────────────────
 
 [audio]
-enabled  = false    # opt-in. Requires a loaded audio capture add-on.
-frame_ms = 20       # 10 or 20 (lower = less latency, ~2× packet rate)
+enabled  = true     # FeatherDesk ships with sound. Requires a loaded audio capture
+                    # add-on (pipewire / wasapi / sck_audio); with none loaded, audio
+                    # stays off with a startup warning rather than failing.
+                    # false = the video-only path, motion-to-photon ~20 ms.
+frame_ms = 10       # 10 or 20. 10 is the default: audio-master sync makes this a
+                    # LATENCY knob, not just a packet-rate one (~45 ms vs ~65 ms
+                    # motion-to-photon), and ~2x the packet rate is the price.
 channels = "auto"   # "auto" = follow the host output layout (stereo / 5.1 / 7.1, ≤7.1);
                     # "stereo" = force a host-side downmix to 2.0
+mic_enabled = false # Client->host microphone: opt-in, controller-only, and a PRIVACY
+                    # surface (it creates a virtual input device on the host that any
+                    # host application can then read). Linux + Windows in v1; on macOS
+                    # probe() reports available:false until the signed CoreAudio
+                    # plug-in ships. See MODULE_AUDIO "Microphone (client->host)".
+mic_frame_ms = 20   # 10 or 20. Mic is not on the A/V-sync path, so the latency
+                    # argument above does not apply; 20 halves the packet rate.
 
 [addon_module_opus]        # the audio codec add-on (`opus` ⇒ Opus, else PCM)
 bitrate_kbps = 0      # 0 = auto by channel count (~96 stereo, scaled for 5.1/7.1); else fixed VBR target
@@ -746,6 +780,13 @@ device = ""                # "" = default render endpoint; or a specific endpoin
 exclude_current_process = true  # don't capture FeatherDesk's own output
 
 [addon_module_pipewire]    # Linux — PipeWire monitor source
+
+[addon_module_pw_vmic]     # Linux — virtual microphone sink (client->host).
+target = ""                # "" = create a null-sink named "FeatherDesk Mic" and expose its
+                           # monitor as a source; or name an existing sink to write into.
+
+[addon_module_win_vmic]    # Windows — virtual microphone device (client->host).
+device = ""                # "" = the FeatherDesk virtual capture device; or a specific id.
 target = ""                # "" = auto-detect the default sink's .monitor
 ```
 
@@ -763,6 +804,8 @@ value is present but fails its rule; an **absent** key always takes its default 
 |-----|------|---------|----------------------|-----|-----------|
 | `server.base_path` | string | `"/"` | `"/"`, or a path beginning **and** ending with `/` (e.g. `"/desk/"`); no `..`, no query, no scheme. Sourced into `transport::Config`, not `server::Config` — the transport strips it (MODULE_TRANSPORT "Base path") | ❌ | startup error |
 | `server.max_egress_bps` | u64 | `0` | `0` (disabled) or 1_000_000 – 100_000_000_000 | ✅ (new sessions) | startup error |
+| `capture.provision_display` | enum | `"auto"` | `auto` \| `never` \| `force`; `auto`/`force` on macOS behave as `never` with a startup warning (no virtual display driver in v1) | ❌ | startup error |
+| `capture.provision_size` | string | `"1920x1080@60"` | `<w>x<h>@<fps>`; w,h 320–7680, fps 1–240 | ❌ | startup error |
 | `capture.idle_release_after` | duration | `"0s"` | `"0s"` (never) or 1s – 1h | ✅ | startup error |
 | `transport.per_session_max_bps` | u64 | `0` | `0` (uncapped) or 100_000 – 10_000_000_000 | ✅ (new sessions) | startup error |
 | `server.bind` | string | `"0.0.0.0:30084"` | `host:port`; host parses as an IP literal or a hostname; port 1–65535. One address, two listeners (TCP + UDP) | ❌ | startup error |
@@ -815,6 +858,7 @@ value is present but fails its rule; an **absent** key always takes its default 
 | `stream.qp` | u8 | `26` | 0–51 | ✅ | startup error |
 | `stream.keyframe_interval` | u32 | `0` | `0` (on-demand only) or 1–600 frames | ✅ | startup error |
 | `stream.idle_keyframe_ms` | u32 | `100` | 10–2000 | ✅ | startup error |
+| `stream.max_tiers` | u32 | `1` | 1–4; values >1 are clamped to 1 on the software encode path (warn, not an error) | ✅ (new tiers) | startup error |
 | `stream.bit_depth` | u8 | `8` | `8`, or `10` only together with `hdr = true` | ✅ | startup error |
 | `stream.hdr` | bool | `false` | `true` forces `bit_depth = 10` and `color_space = "bt2020"` | ✅ | startup error |
 | `stream.color_space` | enum | `"bt709"` | `bt709` (SDR) \| `bt2020` (HDR — requires `hdr = true`) | ✅ | startup error |
@@ -855,8 +899,10 @@ value is present but fails its rule; an **absent** key always takes its default 
 | `gamepad.max_controllers` | u32 | `4` | 1–4 (the XInput cap, and the co-op player cap) | ❌ | startup error |
 | `gamepad.allow_rumble` | bool | `true` | — ; inert unless the injector reports `AddonCaps::RUMBLE` | ❌ | startup error |
 | `gamepad.allow_coop` | bool | `false` | — | ❌ | startup error |
-| `audio.enabled` | bool | `false` | — ; with no audio capture add-on (`wasapi`/`sck_audio`/`pipewire`) loaded, audio stays off | ❌ | startup warning |
-| `audio.frame_ms` | u32 | `20` | `10` or `20` | ❌ | startup error |
+| `audio.enabled` | bool | `true` | — ; with no audio capture add-on (`wasapi`/`sck_audio`/`pipewire`) loaded, audio stays off | ❌ | startup warning |
+| `audio.frame_ms` | u32 | `10` | `10` or `20` | ❌ | startup error |
+| `audio.mic_enabled` | bool | `false` | — ; with no virtual-mic add-on (`pw_vmic`/`win_vmic`) loaded, mic stays off | ❌ | startup warning |
+| `audio.mic_frame_ms` | u32 | `20` | `10` or `20` | ❌ | startup error |
 | `audio.channels` | enum | `"auto"` | `auto` (follow the host output layout, ≤ 7.1) \| `stereo` (force a 2.0 downmix) | ❌ | startup error |
 | `[addon_module_<id>]`, any key | add-on-owned | add-on-owned | the add-on owns the *decoding*; the host forwards the table verbatim, never decodes it, and caps the re-serialized fragment at 64 KiB. **Key names, defaults and domains are normative in the Schema block above**; an add-on spec may restate them for readability but may not diverge, and where it does, this file wins | ❌ (read once, at `construct()`) | startup error — `AbiErr::BadConfig` from the add-on, naming the id, the key and the config file path |
 | `addon_module_x264.profile` | enum | `"high"` | `high` \| `high422` \| `high444` — the chroma negotiation selects it; this is the ceiling | ❌ | startup error (`AbiErr::BadConfig`, raised by the add-on) |

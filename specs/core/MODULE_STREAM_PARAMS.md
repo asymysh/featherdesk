@@ -699,6 +699,100 @@ policy below, stamps an epoch and enqueues a `ParamDelta` on the pipeline's para
 funnel; the pipeline's frame loop is the sole mutator (M-6). The pipeline does
 **not** measure telemetry itself.
 
+## Per-client quality tiers
+
+**Scope: resolution and bitrate, and nothing else** (GAP_TRIAGE OQ-06). A tier
+is a `(width, height, bitrate_bps)` triple. Codec, fps, HDR, bit depth, colour
+space and chroma subsampling are **session-wide and identical across tiers** —
+they are negotiated once in `config`, and letting them vary per tier would mean
+per-tier decoder reconfiguration, per-tier capability negotiation and a per-tier
+`config` message, which is a different and much larger feature.
+
+Default is **off**: `[stream] max_tiers = 1` reproduces today's behaviour
+exactly, one encoder for every session.
+
+### How a session gets a tier
+
+A session's own `resize` / `set_bitrate` requests bind **that session** to a
+tier, instead of moving one global encoder for everyone. That is the whole
+user-visible change: the wire vocabulary is unchanged, and the requests that
+previously fought each other now resolve independently.
+
+1. A request is **quantized** to the tier grid (halving steps down from the
+   captured size: 100 %, 75 %, 50 %, 33 %) so 25 clients cannot create 25
+   encoders.
+2. If a tier with that geometry exists, the session joins it. If not and the
+   live tier count is below `max_tiers`, a tier is created. If at the cap, the
+   session joins the **nearest existing tier**, and the server tells it so with
+   the existing `resize_suppressed` message carrying the dimensions actually in
+   force — no new message type.
+3. Tiers are **created on first subscriber and dropped on last**. Tier 0 is
+   permanent while any session exists.
+
+### Tier 0 is privileged, deliberately
+
+| | Tier 0 | Tiers 1…N-1 |
+|---|---|---|
+| Source | the captured surface, **zero-copy**, unchanged | one CPU readback of the same frame, scaled per tier |
+| Encoder | the selected HW (or SW) encoder as today | one additional encoder instance each |
+| Who is on it | the **controller**, always; plus any session whose request quantizes to full size | viewers only |
+
+**The controller is pinned to tier 0** and cannot leave it. Input coordinates
+are expressed in stream space, so a controller on a different geometry from the
+one the pointer is calculated against makes the input coordinate space
+multi-valued — a bug that presents as "the cursor is slightly wrong" and is
+miserable to find. A controller's `resize` therefore still moves tier 0, exactly
+as it moves the single encoder today.
+
+### Why hybrid readback, and not the ABI change
+
+`encode_surface(surface: FbInfo)` **consumes** the surface and `FbInfo::Drop`
+releases it exactly once (CENTRAL_SPEC Contract 6). Two hardware encoders
+therefore cannot share one acquire, and DXGI will not re-deliver it. The three
+ways out, and why this one:
+
+| Option | Cost | Verdict |
+|---|---|---|
+| `encode_surface(&FbInfo)` | An `ABI_VERSION` bump. Acceptance is exact equality, so it invalidates **every** add-on in the field | Rejected for v1 — this is the ABI v2 event, and ABI breaks are batched into one release, not dripped |
+| Readback for all tiers whenever tiering is on | Tier 0 loses zero-copy the moment a second tier appears | Rejected — the fast path pays for a feature it is not using |
+| **Tier 0 zero-copy, one readback feeding tiers 1+** | One readback, only while >1 tier is live | **Chosen** |
+
+The readback is the one `capture::Frame` the software path already knows how to
+produce — `MODULE_CAPTURE` "Readback cost" is its budget — so tiers 1+ reuse the
+existing Converter and scale from it. No ABI change, and the single-tier case is
+byte-identical to today.
+
+### Throughput — why tiers require a hardware tier 0
+
+The frame loop is synchronous, so tier encodes **serialize on the frame thread**:
+
+- Two HW tiers ≈ 9 ms of a 16.6 ms budget at 60 fps — fits.
+- Two **software** tiers ≈ 15.8 ms at the measured 7.9 ms p50 (`bench_out`,
+  1920×1080, 4 threads) — does not fit, and the second tier would eat the
+  frame budget the first one needs.
+
+Therefore: **`max_tiers > 1` requires the selected encoder to be hardware.** On
+the software path the pipeline clamps `max_tiers` to 1 and logs once at `warn`
+naming the reason. This is a clamp, not a startup error — a config that is
+merely un-servable on this host should not stop the host from streaming.
+
+### What this changes elsewhere
+
+- **`Sequence` becomes per-session** (`MODULE_PROTOCOL` R-PRO-06). Two tiers
+  sharing one counter means every client sees a gap for every frame of the other
+  tier and requests an IDR for each one. This is internal — the server already
+  owns the counters and `bootstrap_seq` is already per-session.
+- **The adaptive reducer runs per tier, not per server.** "Aggregating N clients"
+  below still reduces N sessions to one setting; with tiers it reduces *each
+  tier's* sessions to *that tier's* setting, with a per-tier reference session.
+  The majority-override rule applies within a tier. A tier is exactly the unit
+  the reducer was always implicitly assuming.
+- **Keyframes are per tier.** Each tier owns its IDR cache and its join path;
+  the global coalescer (`[server] keyframe_min_interval_ms`) applies per tier,
+  so a join on tier 1 cannot force an IDR on tier 0.
+
+---
+
 ### Aggregating N clients into one encoder setting
 
 There is ONE encoder and N sessions, so the per-session signals must be reduced to
@@ -943,6 +1037,14 @@ The TOML `[stream]` section provides **initial defaults**; runtime
 | Unit | Chroma fallback cascade: the auth-time reducer clamps to the weakest attached client; encoder `ChromaUnsupported` → downgrade to the encoder's best; separately, a synthetic client `{"type":"decode_unsupported"}` → forced downgrade to 420 + fresh `config` + keyframe | No |
 | Unit | Resize hysteresis: dimension change ≤5% and aspect-ratio change ≤2% is suppressed (`resize_suppressed` sent); either threshold exceeded applies the resize | No |
 | Unit | Native is a per-dimension ceiling, not a ratio: on a 1920×1080 host, a `resize` to 1280×1024 (a ratio the host does not have) is applied as 1280×1024, and a `resize` to 3840×2160 is clamped to 1920×1080. Proves the aspect ratio follows the client and is never corrected toward the host's | No |
+| Unit | Tier quantization: requests for 1280×720, 1300×730 and 1279×719 on a 1920×1080 capture all land on the same 75 % tier, creating exactly one encoder | No |
+| Unit | At `max_tiers`, a session requesting a new geometry joins the nearest existing tier and receives `resize_suppressed` with the dimensions actually in force | No |
+| Unit | The controller is pinned to tier 0: a controller `resize` moves tier 0 rather than creating a tier, and a session that takes over the controller slot is migrated to tier 0 | No |
+| Unit | Tier lifecycle: a tier is created on its first subscriber and dropped on its last; tier 0 survives while any session exists | No |
+| Integration | With `max_tiers = 3` and a HW encoder, three sessions at 100 % / 75 % / 50 % each decode their own geometry, and tier 0 is still fed **zero-copy** (no readback on the tier-0 path) | Yes |
+| Unit | `max_tiers = 3` on the SOFTWARE path clamps to 1 with one `warn`, and streaming continues — not a startup error | No |
+| Unit | Per-tier keyframes: a join on tier 1 forces an IDR on tier 1 only; tier 0's cached IDR and its sequence are untouched | No |
+| Unit | Per-session `Sequence`: with two tiers live, neither tier's client observes a sequence gap, and neither requests an IDR for the other's frames | No |
 | Unit | **Policy drops are not congestion.** With `[transport] per_session_max_bps` capping one viewer below the stream bitrate, that session drops frames continuously and the session-wide bitrate is UNCHANGED: the FAST tier counts only `reason="congestion"` drops. Mixing the two would let one capped viewer drag the whole room down — the failure the ≥50 %/majority-override rule exists to prevent | No |
 | Unit | Congestion-reactive policy math: sustained loss above `loss_threshold_pct` for 200ms → `current * adjustment_factor` clamped to `min_bitrate_bps`; loss below `recovery_threshold_pct` for 1s + stable RTT → `current * recovery_factor` clamped to `max_bitrate_bps`; a single-window drop-queue spike → `current * fast_reduction_factor` | No |
 | Unit | Adaptive reducer: one viewer at 40 % loss with the controller clean leaves the bitrate unchanged; half the sessions above threshold for 200 ms applies the median | No |

@@ -273,7 +273,7 @@ override** of that `enigo` default for power users — a kernel-level injector
 (kernel `/dev/uinput`, X11 + Wayland + console, plus gamepad force-feedback). See
 [`input/UINPUT_LINUX_SPEC.md`](./input/UINPUT_LINUX_SPEC.md).
 
-**Audio design is LOCKED, implementation deferred** behind the video trigger.
+**Audio design is LOCKED and audio is IN V1** on every platform, Linux included.
 The Linux backend is the `pipewire` add-on — **native libpipewire** monitor
 capture (the old `pw-cat` subprocess is gone), Pulse/ALSA fallback. Host→client
 only; Opus or PCM codec. See [`audio/PIPEWIRE_LINUX_SPEC.md`](./audio/PIPEWIRE_LINUX_SPEC.md).

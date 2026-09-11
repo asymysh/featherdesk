@@ -36,4 +36,5 @@ and drop the resulting `.dll` files into the add-ons directory, e.g.:
 
 ```bash
 cargo build --release -p featherdesk-addon-wasapi   # cdylib  featherdesk-addon-wasapi.dll
+cargo build --release -p featherdesk-addon-win_vmic # cdylib  featherdesk-addon-win_vmic.dll
 ```

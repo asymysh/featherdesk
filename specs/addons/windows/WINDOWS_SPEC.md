@@ -2,7 +2,7 @@
 
 ## Overview
 
-Windows is a primary target for FeatherDesk. The use case covers both **remote control** and **gaming/high-fps streaming**. Target: 60fps at 1080p/1440p, <20ms total pipeline latency, H.264 as the default codec.
+Windows is a primary target for FeatherDesk. The use case covers both **remote control** and **gaming/high-fps streaming**. Target: 60fps at 1080p/1440p, H.264 as the default codec, and <20ms total pipeline latency **on the video path** — the figure this spec budgets against. End-to-end motion-to-photon with `[audio] enabled` (the default) is ~45ms, because audio-master A/V sync slaves the video clock to the audio clock; see [`../../media/MODULE_AUDIO.md`](../../media/MODULE_AUDIO.md).
 
 ---
 

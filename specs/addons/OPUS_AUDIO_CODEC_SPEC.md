@@ -147,5 +147,5 @@ add-on. Recommended combinations are listed in each OS audio `README.md`.
 
 ## Implementation Status
 
-📋 Specced; design locked, implementation deferred with the rest of audio. libopus
+📋 Specced; design locked, **in v1** with the rest of audio. libopus
 Rust FFI bindings pending.

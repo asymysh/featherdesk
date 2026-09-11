@@ -10,7 +10,7 @@
 
 ## Product Goals
 
-- Motion-to-photon latency: <20 ms on LAN at 1080p60, audio disabled; ~65 ms with audio enabled — see "Motion-to-photon budget"
+- Motion-to-photon latency: **~45 ms on LAN at 1080p60 with audio enabled (the default)**, <20 ms with `[audio] enabled = false`. ~65 ms only at the non-default `frame_ms = 20` — see "Motion-to-photon budget"
 - Resolution: up to 2560x1440
 - Framerate: 60fps (hardware), 30fps (software fallback)
 - Bandwidth: 5-15 Mbps/viewer
@@ -269,7 +269,7 @@ targets appear where they apply rather than in every file.
 | 15 | **Native Client** | [`./client/MODULE_NATIVE_CLIENT.md`](./client/MODULE_NATIVE_CLIENT.md) | v2 native desktop client plan — same QUIC protocol, full-HID gamepad, reliable 4:4:4, sub-ms input. **Split final; impl deferred.** |
 | 16 | **Auth** *(support)* | [`./core/MODULE_AUTH.md`](./core/MODULE_AUTH.md) | Authentication modes, session tokens, in-band resume credentials, role gating |
 | 17 | **Stream Params** *(support)* | [`./core/MODULE_STREAM_PARAMS.md`](./core/MODULE_STREAM_PARAMS.md) | Dynamic stream parameters, adaptive bitrate, chroma negotiation (shared `featherdesk-stream`) |
-| 18 | **Audio** *(deferred)* | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | Host→client system audio: Opus/PCM, stereo / 5.1 / 7.1, audio-master A/V sync. **Design locked; impl deferred.** |
+| 18 | **Audio** | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | Host→client system audio (Opus/PCM, stereo / 5.1 / 7.1, audio-master A/V sync) **and** client→host microphone. **In v1 on all three platforms**; `[audio] enabled` defaults to `true`. Mic ships Linux + Windows; macOS mic gated on signing. |
 | 19 | **ABI** *(support)* | [`./core/MODULE_ABI.md`](./core/MODULE_ABI.md) | The add-on ABI contract (`featherdesk-abi`): root-module surface + capability-descriptor registries (`AddonKind` / `CodecId` / `AbiErr`) — the single source of truth the host and every add-on compile against |
 
 > **Encoder, capture, and input implementations are not core modules.**
@@ -300,15 +300,6 @@ targets appear where they apply rather than in every file.
 >   directly) and adds full-HID gamepad, reliable 4:4:4, and sub-ms input. Design plan in
 >   `MODULE_NATIVE_CLIENT.md`; implementation deferred to v2. Connectivity
 >   (Tailscale `tsnet` vs alternatives) is the one open item there.
-> - **Audio** — **design LOCKED** (host→client system audio, pluggable per-OS
->   capture add-ons, pluggable Opus/PCM codec, stereo / 5.1 / 7.1, realtime
->   **audio-master** A/V sync; see `MODULE_AUDIO.md`). **Implementation** is
->   deferred behind video capture+encode working end-to-end **on Linux** — the
->   platform with a working reference implementation. The earlier "all three
->   OSes" trigger was unsatisfiable, since Windows and macOS gate no cutover
->   (`BRANCH.md` step 4), and so deferred audio indefinitely (GAP_TRIAGE OQ-02).
->   `[audio] enabled` remains `false` by default. Client→host mic is out of
->   scope for v1 and tracked as OQ-02b (Linux-first, post-v1).
 > - **Webcam redirection (client→host virtual camera)** — stripped from v1 to
 >   keep scope tight. Open questions before re-introduction: server-side decoder
 >   choice (recommend OpenH264 decoder, reusing the existing encoder add-on's
@@ -776,11 +767,12 @@ stream). Config and Clipboard are NOT FrameHeader types anymore.
 | VideoH264 | 1 | datagram + bootstrap | One H.264 access unit, Annex B (keyframe = SPS+PPS+IDR type 5) |
 | Ping | 2 | datagram | 4-byte u32 LE nonce; pong replies on the control stream |
 | _(reserved)_ | 3 | — | Reserved (client Pong is a JSON line on the **control stream**) |
-| AudioPCM | 4 | datagram media | Raw S16LE PCM, fragmented (the no-codec fallback). Carries the FrameHeader for capture Timestamp; codec/rate/channels in `config`. (impl deferred) |
+| AudioPCM | 4 | datagram media | Raw S16LE PCM, fragmented (the no-codec fallback). Carries the FrameHeader for capture Timestamp; codec/rate/channels in `config`. |
 | _(reserved)_ | 5 | — | Formerly VideoVP8 — VP8 rejected. Do not reuse without protocol version bump. |
 | _(retired)_ | 6 | — | Was Config — now a `{"type":"config"}` JSON line on the control stream |
 | VideoHEVC | 7 | datagram + bootstrap | One HEVC access unit, Annex B (keyframe = VPS+SPS+PPS+IDR types 19-20) |
-| AudioOpus | 8 | datagram media | One 20 ms Opus packet, single datagram (default audio codec). Carries the FrameHeader for capture Timestamp. (impl deferred) |
+| AudioOpus | 8 | datagram media | One Opus packet (`[audio] frame_ms`, default 10 ms), single datagram — the default audio codec. Carries the FrameHeader for capture Timestamp. |
+| AudioMic | 9 | datagram media (**C→S**) | One mic packet in the session's audio codec (Opus, or S16LE PCM with no codec add-on). The **only** client→server datagram in v1. Carries the FrameHeader with the client's capture timestamp. Controller-only |
 | CursorUpdate | 11 | datagram | 14-byte fixed record: hotspot position + visibility + ShapeID (bitmaps ride the cursor stream, tag 0x11) |
 | _(retired)_ | 12 | — | Was Clipboard — now `[u32 Len][JSON]` on the **clipboard stream** |
 | InputAck | 14 | input stream | 13-byte echo of client input seq + server timestamp (RTT) |
@@ -834,7 +826,7 @@ event at `(X, Y)` and the overlay drawn at `(X, Y)` are the same pixel
 
 ---
 
-### Contract 5: Audio -> Server  🔒 DESIGN LOCKED · ⏸️ IMPL DEFERRED (see MODULE_AUDIO)
+### Contract 5: Audio <-> Server  🔒 DESIGN LOCKED · ✅ IN V1 (see MODULE_AUDIO)
 
 ```rust
 // Audio: a per-OS capture add-on delivers PCM chunks; an encoder (Opus or PCM
@@ -878,6 +870,17 @@ pub trait SurfaceCapturer: Capturer {
     /// last one in Close), which was correct but uncheckable — see TD-01.
     fn next_surface(&mut self) -> Result<Option<FbInfo>, StreamError>;
 }
+
+// PER-CLIENT QUALITY TIERS keep this contract UNCHANGED, deliberately. The
+// surface is consumed by tier 0's encoder exactly as before; tiers 1+ are fed
+// from ONE CPU readback of the same frame (the `capture::Frame` the software
+// path already produces) and scaled per tier. The alternative —
+// `encode_surface(&FbInfo)` so several encoders can share one acquire — is a
+// cleaner long-term shape but bumps ABI_VERSION, and acceptance is exact
+// equality, so it invalidates every add-on in the field. It is therefore held
+// for the ABI v2 event and batched with every other pending break, rather than
+// spent on this feature alone. See MODULE_STREAM_PARAMS "Per-client quality
+// tiers"; the single-tier case is byte-identical to today.
 
 // Platform-specific surface handle as a tagged enum (not a struct of nullable
 // fields). Drop releases the underlying resource exactly once (RAII replaces the
@@ -1363,19 +1366,26 @@ table is a line of this table and may not contradict it.
 | Reassembly + decode | web client | 5.0 ms | MODULE_WEB_CLIENT |
 | Present (drawImage) | web client | 1.0 ms | MODULE_WEB_CLIENT |
 | **Total, audio disabled** | | **~20 ms** | the product target |
-| Audio jitter buffer, when audio is enabled | web client | +40 ms | MODULE_AUDIO |
+| Audio jitter buffer, `frame_ms = 10` (**the default**) | web client | +20 ms | MODULE_AUDIO |
 | Audio decode + worklet | web client | +5 ms | MODULE_AUDIO |
-| **Total, audio enabled** | | **~65 ms** | |
+| **Total, audio enabled at the default `frame_ms = 10`** | | **~45 ms** | **the shipped default** |
+| Audio jitter buffer at `frame_ms = 20` instead | web client | +40 ms | MODULE_AUDIO |
+| **Total, audio enabled at `frame_ms = 20`** | | **~65 ms** | |
 
-**Enabling audio triples motion-to-photon**, because the renderer presents the
-video frame nearest the audio playout time and audio playout is one jitter buffer
-behind capture. That is the deliberate trade of audio-master sync — a 20 ms audio
-dropout is instantly audible, a frame of video judder is not — but it is a trade,
-not a free choice, and `[audio] enabled` is `false` by default partly for this
-reason. An operator who wants both interactive pointer latency and sound should
-run `[audio] frame_ms = 10`, which halves the packet interval and lets the client
-target a ~20 ms buffer instead of ~40 ms, bringing the audio-enabled total to
-~45 ms.
+**Enabling audio roughly doubles motion-to-photon**, because the renderer
+presents the video frame nearest the audio playout time and audio playout is one
+jitter buffer behind capture. That is the deliberate trade of audio-master sync —
+a 20 ms audio dropout is instantly audible, a frame of video judder is not.
+
+**FeatherDesk ships with sound, so ~45 ms is the default experience and 20 ms is
+the opt-out.** `[audio] enabled` defaults to `true` and `[audio] frame_ms`
+defaults to `10` precisely to make the default as cheap as audio-master sync
+allows: 10 ms frames halve the packet interval and let the client target a
+~20 ms buffer instead of ~40 ms. An operator who needs interactive pointer
+latency above all else sets `[audio] enabled = false` and gets the ~20 ms path
+back, with no other change to the pipeline — with audio off the video clock is
+its own master. The ~65 ms figure is now reachable only by explicitly choosing
+`frame_ms = 20`.
 
 **Software encode** does not meet the 20 ms figure and is not expected to: the
 project target is 60 fps on hardware, **30 fps on the software fallback**, and
@@ -1492,6 +1502,7 @@ featherdesk/                         # Cargo workspace
     ├── capture/{kms_egl, nvfbc}(Linux)  {sck}(macOS)  {dxgi_dd}(Windows)
     ├── encode/{openh264, x264}  {libva, amf_rocm}(Linux)  {nvenc}  {qsv, mf_hw, amf}(Windows)  {vt}(macOS: vt_sw|vt_hw)
     ├── audio/{pipewire}(Linux)  {wasapi}(Windows)  {sck_audio}(macOS)  {opus}(codec, all)
+    ├── audio-sink/{pw_vmic}(Linux)  {win_vmic}(Windows)   # client→host virtual mic
     └── input/{uinput}(Linux)  {interception, vigem, win_touch}(Windows)  {gcvirtual}(macOS)
           # kb/mouse default = in-core `enigo`; these add-ons are overrides/extensions
 ```
@@ -1504,7 +1515,7 @@ featherdesk/                         # Cargo workspace
 
 > **Crate-list clarifications (read with the tree above):**
 > - `featherdesk-auth` (auth modes + session tokens + role gating) and
->   `featherdesk-audio` (host→client audio; **impl deferred**) are also library
+>   `featherdesk-audio` (host→client audio + client→host mic) are also library
 >   crates — omitted from the art above only for brevity. The dependency graph
 >   already shows `auth`.
 > - `server` and `pipeline` are **not** separate crates. They are modules inside
@@ -1529,7 +1540,7 @@ each crate gets a 3-line `README` that **links** to its spec here — never a co
 | `featherdesk-capture` | [`./media/MODULE_CAPTURE.md`](./media/MODULE_CAPTURE.md) | `Capturer` + `SurfaceCapturer` traits |
 | `featherdesk-encode` | [`./media/MODULE_ENCODE.md`](./media/MODULE_ENCODE.md) | SW `Encoder` trait + libyuv converter |
 | `featherdesk-hwencode` | [`./media/MODULE_HARDWARE_ENCODE.md`](./media/MODULE_HARDWARE_ENCODE.md) | `HardwareEncoder` trait |
-| `featherdesk-audio` | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | impl deferred |
+| `featherdesk-audio` | [`./media/MODULE_AUDIO.md`](./media/MODULE_AUDIO.md) | in v1, all three platforms |
 | `featherdesk-input` | [`./interaction/MODULE_INPUT.md`](./interaction/MODULE_INPUT.md) **+** [`./interaction/MODULE_GAMEPAD.md`](./interaction/MODULE_GAMEPAD.md) | **non-1:1:** gamepad is part of the input crate, not its own crate |
 | `featherdesk-clipboard` | [`./interaction/MODULE_CLIPBOARD.md`](./interaction/MODULE_CLIPBOARD.md) | core (compiled-in, not an add-on) |
 | `featherdesk-filetransfer` | [`./interaction/MODULE_FILETRANSFER.md`](./interaction/MODULE_FILETRANSFER.md) | core |
@@ -1561,7 +1572,7 @@ each crate gets a 3-line `README` that **links** to its spec here — never a co
 | TD-05 | Medium | `main.go:158` | Hardcoded 2560x1440 for input device | Resolved by MODULE_INPUT — Dispatcher.Resize follows stream dims, pipeline derives from capture |
 | TD-06 | Medium | `compositor.js:22` and `:309` | Duplicate `init()` declaration — the second shadows the first, so the body at `:22` is dead and only `:309` is bound to `DOMContentLoaded` (`:318`) | R-CLI-01 |
 | TD-07 | ~~Medium~~ obsolete | `internal/server/server.go:148` + `cmd/server/client/compositor.js` | Codec type mismatch (H264 wire constant carrying VP8 data) | Structurally impossible in v1: the codec is not a constant on either side — the server advertises the encoder's own `codec()` string in `{"type":"config"}` and the client configures `VideoDecoder` from that message (R-PRO-01, TD-21). VP8 is additionally rejected and wire slot 5 permanently retired |
-| TD-08 | Medium | `audio/capture.go` | Race condition on cmd/stdout fields | Deferred — Audio module deferred per TECHSTACK |
+| TD-08 | Medium | `audio/capture.go` | Race condition on cmd/stdout fields | **Eliminated by construction.** The Go design shelled out to `pw-cat` and shared `cmd`/`stdout` across goroutines; the Rust design has no subprocess — each audio capture add-on owns its handle on the audio thread (`MODULE_PIPELINE` "Audio Loop"), and the PCM ring is the only cross-thread surface |
 | TD-09 | ~~Medium~~ obsolete | `x11grab.go:165` | Hardcoded developer path `/home/aseem/...` | `x11grab.go` being deleted |
 | TD-10 | Medium | `protocol.go` | No version/sequence in wire protocol | Fixed in new protocol spec (v1, 22-byte header) |
 | TD-11 | Medium | `input/protocol.go:23-51` | All Inject errors silently discarded | Resolved by MODULE_INPUT — Dispatcher.Dispatch returns errors; server logs at warn |
@@ -1588,7 +1599,7 @@ each crate gets a 3-line `README` that **links** to its spec here — never a co
 |----|----------|----------|-------|------------|
 | TD-23 | High | `server.go:149-178` | Broadcast sends ONE message PER NAL → multi-NAL H.264 yields partial access units; breaks WebCodecs. **Addendum (confirmed via `vaapi_hardware_encoding` track review, `internal/encode/ffmpeg.go`):** the same bug class shipped independently in the ffmpeg/VA-API encoder path (commit `3507455`) and was patched same-day (`99648f2`) by draining every NAL currently queued on the channel before returning — a timing heuristic, not true access-unit-boundary detection, so it could still resplit under bursty I/O. | One message per frame, concatenate NALs (Annex B). The new `Encoder::encode()`/`HardwareEncoder::encode_surface()` contract (`MODULE_ENCODE.md`/`MODULE_HARDWARE_ENCODE.md`) closes this **structurally**, not heuristically: an add-on MUST return exactly one complete `EncodedUnit` per call — there is no "whatever's in the channel right now" path available to a conforming add-on, and for a pipelined out-of-process encoder the boundary is the Access Unit Delimiter its child emits (see MODULE_ENCODE). |
 | TD-24 | High | `server.go:164-168` | IDR cache stores only the IDR NAL; SPS/PPS (separate messages) lost → undecodable | Cache whole per-frame keyframe message (contains SPS+PPS+IDR) |
-| TD-25 | High | Video: `internal/capture/kms.go:128` and `internal/capture/x11grab.go:120` (both `Timestamp: uint64(time.Now().UnixMilli())`; `cmd/server/main.go:279` broadcasts `frame.Timestamp` unmodified). Audio: `cmd/server/main.go:295` → `Server.BroadcastAudio(chunk, uint64(time.Now().UnixMilli()))`, **confirmed via the `pipewire_audio_capture` track review** | Video + Audio stamped with wall-clock ms — video at capture, audio at consumption; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; the audio PCMChunk carries the capture timestamp (audio design locked; impl deferred) |
+| TD-25 | High | Video: `internal/capture/kms.go:128` and `internal/capture/x11grab.go:120` (both `Timestamp: uint64(time.Now().UnixMilli())`; `cmd/server/main.go:279` broadcasts `frame.Timestamp` unmodified). Audio: `cmd/server/main.go:295` → `Server.BroadcastAudio(chunk, uint64(time.Now().UnixMilli()))`, **confirmed via the `pipewire_audio_capture` track review** | Video + Audio stamped with wall-clock ms — video at capture, audio at consumption; spec required monotonic-ns at capture → A/V sync impossible | Canonical CLOCK_MONOTONIC ns, stamped at capture by the capture add-on; the audio PCMChunk carries the capture timestamp (audio in v1 on all three platforms) |
 | TD-26 | High | `main.go:249-252` | New-client handler forces keyframe + `capturer.Restart()` (respawns capture) → storm for all viewers | Serve cached IDR; conditional keyframe; never restart capture; rate-limit |
 | TD-27 | Med | `main.go:158` | Input device hardcoded 2560×1440 ≠ stream dims → cursor offset | Resolved by MODULE_INPUT — input dims = stream dims; Dispatcher.Resize on resolution change |
 | TD-28 | Med | Protocol/round-1 | Length-prefix NAL framing added client AVCC complexity for no browser benefit | Reverted to Annex B per-frame concatenation |
