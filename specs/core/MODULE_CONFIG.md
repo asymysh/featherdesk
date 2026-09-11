@@ -178,6 +178,14 @@ base_path    = "/"               # URL path prefix every route is served under, 
                                  # bind and is not proxied.
 bind         = "0.0.0.0:30084"    # TCP *and* UDP listen address: HTTPS bootstrap +
                                   # HTTP/3 + WebTransport, one port (restart required)
+max_egress_bps = 0                # Admission-time egress guard: refuse a session whose
+                                  # admission would push (live sessions + 1) x the CURRENT
+                                  # stream bitrate past this ceiling, using the existing
+                                  # close::SERVER_FULL (4429) with reason "max_egress".
+                                  # 0 = no guard (default). Turns silent oversubscription of
+                                  # the host uplink into an explicit, debuggable refusal. It
+                                  # is an ADMISSION gate, not a shaper — see
+                                  # [transport] per_session_max_bps for the pacing cap.
 allow_origin = ""                 # empty = same-origin only (SECURE DEFAULT).
                                   # Set to "*" only for trusted LANs. Server rejects
                                   # WebTransport upgrades where the Origin header doesn't match.
@@ -253,6 +261,14 @@ websocket_fallback      = true    # serve the degraded WebSocket carrier on /ws
                                   # router at bind). false → /ws returns 501 and
                                   # UDP-blocked clients cannot connect at all. See
                                   # MODULE_TRANSPORT "Carrier selection".
+per_session_max_bps     = 0       # Per-session pacing cap (token bucket on each session's
+                                  # video pump). 0 = uncapped (default). Overflow reuses the
+                                  # existing drop-oldest ring, so a capped VIEWER gets a lower
+                                  # effective frame rate at full resolution. The CONTROLLER
+                                  # slot is exempt by default — a capped controller is a laggy
+                                  # controller, which is the wrong trade. Drops from this cap
+                                  # are labelled reason="policy" and are EXCLUDED from the
+                                  # congestion reducer (MODULE_STREAM_PARAMS).
 ws_max_message_bytes    = "16MiB" # inbound cap on the fallback carrier; must be >= the
                                   # 16 MiB per-frame reassembly cap
 ws_send_queue_bytes     = "8MiB"  # fallback carrier out-queue byte ceiling; exceeding it
@@ -298,6 +314,13 @@ abi_strict   = false              # true = a single ABI-mismatched library abort
 #   forced  = use force_addon only, fail at startup if unavailable
 mode         = "auto"
 force_addon  = ""                 # e.g. "kms_egl", "nvfbc", "sck", "dxgi_dd" (restart required)
+idle_release_after = "0s"         # Stage 2 idle suspension: after this much CONTINUOUS idle
+                                  # (zero AUTHENTICATED sessions), drop the capturer and the
+                                  # encoder; rebuild on the 0->1 transition. "0s" = never
+                                  # release, the default, because the rebuild costs a full
+                                  # FrameLoop::open(). Stage 1 (park the frame loop) is
+                                  # unconditional and has no key. See MODULE_PIPELINE
+                                  # "Idle suspension".
 # How the pointer reaches the client.
 #   auto      = "separate" when the selected add-on reports AddonCaps::CURSOR,
 #               else "embedded" (which requires AddonCaps::EMBED_CURSOR)
@@ -739,6 +762,9 @@ value is present but fails its rule; an **absent** key always takes its default 
 | Key | Type | Default | Valid range / domain | Hot | On invalid |
 |-----|------|---------|----------------------|-----|-----------|
 | `server.base_path` | string | `"/"` | `"/"`, or a path beginning **and** ending with `/` (e.g. `"/desk/"`); no `..`, no query, no scheme. Sourced into `transport::Config`, not `server::Config` — the transport strips it (MODULE_TRANSPORT "Base path") | ❌ | startup error |
+| `server.max_egress_bps` | u64 | `0` | `0` (disabled) or 1_000_000 – 100_000_000_000 | ✅ (new sessions) | startup error |
+| `capture.idle_release_after` | duration | `"0s"` | `"0s"` (never) or 1s – 1h | ✅ | startup error |
+| `transport.per_session_max_bps` | u64 | `0` | `0` (uncapped) or 100_000 – 10_000_000_000 | ✅ (new sessions) | startup error |
 | `server.bind` | string | `"0.0.0.0:30084"` | `host:port`; host parses as an IP literal or a hostname; port 1–65535. One address, two listeners (TCP + UDP) | ❌ | startup error |
 | `server.allow_origin` | string | `""` | `""` (same-origin) or `"*"` or an exact origin `scheme://host[:port]` | ✅ | startup error |
 | `server.max_clients` | u32 | `25` | 1–100 | ✅ (new sessions) | startup error |

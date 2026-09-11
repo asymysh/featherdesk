@@ -45,6 +45,7 @@ The client is a single-page application embedded in the server binary via `rust-
 | `files.js` | Drag-drop upload + Files panel for downloads — opens per-transfer `0x03` lanes on the session, bounded by `config.fileStreamBudget` |
 | `gamepad.js` | rAF poll of getGamepads, diff-send 0x40, connect/disconnect 0x41/0x42, rumble apply |
 | `stats.js` | Outbound telemetry to server (R-CLI-06); on-screen FPS/latency/quality HUD (R-CLI-13) |
+| `ui.js` | The in-session control panel (settings, controller-gated stream controls, fullscreen / pointer-lock / gaming-mode buttons). **The documented boundary for UI growth** — see "In-session control surface" |
 
 ---
 
@@ -364,6 +365,27 @@ request a keyframe through the throttle in "Video Decode", and bump a metric.
 - `codec_unavailable` → show a persistent overlay naming the `codec`, and do
   **not** configure a decoder. Input, clipboard and file transfer keep working;
   this is a defined, visible outcome rather than a black canvas.
+#### Resize requests
+
+The controller's debounced `ResizeObserver` (250 ms) sends **device pixels**,
+not CSS pixels:
+
+```js
+// connection.js — the one place resize is sent.
+const dpr = window.devicePixelRatio || 1;
+sendControl({ type: "resize",
+              width:  Math.round(canvas.clientWidth  * dpr),
+              height: Math.round(canvas.clientHeight * dpr) });
+```
+
+Without the multiply a HiDPI client (`dpr = 2`) asks for half the resolution it
+then upscales, which looks soft for no bandwidth saving — the server would have
+been willing to send the real thing. The server clamps each dimension against
+host native and otherwise honours the request, **including its aspect ratio**
+(MODULE_STREAM_PARAMS "Constraints"), so a non-host-ratio viewport stops being
+letterboxed. `dpr` is re-read on every send rather than cached: it changes when
+the window moves between displays of different densities.
+
 - `resize_suppressed` → keep the requested canvas size, letterbox at the
   `{width,height}` given (which are the **effective** stream dimensions), show a
   transient toast, and do not re-send `resize`.
@@ -1013,6 +1035,73 @@ Client uses `clipboardchange` (Chrome/Edge) or `copy`/`paste` interception
 (Firefox/Safari). See [`MODULE_CLIPBOARD.md`](../interaction/MODULE_CLIPBOARD.md).
 
 ### R-CLI-10: Modularize JavaScript
+## In-session control surface
+
+The wire vocabulary for user control already exists and, before this section,
+nothing exercised it: `resize`, `set_bitrate`, `set_fps`, `set_hdr`, `keyframe`,
+the clipboard and file-transfer lanes, gamepad, and the R-CLI-13 HUD's read-only
+numbers. T1 ships the surface that wires up **only what is already specced** —
+no new messages, no server change (GAP_TRIAGE OQ-07).
+
+### T1 — the panel
+
+`ui.js` promotes the R-CLI-13 HUD from a read-only overlay to a panel, still
+default-hidden behind the same **F9** toggle and on-canvas icon:
+
+| Control | Wires to | Gate |
+|---|---|---|
+| Bitrate slider | `{"type":"set_bitrate"}` | **controller only** — hidden, not merely disabled, for `view`/`player` |
+| FPS selector | `{"type":"set_fps"}` | controller only |
+| HDR toggle | `{"type":"set_hdr"}`; reflects `hdr_unavailable` and its `reason` | controller only |
+| Force keyframe | `{"type":"keyframe"}` (client-side 500 ms throttle already specced) | any role |
+| Fullscreen | Fullscreen API; re-sends `resize` on change (device pixels, see "Resize requests") | any role |
+| Pointer lock | the existing `input.js` pointer-lock path | controller only |
+| Downloads | the existing `files.js` panel | per `fileStreamBudget` |
+| Status readout | carrier (`webtransport`/`websocket`), effective role, clipboard direction, cert fingerprint in self-signed mode — all values the client already holds | any role |
+
+**Role gating is by construction, not by CSS.** A control whose message the
+server would refuse for this session's effective role is **not rendered**.
+Disabling it visually would invite a user to try, and the server's answer is a
+silent drop plus `featherdesk_role_rejects_total` — a control that appears to do
+nothing. The panel re-renders on `auth_ok` and on any role change, since a
+takeover can demote a controller mid-session.
+
+### T1+ — gaming mode (Keyboard Lock)
+
+A "gaming mode" toggle calling `navigator.keyboard.lock()` so `Escape`,
+`Alt+Tab`, `Meta` and the function keys reach the **remote** application instead
+of the local browser. Without it, full-screen remote app and game use does not
+really work: the keys those applications depend on are exactly the ones the
+browser reserves.
+
+- Requires a user gesture and fullscreen; both are already present on the path
+  that turns it on.
+- **Chromium-only** (`navigator.keyboard` is absent in Firefox and Safari). Feature-detect
+  and hide the toggle where it is missing — this degrades to exactly today's
+  behaviour, and is not an error state or a warning.
+- Release on exit from fullscreen, on `visibilitychange` to hidden, and on
+  session close, alongside the existing R-CLI-12 focus-loss key release — a
+  locked keyboard that outlives its session is an unrecoverable browser tab.
+- Purely client-side: no new wire message, no server change.
+
+### T2 — explicitly not in v1
+
+Audio toggle + volume (needs OQ-02), resolution/scale control beyond the
+automatic `resize` (needs OQ-03), and per-user quality (needs OQ-06). Listed so
+the boundary is deliberate rather than an omission.
+
+### The constraint this section must respect
+
+"No build step, no framework, ES modules served as-is" is a stated property of
+this client. A settings panel is the piece most likely to erode it, so the
+boundary is stated rather than assumed: **all of it lives in `ui.js`**, which
+may import from the other modules and **must not be imported by them**. `ui.js`
+is a leaf. A control that needs state from `connection.js` reads it through the
+accessor that module already exports; it does not get a new back-channel, and no
+existing module grows a UI branch.
+
+---
+
 Split `compositor.js` into modules:
 ```
 client/
@@ -1182,6 +1271,10 @@ its own capture clock on return.
 | Integration | Carrier fallback: with UDP blackholed, the 3 s WebTransport deadline fires and the client completes auth over `/ws` and decodes the bootstrap IDR — identical tags and framing on both carriers | Browser automation (Playwright) |
 | Integration | Effective-role adoption: a second `control` client receives `auth_ok` with `role:"view"` and `downgrade_reason:"controller_slot_taken"`, does not open the input stream, and does not reconnect-loop | Browser automation (Playwright) |
 | Integration | Teardown: `pagehide` releases held inputs first, closes every `VideoFrame` and the decoder, disconnects the worklet before closing the `AudioContext`, and is a no-op on a second call | Browser automation (Playwright) |
+| Unit | Resize requests carry DEVICE pixels: with `devicePixelRatio = 2` and an 800×450 CSS canvas, the `resize` message reads `{"width":1600,"height":900}` | No |
+| Integration | Panel role gating is by construction: a `view` session's DOM contains **no** bitrate/fps/HDR control (absent, not disabled), and a controller demoted by takeover re-renders without them mid-session | Browser automation (Playwright) |
+| Unit | Gaming mode feature-detects: with `navigator.keyboard` undefined the toggle is not rendered and nothing throws; with it present, exiting fullscreen and `visibilitychange` to hidden both call `keyboard.unlock()` | No |
+| Unit | `ui.js` is a leaf: no other client module imports it (static check over the ES module graph) | No |
 | Visual | Render quality, cursor alignment | Manual + screenshot comparison |
 | Performance | Decode latency, frame drop rate | WebCodecs metrics API |
 

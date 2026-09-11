@@ -644,8 +644,25 @@ the policy; add-ons translate.
 
 ### Constraints
 
-- **Server clamps** to display native resolution. Client cannot request
-  4K when display is 1080p.
+- **Native resolution is a per-dimension CEILING, not the aspect ratio.** Each
+  requested dimension is clamped independently against the corresponding native
+  dimension — a client on a 1080p host cannot request 4K — but the **aspect
+  ratio follows the client viewport**, and a request whose ratio differs from
+  the host's is honoured rather than corrected (GAP_TRIAGE OQ-03). This is the
+  whole of the host-side-resolution answer: FeatherDesk never mode-sets the host
+  desktop on Linux (MODULE_CAPTURE "The module intentionally does NOT support"),
+  so letting the encoder's *output* follow the viewport is what removes the two
+  costs a fixed native ratio imposes — the client letterboxing every mismatched
+  session, and the encoder spending bitrate on detail the client resamples away.
+  Capture stays native on every backend; only the scale target moves, so this is
+  a clamp change and nothing downstream is affected (the Converter scales on the
+  SW path, the encoder's VPP on the HW path).
+- **The client requests DEVICE pixels, not CSS pixels.** The requesting client
+  multiplies its canvas dimensions by `devicePixelRatio` before sending
+  `resize`, so a HiDPI viewport asks for the resolution it will actually display
+  at instead of asking for half of it and upscaling (MODULE_WEB_CLIENT "Resize
+  requests"). The server applies its clamp to the device-pixel figure it
+  receives and needs no knowledge of the client's DPR.
 - **One reconfig at a time.** Concurrent resize requests are coalesced; the
   pipeline applies only the latest.
 - **Hysteresis.** Server applies a resize if ANY dimension changes by >5%
@@ -728,7 +745,11 @@ send ParamDelta::Telemetry { network_rtt_ms, packet_loss_pct }   // hints only
    FAST path (server-side): the datagram out-queue (frame_out) is dropping frames
        on overflow, on the reference session or on ≥50 % of sessions — the server,
        not the client, observes this immediately (a datagram send is
-       fire-and-forget and reports nothing). On a sustained drop spike:
+       fire-and-forget and reports nothing). CONGESTION DROPS ONLY: this tier
+       counts featherdesk_datagram_send_drops_total{reason="congestion"}. A drop
+       attributed to [transport] per_session_max_bps carries reason="policy"
+       and is EXCLUDED — it is the operator's cap, not the network.
+       On a sustained drop spike:
        new_bitrate = max(current * fast_reduction_factor, min_bitrate)
        (single measurement; 0.5x under the shipped defaults).
    SLOW path (client feedback):
@@ -921,6 +942,8 @@ The TOML `[stream]` section provides **initial defaults**; runtime
 | Unit | HDR admission: `set_hdr:true` with one attached session reporting `decode.hevc10 == false` is refused with reason `attached_client_cannot_decode`; capture is never switched to 10-bit | No |
 | Unit | Chroma fallback cascade: the auth-time reducer clamps to the weakest attached client; encoder `ChromaUnsupported` → downgrade to the encoder's best; separately, a synthetic client `{"type":"decode_unsupported"}` → forced downgrade to 420 + fresh `config` + keyframe | No |
 | Unit | Resize hysteresis: dimension change ≤5% and aspect-ratio change ≤2% is suppressed (`resize_suppressed` sent); either threshold exceeded applies the resize | No |
+| Unit | Native is a per-dimension ceiling, not a ratio: on a 1920×1080 host, a `resize` to 1280×1024 (a ratio the host does not have) is applied as 1280×1024, and a `resize` to 3840×2160 is clamped to 1920×1080. Proves the aspect ratio follows the client and is never corrected toward the host's | No |
+| Unit | **Policy drops are not congestion.** With `[transport] per_session_max_bps` capping one viewer below the stream bitrate, that session drops frames continuously and the session-wide bitrate is UNCHANGED: the FAST tier counts only `reason="congestion"` drops. Mixing the two would let one capped viewer drag the whole room down — the failure the ≥50 %/majority-override rule exists to prevent | No |
 | Unit | Congestion-reactive policy math: sustained loss above `loss_threshold_pct` for 200ms → `current * adjustment_factor` clamped to `min_bitrate_bps`; loss below `recovery_threshold_pct` for 1s + stable RTT → `current * recovery_factor` clamped to `max_bitrate_bps`; a single-window drop-queue spike → `current * fast_reduction_factor` | No |
 | Unit | Adaptive reducer: one viewer at 40 % loss with the controller clean leaves the bitrate unchanged; half the sessions above threshold for 200 ms applies the median | No |
 | Unit | Cold start: with the shipped defaults (`bitrate_bps = 0`, `qp = 26`, adaptive enabled), the controller emits nothing until the first congestion signal, then seeds from `8*congestion_window/smoothed_rtt` clamped into `[min,max]` and stays in bitrate mode | No |

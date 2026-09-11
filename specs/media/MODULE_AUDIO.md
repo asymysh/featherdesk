@@ -7,10 +7,20 @@
 > pluggable Opus/PCM codec, realtime **audio-master** A/V sync). It supersedes
 > the old Linux-only `pw-cat` subprocess design.
 >
-> **Implementation status:** Deferred behind the same trigger as before — video
-> capture+encode working end-to-end on Linux + macOS + Windows. Locking the
-> design now stops it contradicting the rest of the spec base; no code is pulled
-> forward.
+> **Implementation status:** Deferred behind **video capture+encode working
+> end-to-end on Linux** — not on all three OSes. The earlier all-three trigger
+> was unsatisfiable: `BRANCH.md` "Migration Strategy" step 4 states that Windows
+> and macOS are specced, not built, and gate no cutover, so a trigger requiring
+> them deferred audio indefinitely while reading as "coming later" (GAP_TRIAGE
+> OQ-02). Linux is the platform with a working Go reference implementation, so
+> the trigger now names the only platform that can actually fire it. Un-deferring
+> lands two add-ons — `pipewire` capture and the `opus` codec — and nothing else.
+>
+> **`[audio] enabled` stays `false` by default.** Audio-master sync moves
+> motion-to-photon from ~20 ms to ~65 ms (~45 ms at `frame_ms = 10`), so the
+> latency argument is an argument about the default, not about shipping the
+> feature. Locking the design now stops it contradicting the rest of the spec
+> base; no code is pulled forward.
 >
 > **Scope:** Audio is **host→client only** (the remote machine's system audio
 > output, streamed to the viewer). Client→host **microphone is out of scope**

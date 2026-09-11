@@ -514,6 +514,21 @@ The module intentionally does NOT support:
 > `CAP_SYS_ADMIN`, nor headless Wayland with no forceable connector. Neither
 > add-on is selected ahead of KMS+EGL, and neither reopens containerized
 > deployment (see `PROJECT_ARTIFACTS/GAP_TRIAGE.md`, closed finding C1).
+- **Host display mode-setting on Linux** — permanently out of scope, and
+  recorded here so it is not re-proposed each review (GAP_TRIAGE OQ-03).
+  Matching the host desktop mode to the client window would require asking X or
+  Wayland to change mode, and `kms_egl` deliberately operates **below** the
+  display server. Talking to the display server to mode-set forfeits exactly the
+  display-server-agnostic property that justified rejecting every other Linux
+  capture path — the cure contradicts the architecture's main selling point.
+  This is a Linux-specific architectural conflict, not a portability chore:
+  Windows (`ChangeDisplaySettingsEx`) and macOS (`CGDisplaySetDisplayMode`) have
+  clean APIs and are not blocked by it. **The client drives the encoder's output
+  dimensions instead** (MODULE_STREAM_PARAMS "Constraints"), which removes the
+  letterboxing and the wasted bitrate without touching the host mode. Real
+  mode-setting is done **only** for the Windows IddCx headless case, where
+  FeatherDesk owns the virtual display and setting its mode list is legitimate
+  (see `DXGI_DD_WINDOWS_SPEC.md`).
 - **Windows WGC / GDI / Magnification** — rejected (slower than DXGI DD
   with no benefit)
 - **Pipeline-level frame buffering** — capture add-ons are pull-latest:

@@ -148,7 +148,14 @@ pub trait Session: Send + Sync {
     /// are identified by tag, NOT by accept order. See "Stream Identification".
     async fn accept_stream(&self, cancel: CancellationToken) -> Result<Box<dyn Stream>, TransportError>;
 
-    /// Opens a server-initiated bidirectional stream (unused in v1).
+    /// Opens a server-initiated bidirectional stream. **No v1 caller** — every
+    /// server-initiated lane in v1 is unidirectional (`open_uni_stream`), and
+    /// every bidirectional lane is client-initiated and arrives via
+    /// `accept_stream`. It is kept, rather than deleted, because both carriers
+    /// natively provide it and the v2 native client's reliable-4:4:4 lane is the
+    /// expected first user; an implementation MUST still provide it so the trait
+    /// is uniform across carriers. A reviewer finding no call site has found the
+    /// documented state, not an omission.
     async fn open_stream(&self, cancel: CancellationToken) -> Result<Box<dyn Stream>, TransportError>;
 
     /// Opens a server-initiated unidirectional stream. Used for the bootstrap
@@ -1004,6 +1011,37 @@ describes its *throughput under loss*, not its support status.
 > See [`../v2/MODULE_NETWORK.md`](../v2/MODULE_NETWORK.md) for the v2 plan to
 > remove the manual step.
 
+### Per-session pacing cap
+
+`[transport] per_session_max_bps` (0 = uncapped, the default) puts a token
+bucket on each session's **video pump**, refilled at the configured rate. When a
+frame does not fit the bucket it is dropped by the pump's existing
+**drop-oldest** ring rather than queued — so a capped session degrades as a
+lower *effective frame rate at full resolution*, never as a growing latency
+backlog. That trade is right for a passive viewer and wrong for whoever is
+driving, so **the controller slot is exempt by default**: a capped controller is
+a laggy controller.
+
+This is per-session **pacing**; it is not per-user *quality*. With one encoder
+every session receives byte-identical access units, so until per-client tiers
+exist (GAP_TRIAGE OQ-06) the only lever available downstream of the encoder is
+which frames each session gets. A genuine per-user bitrate — different encodes
+at different qualities — requires the surface-sharing ABI change and is a v2
+item.
+
+> **The interaction that must be respected.** A `frame_out` drop on the
+> reference session is a FAST-tier congestion signal and triggers the adaptive
+> loop's 0.5× cut **for every session** (MODULE_STREAM_PARAMS "Congestion-Reactive
+> Bitrate Control"). A drop caused by this cap is **policy, not congestion**: the
+> network is fine and the operator asked for it. Policy drops MUST therefore
+> carry `reason="policy"` on
+> `featherdesk_datagram_send_drops_total{kind,reason}` — the existing
+> per-session ring-drop counter, which gains a `reason` label whose other value
+> is `congestion` — and be **excluded from the congestion reducer**. Without that exclusion, capping one
+> viewer drags the whole room's bitrate down — which is precisely the failure the
+> majority-override rule was written to prevent, re-introduced through a
+> different door.
+
 ### Liveness on both carriers
 
 `keepalive_period` and `max_idle_timeout` are **carrier-generic**: identical
@@ -1216,6 +1254,9 @@ reliable lane is a broken client, not a slow one.
 | Unit | On the WebSocket carrier the SLOW adaptive tier reads client `stats` and not `PathStats.lost_packets` (which is 0): with a client reporting 5 % loss the loop reduces bitrate, and with `lost_packets` mocked non-zero on that carrier the loop ignores it | No |
 | Integration | **`base_path` strip covers the upgrade paths.** With `base_path = "/desk/"`, `/desk/wt` and `/desk/ws` complete their upgrades and bare `/wt` and `/ws` return 404 — proving the prefix is stripped upstream of the carrier-specific match, not applied inside the router | No |
 | Unit | A request path that does not begin with `base_path` is 404'd by the transport and the `HttpRouter` is never invoked | No |
+| Integration | Per-session pacing cap: with `per_session_max_bps` at half the stream bitrate, a viewer session receives roughly half the frames at full resolution (no resolution change, no growing queue), while an uncapped session on the same server receives all of them | No |
+| Unit | A drop caused by `per_session_max_bps` increments `featherdesk_datagram_send_drops_total{kind="video",reason="policy"}` and does **not** feed the FAST-tier congestion reducer: the session-wide bitrate is unchanged after 100 policy drops | No |
+| Unit | The controller slot is exempt from the pacing cap by default: with the cap set below the stream bitrate, the controller session drops no frames | No |
 | Integration | `allow_origin = ""` (default) rejects a cross-origin WebTransport upgrade and a cross-origin `/ws` upgrade; `"*"` accepts both | No |
 | Integration | A mis-tagged stream (unknown tag, second `0x00`, `0x01` from a viewer) is cancelled at stream scope; the session and its other streams keep running | No |
 | Load | `fileStreamBudget` ceiling: a client that opens more file-transfer streams than advertised has the extras flow-controlled by QUIC (the open promise never settles); its 10 s open deadline fires and surfaces `too_many_streams` per file. The session, the control/input/clipboard streams and the in-flight transfers are unaffected — no panic, no stall | No |

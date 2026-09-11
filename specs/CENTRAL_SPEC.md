@@ -303,8 +303,12 @@ targets appear where they apply rather than in every file.
 > - **Audio** — **design LOCKED** (host→client system audio, pluggable per-OS
 >   capture add-ons, pluggable Opus/PCM codec, stereo / 5.1 / 7.1, realtime
 >   **audio-master** A/V sync; see `MODULE_AUDIO.md`). **Implementation** is
->   deferred behind the same trigger (video capture+encode working end-to-end on
->   all three OSes). Client→host mic is out of scope.
+>   deferred behind video capture+encode working end-to-end **on Linux** — the
+>   platform with a working reference implementation. The earlier "all three
+>   OSes" trigger was unsatisfiable, since Windows and macOS gate no cutover
+>   (`BRANCH.md` step 4), and so deferred audio indefinitely (GAP_TRIAGE OQ-02).
+>   `[audio] enabled` remains `false` by default. Client→host mic is out of
+>   scope for v1 and tracked as OQ-02b (Linux-first, post-v1).
 > - **Webcam redirection (client→host virtual camera)** — stripped from v1 to
 >   keep scope tight. Open questions before re-introduction: server-side decoder
 >   choice (recommend OpenH264 decoder, reusing the existing encoder add-on's

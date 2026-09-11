@@ -96,6 +96,11 @@ pub struct FrameLoop {
     hw_encoder: Option<Box<dyn hwencode::HwEncoderHandle>>,   // None on the software path
     converter: Option<encode::Converter>,                     // rotate + BGRA/RGBA→YUV + scale to
                                                               //   output dims; None on the HW path
+    // ── Idle suspension (GAP_TRIAGE OQ-04) ───────────────────────────────────
+    wake: Arc<tokio::sync::Notify>,      // signalled by set_session_count_callback on 0→N
+    authed_clients: Arc<AtomicU32>,      // AUTHENTICATED sessions; never `client_count()`
+    idle_since: Option<Instant>,         // Some while parked; drives idle_release_after
+    released: bool,                      // true when Stage 2 dropped capture+encoder
     cursor: Option<CursorPublisher>,                          // Some ONLY when `FrameLoop::open()`
                                                               //   resolved cursorMode="separate". Owns
                                                               //   no OS handle; the CursorCapturer
@@ -729,6 +734,13 @@ aliasing to prevent.
                                         because the pipeline holds no session state.
    - server.set_new_client_callback   → `{ let f = kf_req.clone(); move || f.store(true, Ordering::Release) }`
                                         (the server already gates on the cached keyframe)
+   - server.set_session_count_callback → `{ let n = authed.clone(); let w = wake.clone();
+                                        move |c: u32| { let prev = n.swap(c, Ordering::AcqRel);
+                                                        if prev == 0 && c > 0 { w.notify_one(); } } }`
+                                        — the frame loop's idle gate. One atomic
+                                        swap plus, on 0→N only, one notify; the
+                                        server invokes it outside every session
+                                        lock (MODULE_SERVER "Public Interface").
    - server.set_keyframe_request_callback → the SAME closure over another `kf_req` clone
                                         (the server applies all three rate-limiting
                                         stages before invoking)
@@ -897,9 +909,15 @@ impl FrameLoop {
     ///      "embedded", leave `self.cursor = None` and
     ///      `clear_cap(abi::AddonCaps::CURSOR)` so the poll is skipped by
     ///      construction.
-    ///   5. Build the encode side for `self.plan.active_id(Component::Encode)`:
-    ///      `self.hw_encoder` on the zero-copy path, else `self.converter` +
-    ///      `self.encoder` via `build_software_path`.
+    ///   5. Build the encode side for `self.plan.active_id(Component::Encode)`
+    ///      via the selected `EncoderAddon`, calling the ONE constructor valid
+    ///      for its `kind()`: `EncoderAddon::new_hw(HWEncoderConfig)` →
+    ///      `self.hw_encoder` on the zero-copy path, else
+    ///      `EncoderAddon::new_sw(EncoderConfig)` → `self.encoder`, paired with
+    ///      `self.converter`, via `build_software_path`. Calling the wrong one
+    ///      for the add-on's kind returns `PipelineError::AddonBackend`
+    ///      ("Capability Probing"). Both MUST be called on this thread, which
+    ///      this step is.
     ///   6. Read `params_capability()` through each handle's
     ///      `as_configurable()` accessor and publish the first `Applied` on
     ///      `applied_tx` with `caps: Some(..)` (see `stream::Applied.caps`), and
@@ -929,6 +947,26 @@ impl FrameLoop {
         loop {
             if cancel.is_cancelled() { break; }
             if let Some(e) = self.pending_terminal.take() { self.terminate(&cancel, e.clone()); return Err(e); }
+
+            // (0-) IDLE GATE (Stage 1, unconditional — GAP_TRIAGE OQ-04).
+            //      With no authenticated session there is nobody to send to, and
+            //      capturing / converting / encoding into empty rings is pure
+            //      waste. Park on a Notify the server signals when a session
+            //      COMPLETES AUTH (lifecycle step 12), not when one is accepted:
+            //      waking on accept would make an unauthenticated connection a
+            //      capture-start primitive.
+            if self.authed_clients.load(Ordering::Acquire) == 0 {
+                self.stats.set_idle(true);
+                self.idle_since = Some(Instant::now());
+                // Stage 2 (opt-in): after [capture] idle_release_after of zero
+                // sessions, release the capturer + encoder entirely. Rebuilt by
+                // FrameLoop::open() on wake. See "Idle suspension" below.
+                self.maybe_release_idle();
+                self.wake.notified().await;
+                self.stats.set_idle(false);
+                self.on_idle_wake(&mut last_frame_t);   // see "Idle suspension"
+                continue;                                // re-enter with fresh params
+            }
 
             // (0) Drain the funnel and fold EVERY queued delta into ONE
             //     reconfigure — this is what makes "concurrent resize requests are
@@ -1731,6 +1769,64 @@ software path this is what turns "advertises 60, delivers 20" into "advertises
 and delivers 20", with no per-add-on fps table to maintain and no probe metadata
 to plumb.
 
+### Idle suspension
+
+With no authenticated session there is nobody to send to, and the frame loop
+would otherwise pace, capture, convert, encode and broadcast into empty rings
+forever. Two stages, deliberately unequal in cost and in risk (GAP_TRIAGE
+OQ-04):
+
+| | Mechanism | Frees | Wake cost | Default |
+|---|---|---|---|---|
+| **Stage 1** | The loop parks on `wake.notified()` at step (0-) instead of `sleep_to_interval` | encode work, colour conversion, readback bandwidth | sub-frame; every object stays alive | **always on** |
+| **Stage 2** | After `[capture] idle_release_after` of continuous idle, drop the capturer and encoder; rebuild via `FrameLoop::open()` on wake | the GPU encode session, the DXGI duplication handle, the IddCx virtual display | a full `FrameLoop::open()` | **off** (`"0s"`) |
+
+Stage 1 is unconditional because it has no failure mode: the handles are
+untouched, so waking is just resuming a loop. Stage 2 releases real OS and GPU
+resources and therefore has to be asked for.
+
+**Counting rule — authenticated sessions only.** The gate reads
+`authed_clients`, fed by `set_session_count_callback`
+([`MODULE_SERVER.md`](./MODULE_SERVER.md) steps 12b and 21). It is **not**
+`Server::client_count()`, which counts connected-but-possibly-unauthed sessions:
+gating capture on accepted sessions would make an unauthenticated TCP connection
+a capture-start primitive, which is a denial-of-service lever and a privacy one
+(an unauthenticated peer could start the host capturing its screen).
+
+**Stage 2 fires on the 0→1 transition and no other.** `maybe_release_idle()`
+releases only while `authed_clients == 0` and `idle_since` is older than
+`idle_release_after`, sets `released = true` and calls
+`Stats::record_idle_release()`; `on_idle_wake()` rebuilds via `FrameLoop::open()`
+only when `released` is true, and clears it.
+A rebuild on any *other* transition — a second viewer joining, a controller
+handover — is TD-26 ("a join never restarts the capturer") walking back in, and
+it is the one regression this feature can cause. The 1→2 case never reaches this
+code at all, because the loop is not parked.
+
+Two interactions must hold or the feature regresses something else:
+
+- **Sustainable-rate control is RESET across a pause, never fed by it.**
+  The controller lowers `params.fps` toward the 5 fps floor from the observed
+  p95 frame time ("Sustainable-rate control" above). A parked loop produces no
+  frames, so feeding the gap to the controller — or simply leaving its window
+  populated with pre-idle samples — makes an idle host wake up advertising
+  5 fps to the very first viewer. `on_idle_wake()` therefore clears the p95
+  window and restores `params.fps` to `fps_ceiling`, so the controller
+  re-derives the sustainable rate from post-wake evidence only.
+- **Pacing restarts, it does not catch up.** `on_idle_wake()` sets
+  `last_frame_t = Instant::now()` and zeroes `skip_budget`. Without this the
+  overrun arithmetic at step (1) sees an arbitrarily long interval, computes a
+  large `owe`, and burns the first frames after every wake as "skipped".
+
+The first-frame-after-idle case needs no new machinery: the cached IDR is stale
+by definition, so the existing join path (`MODULE_SERVER` step 14) forces a
+fresh one within `idle_keyframe_ms + join_idr_timeout`.
+
+**Observability.** `featherdesk_capture_idle` (gauge, `Stats::set_idle`) is 1
+while parked, and `featherdesk_idle_releases_total` counts Stage 2 releases. An
+idle host that shows 0 for the gauge is a wake that never parked — the bug this
+metric exists to catch.
+
 ### Audio Loop (Separate Thread)
 
 ```rust
@@ -2395,6 +2491,9 @@ impl Stats {
     pub fn set_effective_fps(&self, fps: u32) { /* … */ }
     pub fn set_effective_bitrate_kbps(&self, kbps: u32) { /* … */ }
     pub fn set_poisoned(&self, set: &std::collections::HashSet<String>) { /* replaces the guarded copy */ }
+    /// Idle suspension (frame thread). `set_idle(true)` on park, `false` on wake.
+    pub fn set_idle(&self, idle: bool) { /* capture_idle = idle as u64 */ }
+    pub fn record_idle_release(&self) { /* idle_releases += 1 (Stage 2 only) */ }
     // ── CursorPublisher, on the frame thread ────────────────────────────────
     pub fn record_cursor_update(&self) { /* cursor_updates += 1, including idle re-sends */ }
     pub fn record_cursor_shape(&self) { /* cursor_shapes += 1 */ }
@@ -2640,7 +2739,7 @@ unless noted.
 | `featherdesk_audio_chunks_total` | counter | `Stats.record_audio_chunk`, audio thread (0 while audio deferred) | PCM chunks encoded |
 | `featherdesk_audio_drops_total` | counter | `Stats.record_audio_drop`, audio thread | audio chunks dropped |
 | `featherdesk_frame_time_seconds` | summary | `Stats.record_frame` (60-sample window) | capture→broadcast latency; exports min/max/avg/p95/p99 |
-| `featherdesk_datagram_send_drops_total` | counter | `FrameOut::dropped()`, labeled `kind` (`video`/`audio`) | per-session ring drop-oldest events (the fast-path congestion signal) |
+| `featherdesk_datagram_send_drops_total` | counter | `FrameOut::dropped()`, labeled `kind` (`video`/`audio`) **and `reason`** (`congestion`/`policy`) | per-session ring drop-oldest events. `reason="congestion"` is the fast-path congestion signal; `reason="policy"` is a `[transport] per_session_max_bps` drop and is **excluded** from the adaptive loop (MODULE_TRANSPORT "Per-session pacing cap") |
 | `featherdesk_rtt_seconds` | gauge | QUIC `smoothed_rtt` (+ app ping/pong) | per-session RTT, labeled `client` (an opaque ordinal — see below); also the adaptive input |
 | `featherdesk_effective_bitrate_kbps` | gauge | `Stats.effective_bitrate_kbps`, written by `apply_params` | current adaptive target bitrate |
 | `featherdesk_effective_fps` | gauge | `Stats.effective_fps`, written by `apply_params` | current target fps — the rate the frame loop is actually pacing at |
@@ -2651,6 +2750,8 @@ unless noted.
 | `featherdesk_param_changes_failed_total` | counter | `Stats.param_changes_failed`, written by `report_param_failure` | parameter changes the encoder/capturer refused |
 | `featherdesk_addon_poisoned` | gauge=1 | `FrameLoop.poisoned` via `Stats.set_poisoned` | one series per poisoned add-on, labeled `addon` and `component` |
 | `featherdesk_adaptive_reference_client` | gauge=1 | `stream::Manager` | which session the adaptive loop is tuning to (label `client`) |
+| `featherdesk_capture_idle` | gauge | `FrameLoop` step (0-) via `Stats::set_idle` | 1 while the frame loop is parked with zero authenticated sessions, 0 otherwise |
+| `featherdesk_idle_releases_total` | counter | `Stats::record_idle_release`, from `FrameLoop::maybe_release_idle` | Stage 2 releases of the capturer + encoder after `[capture] idle_release_after` |
 | `featherdesk_cursor_updates_total` | counter | `CursorPublisher::tick` | CursorUpdate datagrams sent (including idle re-sends) |
 | `featherdesk_cursor_shapes_total` | counter | `CursorPublisher::tick` | Shape records written across all sessions |
 | `featherdesk_cursor_errors_total` | counter | `on_cursor_error` | `next_cursor` failures |

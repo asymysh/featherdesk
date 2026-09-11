@@ -150,7 +150,9 @@ pub trait Server: Send + Sync {
     /// named reader is the metrics exporter, which calls
     /// `stats.set_client_count(server.client_count())` immediately before each
     /// scrape (MODULE_PIPELINE "Exported metrics catalog") — that is what feeds
-    /// `featherdesk_clients`.
+    /// `featherdesk_clients`. This counts CONNECTED sessions regardless of auth
+    /// state; the authenticated-only count the idle gate needs is delivered by
+    /// `set_session_count_callback`, not by this method.
     fn client_count(&self) -> u32;
 
     /// Supplies the current session-independent config to send to each new client
@@ -168,6 +170,20 @@ pub trait Server: Send + Sync {
     /// reads; it does not touch the encoder (MODULE_PIPELINE "Main Frame Loop",
     /// steps 0c and 3).
     fn set_new_client_callback(&self, f: Box<dyn Fn() + Send + Sync>);
+
+    /// Fires with the current count of AUTHENTICATED sessions every time that
+    /// count changes, in both directions: incremented at lifecycle step 12 (auth
+    /// complete) and decremented at step 21 (session close), including the
+    /// idle-timeout close on either carrier. It is deliberately NOT
+    /// `client_count()`, which counts connected sessions whether or not they have
+    /// authed: the named consumer is the frame loop's idle gate (MODULE_PIPELINE
+    /// "Idle suspension"), and gating capture on *accepted* sessions would make an
+    /// unauthenticated connection a capture-start primitive.
+    ///
+    /// The callback is invoked OUTSIDE any session lock and must not block: the
+    /// pipeline's implementation is one atomic store plus, on a 0→N transition,
+    /// one `Notify::notify_one()`.
+    fn set_session_count_callback(&self, f: Box<dyn Fn(u32) + Send + Sync>);
 
     /// Fires for each BINARY input frame from the controller (or a co-op player's
     /// gamepad records). The callback (input::Dispatcher::dispatch) decodes +
@@ -722,6 +738,14 @@ carrier-independent.
         last_params:     carried.map(|s| s.last_params).unwrap_or(applied.borrow().params),
     }). Because this happens AFTER step 11, the cache can never hold a role the server
     did not grant.
+12b. The session is now AUTHENTICATED. Increment the authenticated-session count
+    and invoke `set_session_count_callback` with the new value. On the 0→1
+    transition this is what wakes the frame loop out of its idle park
+    (MODULE_PIPELINE "Idle suspension"), and it happens here — after auth, before
+    the joiner is seeded at step 14 — so the first frame the new session waits
+    for is one the loop has actually been woken to produce. The wake is
+    sub-frame, and step 14's existing stale-IDR path already forces a fresh
+    keyframe, so no extra first-frame machinery is needed.
 13. Write {"type":"auth_ok",…} on the control stream — the EFFECTIVE role, the
     gamepad slot, this session's SessionId, takeover_allowed, resumed, and (only on
     a downgrade) requested_role + downgrade_reason. The payload is
@@ -833,6 +857,13 @@ carrier-independent.
     - If this session held the controller slot, CAS it back to empty and invoke the
       controller-change callback (input::Dispatcher::release_all) so nothing stays
       held down on the host.
+    - If the session had AUTHED, decrement the authenticated-session count and
+      invoke `set_session_count_callback` with the new value. A session that
+      never completed auth (closed by `auth_deadline`, or refused at step 9)
+      never incremented it and must not decrement it. This is the path that
+      returns the frame loop to idle when the last viewer leaves, and it runs
+      for every close reason — including the WebSocket idle timeout
+      (MODULE_TRANSPORT "Liveness on both carriers").
     - Drain in-flight file-transfer streams.
     - Update the SessionCache entry under this session's key with
       SessionCache::update_if_present(key, current_effective_role,
@@ -879,6 +910,25 @@ carrier-independent.
   deliberately: overflow is a capacity condition, and a `4401` here would make the
   client discard its cached token and burn its single `/auth` retry over a transient
   16-deep queue.
+- **Admission-time egress guard (`[server] max_egress_bps`, 0 = off):** checked
+  at lifecycle step 9, in the same place and on the same path as `max_clients`.
+  A session is refused when
+  `(authenticated_sessions + 1) × current_stream_bitrate_bps > max_egress_bps`,
+  with `close::SERVER_FULL (4429)` and reason `"max_egress"` — a distinct reason
+  string from `"max_clients"` so the two capacity refusals are separable in a
+  log, but deliberately the **same close code**, because both are "no capacity,
+  retry later" and neither is a credential failure.
+  `current_stream_bitrate_bps` is read from `applied.borrow().params.bitrate`,
+  the bitrate actually in force, not the configured ceiling: a host that has
+  adapted down to 4 Mbps can admit more viewers than one running at 25 Mbps, and
+  that is the intended behaviour.
+  This is a **count gate, not a shaper.** It makes silent oversubscription of the
+  host uplink an explicit refusal; it does not make an already-admitted session
+  use less bandwidth. For that, see `[transport] per_session_max_bps`
+  (MODULE_TRANSPORT "Per-session pacing cap"). The guard is re-evaluated only at
+  admission, so an adaptive bitrate *rise* can carry the room above the ceiling
+  — accepted deliberately, because retroactively evicting a live session to
+  satisfy a config key is worse than exceeding it.
 - **Input rate limit:** per-client token bucket at `server.input_rate_limit`
   events/sec (default 1000). `mousemove` events are coalesced (only the latest
   position is kept). Excess events are silently dropped at the input-reader
@@ -1448,6 +1498,10 @@ Allow configurable number of controllers (for pair programming). Input events wo
 | Unit | frame_out drop-oldest under overflow (no mid-frame fragment drop) | No |
 | Integration | WebTransport handshake + datagram + stream delivery | No |
 | Integration | Client disconnect cleanup (no panic, count=0) | No |
+| Integration | Egress guard: with `max_egress_bps` set to just under `3 × current bitrate`, the third session is refused with `close::SERVER_FULL (4429)` reason `"max_egress"` while the first two stream normally; with the key at `0` all three are admitted | No |
+| Unit | The egress guard reads the bitrate actually in force (`applied.borrow().params.bitrate`), not `[stream.adaptive] max_bitrate_bps`: after the adaptive loop halves the bitrate, a session previously refused is admitted | No |
+| Integration | Idle suspension: with zero authenticated sessions `featherdesk_capture_idle` is 1 and no frames are broadcast; a session completing auth (step 12b) wakes the loop and the first frame arrives within `idle_keyframe_ms + join_idr_timeout`. An accepted-but-unauthed connection does **not** wake it | No |
+| Unit | The session-count callback fires on auth (step 12b) and on close (step 21), and never for a session that closed before authing — an `auth_deadline` timeout leaves the count unchanged | No |
 | Integration | `base_path = "/desk/"` moves **every** route on **both** listeners together: `/desk/`, `/desk/cert-hashes`, `/desk/healthz`, `/desk/wt`, `/desk/ws`, `/desk/auth`, `/desk/pair`, `/desk/logout` all answer, and each bare-path equivalent returns 404. Proves no route keeps the old prefix | No |
 | Integration | With `base_path = "/desk/"` the SPA served at `/desk/` opens its carrier against `/desk/wt` (or `/desk/ws`) and fetches `/desk/cert-hashes`, all derived from `location.pathname` — no hardcoded `/` anywhere in the bundle | No |
 | Unit | The route table this module installs matches **bare** paths regardless of `base_path`: with `base_path = "/desk/"` the `HttpRouter` receives `/auth`, not `/desk/auth`. Proves the strip happens in the transport and is not duplicated here | No |

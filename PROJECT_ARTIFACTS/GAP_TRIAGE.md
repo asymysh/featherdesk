@@ -13,16 +13,25 @@ Numbering order is **decision dependency**: OQ-01 changes what the transport is
 for, which feeds OQ-05/06; OQ-02 and OQ-03 add the features OQ-07's UI would
 expose. It is not a priority order — the recommended sequence is at the end.
 
-| ID | Was | Open question | Recommendation | Lands |
-|----|-----|---------------|----------------|-------|
-| OQ-01 | C11 | Is the WebSocket carrier a fallback or a supported production path, given Cloudflare + P2P? | Reclassify it, and give it liveness | v1 |
-| OQ-02 | C5+C6 | Does v1 ship with sound? And is client→host mic ever in scope? | Re-trigger audio on *Linux* video working; mic Linux-first, post-v1 | v1 / later |
-| OQ-03 | C4 | Should the host desktop mode follow the client window (and DPI)? | No mode-set on Linux; let the client drive encoder output dims + DPR | v1 |
-| OQ-04 | G5 | Should capture/encode suspend when nobody is connected? | Yes — pause the loop; release objects behind a config key | v1 |
-| OQ-05 | G7 | Can bitrate be capped per user? | Admission-time egress guard + per-session pacing cap | v1 |
-| OQ-06 | G6 | Can we multi-encode one capture into per-user tiers? | Not as simulcast in v1; per-session `Sequence` + temporal layers first | v1.x / v2 |
-| OQ-07 | C13 | How much in-session control surface, and where? | Ship the tier that only wires up messages that already exist | v1 |
-| OQ-08 | C2 | What does a headless deployment actually look like? | Fix the docs defect now; decide the product question separately | v1 (docs) |
+| ID | Was | Open question | Recommendation | Lands | Status |
+|----|-----|---------------|----------------|-------|--------|
+| OQ-01 | C11 | Is the WebSocket carrier a fallback or a supported production path, given Cloudflare + P2P? | Reclassify it, and give it liveness | v1 | ✅ **Specced** — carrier reclassified, carrier-generic liveness, named loss owner, performance budget, reachability recipe |
+| OQ-02 | C5+C6 | Does v1 ship with sound? And is client→host mic ever in scope? | Re-trigger audio on *Linux* video working; mic Linux-first, post-v1 | v1 / later | ✅ **Decided** — trigger changed to Linux-only; `[audio] enabled` stays `false` by default. Mic split out as OQ-02b, post-v1 |
+| OQ-03 | C4 | Should the host desktop mode follow the client window (and DPI)? | No mode-set on Linux; let the client drive encoder output dims + DPR | v1 | ✅ **Specced** — Linux mode-set recorded permanently out of scope; native is now a per-dimension ceiling, not the aspect ratio; client sends device pixels |
+| OQ-04 | G5 | Should capture/encode suspend when nobody is connected? | Yes — pause the loop; release objects behind a config key | v1 | ✅ **Specced** — Stage 1 unconditional, Stage 2 behind `[capture] idle_release_after`, both regression interactions specced |
+| OQ-05 | G7 | Can bitrate be capped per user? | Admission-time egress guard + per-session pacing cap | v1 | ✅ **Specced** — `[server] max_egress_bps` + `[transport] per_session_max_bps`; policy drops excluded from the congestion reducer |
+| OQ-06 | G6 | Can we multi-encode one capture into per-user tiers? | Not as simulcast in v1; per-session `Sequence` + temporal layers first | v1.x / v2 | 🔓 **Open** — step (1), the role policy, is settled (controller-only, role gate table rows 10-11). Steps 2-4 remain v1.x/v2 and need the ABI-break batching decision |
+| OQ-07 | C13 | How much in-session control surface, and where? | Ship the tier that only wires up messages that already exist | v1 | ✅ **Specced** — T1 panel + T1+ Keyboard Lock in `ui.js`; T2 explicitly deferred to OQ-02/03/06 |
+| OQ-08 | C2 | What does a headless deployment actually look like? | Fix the docs defect now; decide the product question separately | v1 (docs) | ✅ **Specced** — Xvfb claim corrected, two no-root add-ons specced. The *product* question (does FeatherDesk provision a virtual display?) is still open |
+
+> **Status as of 2026-09-11.** Seven of eight open questions are resolved in the
+> spec tree; OQ-06 remains open beyond its first step. Resolved here means
+> *specced and internally consistent*, not *built* — no code exists yet
+> (`BRANCH.md` "Current Status"). Two product questions survive their OQ and are
+> deliberately not closed by spec text: whether FeatherDesk should provision a
+> virtual display (OQ-08), and whether Cloudflare's terms permit sustained video
+> on the intended plan tier (OQ-01 item 5) — both are owner/business calls, not
+> engineering ones.
 
 ---
 
