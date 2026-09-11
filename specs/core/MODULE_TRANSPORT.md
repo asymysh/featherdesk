@@ -249,6 +249,13 @@ pub struct Config {
     pub bind: SocketAddr,  // "0.0.0.0:30084" — bound BOTH as TCP and as UDP
     pub tls: TlsConfig,    // certificate sources (same as MODULE_SERVER); one
                            // rustls ServerConfig backs both listeners
+    pub base_path: String, // [server] base_path — "/" (default) or a prefix that
+                           // begins AND ends with "/", e.g. "/desk/". The transport
+                           // STRIPS it from every request path before anything else
+                           // sees it, so the router and every handler always match
+                           // bare paths. This is the whole implementation of the
+                           // prefix — see "Base path" below. Validated by
+                           // MODULE_CONFIG; this field may assume it is well-formed.
     // There is deliberately no `http` field: the route table arrives after
     // construction, through `Transport::set_http_router`. The server owns the routes
     // and takes the Transport by value, so it cannot exist yet here; and
@@ -598,6 +605,37 @@ exist on one carrier and be missing on the other.
 | TCP + TLS 1.3 | `h2`, `http/1.1` | `/`, `/cert-hashes`, `/healthz`, `/auth`, `/pair`, `/logout`, and the `/ws` WebSocket upgrade (`http/1.1` only) |
 | UDP + QUIC (HTTP/3) | `h3` | the same routes, plus the `/wt` WebTransport upgrade. `/ws` is not served over h3. |
 
+Both rows are written at `base_path = "/"`. Under any other prefix every path in
+this document — the routes above, `/wt` and `/ws` included — is served at
+`<base_path><path-without-leading-slash>`, because of the strip described next.
+
+### Base path
+
+`[server] base_path` (default `"/"`) is the single prefix a deployment behind a
+reverse proxy or tunnel that terminates on a subpath sets, so that `/desk/` ends
+up serving what `/` would. **It is implemented in exactly one place: the
+transport strips it from `req.uri().path()` on both listeners, before routing
+and before the `/wt` / `/ws` upgrade match.** A request whose path does not
+begin with the prefix gets a 404 there and never reaches the router.
+
+That location is the point. The two upgrade endpoints are matched by *this*
+crate and every other route by the server's `HttpRouter`, so a prefix applied
+per handler — or applied in the router only — would move the ordinary routes and
+leave `/wt` and `/ws` behind at the bare path: a 404 that appears only in
+production, on the one request that matters. Stripping once, upstream of both,
+makes "every route moves together" a property of the code path rather than a
+rule each handler has to remember. Downstream, the router and every handler
+match bare paths and cannot tell which prefix is in force.
+
+Two consequences worth stating:
+
+- **The metrics listener is a separate bind and is NOT prefixed** — it is not
+  proxied, and `[metrics] bind` already gives it its own address.
+- **The client must not hardcode `/`.** The SPA derives its own prefix from
+  `location.pathname` (see "How the client selects" and
+  [`../client/MODULE_WEB_CLIENT.md`](../client/MODULE_WEB_CLIENT.md)), so the
+  same embedded bundle serves any prefix with no rebuild.
+
 **The TCP listener is what makes the origin loadable.** A browser's first
 navigation to an origin is always TCP; it will not attempt HTTP/3 to a host it
 has never spoken to. Serving `GET /` only over HTTP/3 means the SPA can never be
@@ -803,9 +841,20 @@ rotate_before = "3d"               # self-signed mode: regenerate when < this re
 #  deny_unknown_fields, so a min_version key would be rejected. See MODULE_SERVER.)
 
 [transport]
-# Tunables for the QUIC transport. Defaults are good; expose for ops debugging.
-keepalive_period         = "15s"   # QUIC keepalive PINGs (transport-level liveness)
-max_idle_timeout         = "30s"   # QUIC closes after this much silence (must be > keepalive_period)
+# NOTE: [server] base_path is also sourced into transport::Config (this crate owns
+# the prefix strip — see "Base path"); it is documented under [server] because that
+# is where an operator looks for it.
+# Tunables for the transport. Defaults are good; expose for ops debugging.
+# keepalive_period and max_idle_timeout are CARRIER-GENERIC: identical semantics on
+# both carriers, implemented per carrier (QUIC PING frames / WebSocket Ping opcode).
+# See "Liveness on both carriers".
+keepalive_period         = "15s"   # keepalive cadence (transport-level liveness).
+                                   #   WebTransport: QUIC keepalive PINGs.
+                                   #   WebSocket:    a WebSocket Ping control frame.
+max_idle_timeout         = "30s"   # close after this much silence (must be > keepalive_period).
+                                   #   WebTransport: QUIC's own idle timeout.
+                                   #   WebSocket:    an app-side timer in the session task,
+                                   #                 because TCP supplies no equivalent.
 ping_interval            = "2s"    # app-level Ping datagram cadence (RTT sampling, NOT liveness;
                                    # 0 disables). See MODULE_SERVER "Keepalive, liveness & timeouts".
 initial_max_data         = "10MiB" # initial connection-level flow control window
@@ -826,9 +875,10 @@ datagram_send_queue_frames = 8     # per-session video out-queue depth in WHOLE 
                                    # fragment-granular — see "Datagram Fragmentation".
 audio_send_queue_chunks  = 25      # per-session audio out-queue depth in WHOLE chunks (a
                                    # SEPARATE FrameOut ring, ~500 ms at frame_ms = 20, drop-oldest)
-websocket_fallback       = true    # serve the degraded WebSocket carrier on /ws.
-                                   # false → /ws returns 501 and UDP-blocked clients
-                                   # cannot connect at all. See "Carrier selection".
+websocket_fallback       = true    # serve the WebSocket carrier on /ws.
+                                   # false → /ws returns 501, and UDP-blocked clients
+                                   # AND every tunnelled deployment cannot connect at
+                                   # all. See "Carrier selection".
 ws_max_message_bytes     = "16MiB" # inbound cap on the fallback carrier; must be >= the
                                    # 16 MiB per-frame reassembly cap
 ws_send_queue_bytes      = "8MiB"  # fallback carrier out-queue byte ceiling; exceeding it
@@ -902,23 +952,101 @@ same on both**; only the envelope differs. The fallback is a second
 the transport crate knows which carrier it is running on, except the one `carrier`
 field in the `config` message and the `carrier` metric label.
 
-| | WebTransport (preferred) | WebSocket (fallback) |
+| | WebTransport (preferred) | WebSocket (supported) |
 |---|---|---|
 | Endpoint | `/wt` on the UDP/QUIC listener | `/ws` on the TCP listener, `http/1.1`, subprotocol `featherdesk.v1` |
 | Lanes | one QUIC stream per tag + a datagram lane | one TCP connection; every message is tagged (below) |
 | Media loss behaviour | late frame dropped at the transport, other lanes unaffected | retransmitted; **all lanes stall together** |
 | Browser floor | Chrome 107 / Edge 98 / Firefox 130 / Safari 26.4 | Chrome 107 / Edge 98 / Firefox 130 / Safari 16.4 |
 | Works on UDP-blocked networks | no | yes |
+| Works through an HTTP-proxying tunnel (e.g. Cloudflare Tunnel) | **no** | yes |
+| Liveness | QUIC keepalive PING + idle timeout | WebSocket Ping + app-side idle timer (see below) |
+| Loss visible to the adaptive loop | `PathStats.lost_packets` | **no** — client `stats` only (see below) |
 
-**This mode is degraded, on purpose.** A WebSocket runs over one TCP connection,
-so every lane shares one ordered byte stream: a single lost packet stalls video,
-audio, input, control and clipboard together until the retransmit lands. That is
-precisely the property WebTransport was chosen to eliminate (see "Why WebTransport
-(QUIC), not WebSocket" above, which remains the reason it is the *preferred*
-carrier). At 1% loss the fallback is visibly worse; at 2% it is unpleasant. It is
-not a co-equal transport. The client shows the carrier in the HUD, the server logs
-it per session and labels `featherdesk_clients{carrier="websocket"}`, so a degraded
-deployment is visible rather than mysterious.
+**Lower performance, but a supported path — not a curiosity.** A WebSocket runs
+over one TCP connection, so every lane shares one ordered byte stream: a single
+lost packet stalls video, audio, input, control and clipboard together until the
+retransmit lands. That is precisely the property WebTransport was chosen to
+eliminate (see "Why WebTransport (QUIC), not WebSocket" above, which remains the
+reason it is the *preferred* carrier). At 1 % loss it is visibly worse; at 2 % it
+is unpleasant.
+
+It is nevertheless **a first-class supported path**, and the spec says so
+deliberately, because it is not reachable only by accident:
+
+- **UDP-blocked networks** — the original reason, and still real.
+- **Safari below 26.4** — the WebCodecs floor is 16.4, so this is the only
+  carrier for a range of shipping Safari versions.
+- **Any tunnel that proxies HTTP rather than forwarding UDP.** A Cloudflare
+  Tunnel is the case that matters: `cloudflared` proxies HTTP/1.1 and HTTP/2 to
+  the origin, so WebTransport cannot traverse it and **every** session over such
+  a tunnel uses this carrier. Deployments that reach the host through one are
+  therefore *permanently* on it, not temporarily degraded.
+
+The consequence for this spec is that the WebSocket carrier may not be
+under-specified relative to WebTransport. Anything QUIC provides for free must
+have a named owner here: liveness (below), the loss signal (below), and a
+performance budget ("Performance targets"). The two carriers are still not
+equal — the client shows which one is in use in the HUD, the server logs it per
+session and labels `featherdesk_clients{carrier="websocket"}` — but "degraded"
+describes its *throughput under loss*, not its support status.
+
+> **Reachability recipe (v1).** v1 performs no NAT traversal and runs no relay.
+> Where the client cannot reach the host directly, the two recommended paths
+> differ in which carrier they yield, and the difference is large enough to
+> choose deliberately:
+> - **An overlay/VPN that forwards UDP** (WireGuard, Tailscale, ZeroTier) carries
+>   QUIC end to end, so it keeps the **WebTransport** carrier and full
+>   performance. This is the recommended non-LAN path in v1.
+> - **An HTTP-proxying tunnel** (Cloudflare Tunnel and similar) yields the
+>   **WebSocket** carrier only, with the loss behaviour above.
+>
+> See [`../v2/MODULE_NETWORK.md`](../v2/MODULE_NETWORK.md) for the v2 plan to
+> remove the manual step.
+
+### Liveness on both carriers
+
+`keepalive_period` and `max_idle_timeout` are **carrier-generic**: identical
+semantics, one implementation per carrier. There are deliberately no `ws_*`
+twins, because two knobs for one question is how a deployment ends up reaped on
+one carrier and immortal on the other.
+
+| | WebTransport | WebSocket |
+|---|---|---|
+| Keepalive | QUIC keepalive PING frames at `keepalive_period` | A **WebSocket Ping control frame** at `keepalive_period`; the peer's Pong is the liveness evidence. This is the RFC 6455 Ping opcode, *not* the app-level `Ping` datagram (frame type 2) |
+| Idle close | QUIC closes the connection after `max_idle_timeout` of no received packets | An **app-side timer in the session task**: no Pong and no inbound message for `max_idle_timeout` → close with `close::NORMAL` and tear the session down exactly as a QUIC idle close would |
+
+**Why the app-side timer is mandatory.** TCP supplies no usable equivalent:
+default keepalives are measured in hours, and a half-open connection through a
+tunnel can survive far longer than that. Without this timer a vanished
+WebSocket client holds a `max_clients` slot — and, if it was the controller,
+**the controller slot** — until the OS gives up, which is the difference between
+a 30 s recovery and an operator restart. The timeout MUST also release the
+controller slot and invoke `set_controller_change_callback`
+(→ `input::Dispatcher::release_all`), on the same path as any other session
+close, so nothing a departed controller was holding stays held down
+([`MODULE_SERVER.md`](./MODULE_SERVER.md) lifecycle step 21).
+
+The app-level `Ping` **datagram** (`ping_interval`) is unchanged on both
+carriers and remains an RTT sample only, never a liveness check.
+
+### The loss signal on the WebSocket carrier
+
+`PathStats.lost_packets` is always 0 here — TCP retransmits below the
+application, so loss is invisible at this layer and appears as latency instead.
+The adaptive loop therefore has a **named** per-carrier source, rather than a
+silently-blind SLOW path:
+
+| Tier | WebTransport source | WebSocket source |
+|---|---|---|
+| FAST (immediate cut) | `frame_out` drop-oldest on the reference session | **unchanged** — the send-queue policy still drops whole access units under back-pressure, and that is a true congestion signal on either carrier |
+| SLOW (windowed) | `PathStats.lost_packets` + client `stats` | **client `stats` only** — the client already reports its own loss and decode statistics (R-CLI-06), and it is the only observer of loss on this path |
+
+An implementation that reads `lost_packets` alone and skips the client `stats`
+line satisfies neither carrier: it is blind on WebSocket and merely
+worse-informed on WebTransport. See
+[`MODULE_STREAM_PARAMS.md`](./MODULE_STREAM_PARAMS.md) "Congestion-Reactive
+Bitrate Control".
 
 ### How the client selects
 
@@ -929,6 +1057,14 @@ const STICKY_MS      = 600_000;   // 10 min: re-probe QUIC after this
 const WT_DEADLINE_MS = 3_000;
 const WS_DEADLINE_MS = 5_000;
 
+// The prefix this bundle is served under ([server] base_path, "/" by default).
+// index.html is served at <base>/, so location.pathname IS the base for the
+// entry document; derive it once and build every URL from it. Nothing in the
+// client may hardcode "/" — see MODULE_TRANSPORT "Base path".
+const BASE = location.pathname.endsWith("/")
+    ? location.pathname
+    : location.pathname.replace(/[^/]*$/, "");
+
 async function openCarrier(opts) {
     let sticky = null;
     try { sticky = JSON.parse(sessionStorage.getItem(STICKY_KEY) || "null"); } catch {}
@@ -936,7 +1072,7 @@ async function openCarrier(opts) {
                          && Date.now() - sticky.at < STICKY_MS;
 
     if (!skipWt && "WebTransport" in window) {
-        const wt = new WebTransport(`https://${location.host}/wt`, opts);
+        const wt = new WebTransport(`https://${location.host}${BASE}wt`, opts);
         try {
             await withDeadline(wt.ready, WT_DEADLINE_MS);
             try { sessionStorage.removeItem(STICKY_KEY); } catch {}
@@ -947,7 +1083,7 @@ async function openCarrier(opts) {
         }
     }
 
-    const ws = new WebSocket(`wss://${location.host}/ws`, "featherdesk.v1");
+    const ws = new WebSocket(`wss://${location.host}${BASE}ws`, "featherdesk.v1");
     ws.binaryType = "arraybuffer";
     await withDeadline(onceOpen(ws), WS_DEADLINE_MS);
     try { sessionStorage.setItem(STICKY_KEY,
@@ -956,6 +1092,10 @@ async function openCarrier(opts) {
 }
 ```
 
+- `BASE` is derived, never configured: the client is told nothing about
+  `base_path`, it simply builds every URL relative to where it was served from.
+  A bundle that hardcoded `/wt` would 404 under any prefix, and would do so only
+  in the proxied deployment that set one.
 - The 3 s WebTransport deadline is what makes a UDP-blackholing firewall (no ICMP
   reject, packets simply vanish) fall through instead of hanging: the QUIC
   handshake has no failure signal there, only silence.
@@ -1070,9 +1210,44 @@ reliable lane is a broken client, not a slow one.
 | Integration | `reload_tls` swaps the certified key with an established session still streaming: the session is unaffected and the next handshake presents the new chain | No |
 | Integration | `auth_deadline` (default 5s): a session that never completes the control-stream auth handshake is closed with `close::AUTH_TIMEOUT (4408)` | No |
 | Integration | `keepalive_period < max_idle_timeout` is enforced as a config invariant; a session survives an idle gap shorter than `max_idle_timeout` via QUIC keepalive PINGs | No |
+| Integration | **WebSocket liveness.** A `/ws` session whose peer stops responding (socket held open, no Pong, no inbound message — a half-open TCP connection) is closed within `max_idle_timeout`; the `max_clients` count returns to its prior value and, if that session held the controller slot, the slot is released and `set_controller_change_callback` fires so `release_all` runs. Proves the app-side timer exists and is not waiting on TCP | No |
+| Integration | **WebSocket keepalive.** An idle `/ws` session with a responsive peer survives indefinitely: Ping control frames go out at `keepalive_period`, Pongs come back, and the idle timer never fires | No |
+| Unit | The WebSocket **Ping control frame** (liveness) and the app-level **`Ping` datagram** (frame type 2, RTT) are distinct: disabling `ping_interval = 0` leaves keepalive working, and a missing app-level pong never closes a session | No |
+| Unit | On the WebSocket carrier the SLOW adaptive tier reads client `stats` and not `PathStats.lost_packets` (which is 0): with a client reporting 5 % loss the loop reduces bitrate, and with `lost_packets` mocked non-zero on that carrier the loop ignores it | No |
+| Integration | **`base_path` strip covers the upgrade paths.** With `base_path = "/desk/"`, `/desk/wt` and `/desk/ws` complete their upgrades and bare `/wt` and `/ws` return 404 — proving the prefix is stripped upstream of the carrier-specific match, not applied inside the router | No |
+| Unit | A request path that does not begin with `base_path` is 404'd by the transport and the `HttpRouter` is never invoked | No |
 | Integration | `allow_origin = ""` (default) rejects a cross-origin WebTransport upgrade and a cross-origin `/ws` upgrade; `"*"` accepts both | No |
 | Integration | A mis-tagged stream (unknown tag, second `0x00`, `0x01` from a viewer) is cancelled at stream scope; the session and its other streams keep running | No |
 | Load | `fileStreamBudget` ceiling: a client that opens more file-transfer streams than advertised has the extras flow-controlled by QUIC (the open promise never settles); its 10 s open deadline fires and surfaces `too_many_streams` per file. The session, the control/input/clipboard streams and the in-flight transfers are unaffected — no panic, no stall | No |
+
+---
+
+## Performance Targets
+
+`MODULE_TRANSPORT` previously carried no numeric targets — the only module on the
+per-frame path without them (recorded in `BRANCH.md` "How to Use These Specs").
+Now that the WebSocket carrier is a supported path rather than a curiosity, the
+gap matters on the carrier that needs it most, so the budget is stated here.
+
+Both carriers, 1080p60, one 30 KB access unit per frame, measured server-side
+from `broadcast()` returning to the last byte handed to the OS socket:
+
+| Metric | WebTransport | WebSocket | Note |
+|--------|-------------:|----------:|------|
+| Enqueue → first byte on the wire (p50) | 0.3 ms | 0.3 ms | The pump's own work: header assembly + fragmentation. This is the slice of CENTRAL_SPEC's 2.0 ms "broadcast fan-out (25 clients)" row that belongs to the transport |
+| Enqueue → last byte on the wire, one session (p99) | 1.0 ms | 1.0 ms | Fragmentation loop for a 30 KB AU; no network wait on either carrier (both are fire-and-forget into kernel buffers) |
+| Fragmentation cost per access unit (p99) | 0.2 ms | 0 | The WebSocket carrier does not fragment — one message per AU |
+| Added motion-to-photon vs. WebTransport, 0 % loss | — | **≤ 1 ms** | On a clean path TCP and QUIC are equivalent; the carrier is not the cost |
+| Added motion-to-photon vs. WebTransport, 1 % loss | — | **30-60 ms** | One retransmit is a full RTT of head-of-line blocking for *every* lane. This row is the honest reason the carrier is not preferred, and it is a property of TCP, not of the implementation |
+| Session accept → `auth_ok` writable | <100 ms | <100 ms | Matches MODULE_SERVER "Connection setup" |
+| Idle session cost (no media flowing) | one PING per `keepalive_period` | one Ping frame per `keepalive_period` | Both carriers must be cheap enough that an idle viewer costs nothing measurable |
+
+Two of these are **derived, not measured**, and are labelled so rather than
+presented as observations: the 1 %-loss row follows from TCP's retransmit
+behaviour and the LAN RTT figure, and the enqueue-to-wire rows follow from the
+fan-out budget. The first implementation replaces them with real numbers under
+the same harness that produces the parity gate (`BRANCH.md` "Migration
+Strategy" step 3).
 
 ---
 

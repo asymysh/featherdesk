@@ -78,11 +78,14 @@ async function connect() {
     // 1. Certificate trust + pin. In self-signed mode the browser opens
     //    WebTransport ONLY if we pass the server cert's SHA-256(DER) hash(es) — a
     //    TLS click-through does NOT satisfy WebTransport. Read the current+previous
-    //    hashes from /cert-hashes (also inlined as <meta> in index.html for the
+    //    hashes from <base>cert-hashes (also inlined as <meta> in index.html for the
     //    first connect). CA-trusted mode returns [] / no spki_sha256, and we omit
     //    the option and skip pinning. Always re-fetched here so a cert rotation
     //    self-heals on reconnect. See MODULE_SERVER "Browser certificate trust".
-    const { hashes, spki_sha256 } = await (await fetch("/cert-hashes")).json();
+    // BASE is the prefix this bundle was served under ([server] base_path, "/" by
+    // default), derived from location.pathname — never hardcoded, never configured.
+    // See MODULE_TRANSPORT "Base path".
+    const { hashes, spki_sha256 } = await (await fetch(`${BASE}cert-hashes`)).json();
     if (spki_sha256 && !checkPin(location.origin, spki_sha256)) return;  // hard stop
     const opts = hashes.length ? {
         serverCertificateHashes: hashes.map(b64 =>

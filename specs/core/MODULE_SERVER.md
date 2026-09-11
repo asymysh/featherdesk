@@ -420,6 +420,26 @@ missing on the other. Entering `Transport::start` with no router installed is
 `ServerError::Transport` — a construction bug caught at startup rather than as a
 404 storm.
 
+Every path below is relative to **`[server] base_path`** (default `"/"`). A
+deployment behind a reverse proxy or tunnel that terminates on a subpath sets it
+once and every route moves together — `/desk/wt`, `/desk/ws`, `/desk/auth` and so
+on.
+
+**This module does not implement the prefix, and deliberately never sees it.**
+The transport strips `base_path` from the request path on both listeners before
+routing and before its own `/wt` / `/ws` upgrade match
+([`MODULE_TRANSPORT.md`](./MODULE_TRANSPORT.md) "Base path"), so the route table
+below is written — and matched — at bare paths under every prefix. That is the
+only placement that works: `/wt` and `/ws` are matched by the transport rather
+than by this router, so a prefix applied here would move every ordinary route
+and leave the two upgrade endpoints behind at the bare path. There is
+correspondingly **no `base_path` field on `server::Config`**; a second copy here
+would be a second thing to keep in step with the first.
+
+The SPA derives its own prefix from `location.pathname` rather than hardcoding
+`/`, so the same embedded bundle serves any prefix. The metrics listener is a
+separate bind and is **not** prefixed.
+
 | Path | Method | Handler | Description |
 |------|--------|---------|-------------|
 | `/` | GET | `rust-embed` service | Serves embedded web client (index.html + JS bundle); injects the current cert-hash `<meta>` in self-signed mode |
@@ -1179,7 +1199,7 @@ Three independent timers, each owning a distinct concern — do not conflate the
 | Timer | Layer | Default | What it does |
 |-------|-------|---------|--------------|
 | `auth_deadline` | app | 5 s | Closes a session that hasn't authed the control stream (`close::AUTH_TIMEOUT 4408`). Armed on session accept. |
-| `keepalive_period` / `max_idle_timeout` | QUIC | 15 s / 30 s | **The real liveness mechanism.** QUIC sends keepalive PINGs and closes the connection after `max_idle_timeout` of no received packets. Because the server streams datagrams that elicit client ACKs, a vanished client stops ACKing and is dropped within `max_idle_timeout`. No app logic needed. |
+| `keepalive_period` / `max_idle_timeout` | transport (**both carriers**) | 15 s / 30 s | **The real liveness mechanism**, and it must exist on both carriers — these two keys are carrier-generic (MODULE_TRANSPORT "Liveness on both carriers"). **WebTransport:** QUIC sends keepalive PINGs and closes after `max_idle_timeout` of no received packets; because the server streams datagrams that elicit ACKs, a vanished client is dropped automatically, with no app logic. **WebSocket:** QUIC's guarantees are absent, so the session task sends a WebSocket **Ping control frame** at `keepalive_period` and closes the session when no Pong and no inbound message has arrived for `max_idle_timeout`. TCP's own keepalives are measured in hours and a half-open connection through a tunnel outlives them, so without that app-side timer a vanished WebSocket client holds a `max_clients` slot — and the **controller slot** — until the OS gives up. An idle-timeout close runs the full step-21 path, including releasing the controller slot and firing `set_controller_change_callback` → `release_all`. |
 | `ping_interval` | app | 2 s | Server sends a `Ping` **datagram** (type 2, 4-byte `u32` LE nonce); client replies `{"type":"pong","nonce":…}` on the control stream. This is purely an **RTT sample** for the adaptive loop (MODULE_STREAM_PARAMS) — it is **NOT** a liveness check (lost ping/pong datagrams are normal and ignored). `ping_interval = 0` disables it and the adaptive loop uses QUIC `smoothed_rtt` alone. |
 
 - **No idle-input disconnect in v1.** A viewer (or an idle controller) that sends
@@ -1428,6 +1448,10 @@ Allow configurable number of controllers (for pair programming). Input events wo
 | Unit | frame_out drop-oldest under overflow (no mid-frame fragment drop) | No |
 | Integration | WebTransport handshake + datagram + stream delivery | No |
 | Integration | Client disconnect cleanup (no panic, count=0) | No |
+| Integration | `base_path = "/desk/"` moves **every** route on **both** listeners together: `/desk/`, `/desk/cert-hashes`, `/desk/healthz`, `/desk/wt`, `/desk/ws`, `/desk/auth`, `/desk/pair`, `/desk/logout` all answer, and each bare-path equivalent returns 404. Proves no route keeps the old prefix | No |
+| Integration | With `base_path = "/desk/"` the SPA served at `/desk/` opens its carrier against `/desk/wt` (or `/desk/ws`) and fetches `/desk/cert-hashes`, all derived from `location.pathname` — no hardcoded `/` anywhere in the bundle | No |
+| Unit | The route table this module installs matches **bare** paths regardless of `base_path`: with `base_path = "/desk/"` the `HttpRouter` receives `/auth`, not `/desk/auth`. Proves the strip happens in the transport and is not duplicated here | No |
+| Unit | `base_path` validation: a value not beginning and ending with `/`, or containing `..`, a query or a scheme, is a startup error | No |
 | Integration | New client receives bootstrap-stream IDR before live datagrams | No |
 | Integration | Multi-client broadcast fan-out | No |
 | Integration | Stale-IDR join: broadcast an IDR, broadcast 60 delta frames, then connect a second client — the bootstrap stream carries a **newly forced** IDR whose sequence equals `last_broadcast_seq`, and the client's first live frame is `bootstrapSeq + 1` | No |

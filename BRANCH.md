@@ -84,12 +84,14 @@ template variation:
 - **Internal architecture** — 4 of 19 specs (Web Client, Pipeline, Server, Clipboard).
 - **Refactoring directives** — numbered `R-XXX-NN` items, in 5 of 19; only the
   `R-PIP`/`R-SRV`/`R-PRO`/`R-CLI`/`R-AUD` prefixes exist.
-- **Performance targets** — numeric latency/CPU/memory goals, in 8 of 19
+- **Performance targets** — numeric latency/CPU/memory goals, in 9 of 19
   (Capture, Encode, Hardware Encode, Stream Params, Server, Web Client,
-  Pipeline, Audio). The one gap on the per-frame path is
-  **`MODULE_TRANSPORT`**; the parity gate (step 3 below) measures the
-  end-to-end number instead, and a per-module transport budget is written
-  when the first implementation gives it something to be derived from.
+  Pipeline, Audio, Transport). **`MODULE_TRANSPORT` was the one gap on the
+  per-frame path and no longer is**: promoting the WebSocket carrier to a
+  supported path made a per-carrier budget necessary, so it now carries one
+  ("Performance Targets"). Two of its rows are explicitly *derived, not
+  measured*, and labelled as such; the parity gate (step 3 below) replaces them
+  with real numbers under the same harness.
 
 **For an agent starting implementation:**
 
@@ -165,14 +167,19 @@ All five original tracks now have review + summary artifacts on disk under `PROJ
 
 Implementation-readiness analyses — per-feature clarity and wiring assessments — are in `PROJECT_ARTIFACTS/IMPLEMENTATION_READINESS_CORE_MEDIA.md` and `PROJECT_ARTIFACTS/IMPLEMENTATION_READINESS_INTERACTION_CLIENT_ADDONS.md`, each with a **Final Review Pass addendum** recording what was found and fixed afterwards. The QA acceptance suite (90 user stories across 8 areas, no open `GAP` citations) is in `PROJECT_ARTIFACTS/user_stories/`, indexed by `INDEX.md`.
 
+Two artifacts sit alongside those and answer different questions:
+
+- **`PROJECT_ARTIFACTS/GAP_TRIAGE.md`** — the competitive/feature gap review, triaged into eight open questions (`OQ-01`…`OQ-08`, each recording the decision and its consequences), a **closed findings** table that exists so settled decisions are not re-raised, and a recommended sequence. The OQ-08 and OQ-01 passes are what produced the two no-root Linux capture add-ons, the `kms_egl` headless correction, and the WebSocket carrier's promotion to a supported path.
+- **`QA/`** — release checklists for a **human on real hardware**, indexed by `QA/README.md`. Deliberately not the same thing as the user stories: those are acceptance criteria a test suite can assert, these are the 12 areas (preflight → platform sign-off) that only a person with a real GPU, a real network and a real second machine can confirm.
+
 **Final cross-module review.** The last pass audited *across* module boundaries rather than within them — for every consumer, asking who produces it. That is a different question from "is this module internally consistent", and it found three defects the per-module passes structurally could not: the cursor overlay had a wire type, a `send_cursor` method, and a client renderer but **no producer** (`send_cursor` had zero callers anywhere); the host→client clipboard direction had **no `Server` method and no drainer** despite two specs each describing the other's half; and the ABI had **no mechanism** for the host to learn which optional traits an add-on implements, since a `#[sabi_trait]` object cannot be downcast. All three are fixed (`CursorCapturer` + Contract 8, `send_clipboard` + Contract 9, `ProbeReport.caps`).
 
 **Mechanically verified invariants.** Each is a command, not an assertion — re-run them, do not re-read them:
 
 | Invariant | Check | Status |
 |---|---|---|
-| Every relative markdown link resolves | walk all 178 `.md` files, resolve every non-`http` link target | 0 broken |
-| TD ids are unique and none reads `GAP` | `grep -c '^| TD-' specs/CENTRAL_SPEC.md` = 40, distinct; `grep -rn GAP specs/` | 40 unique, 0 hits |
+| Every relative markdown link resolves | walk all 194 `.md` files, resolve every non-`http` link target | 0 broken (614 relative links, re-run 2026-09-11 after the OQ-08 pass and the QA checklists landed) |
+| TD ids are unique and none reads `GAP` | `grep -c '^| TD-' specs/CENTRAL_SPEC.md` = 40, distinct; `grep -rn GAP specs/ \| grep -v GAP_TRIAGE` — the exclusion is required since the OQ pass, because five specs now cite `PROJECT_ARTIFACTS/GAP_TRIAGE.md` by filename and a bare `grep GAP` matches the path, not an unresolved gap | 40 unique, 0 hits |
 | `StreamError` ↔ `AbiErr` mapping is total | `MODULE_ABI.md` "Testing Strategy" row 1 — a bijection within each of the four `AbiErr` domains, so it is total in both directions | total |
 | Every `server::Config` field has a named constructor | for each field in `MODULE_SERVER.md` `struct Config`, grep `MODULE_PIPELINE.md` step 7 for a bullet naming it; and for each step-7 bullet, grep `struct Config` for the field | all fields |
 | Every control-stream message type, wire frame type, and `AddonCaps` bit appears in ≥1 acceptance criterion | for each `pub const` in `MODULE_PROTOCOL.md` `mod frame_type`, each `"type"` in its "Control-stream JSON messages" table, and each `pub const` in `MODULE_ABI.md` `impl AddonCaps` except `KNOWN`, confirm a row in `PROJECT_ARTIFACTS/user_stories/COVERAGE.md` **and** a `- Given …` line naming it | 9/9 frame types, 16/16 messages, 8/8 caps bits |

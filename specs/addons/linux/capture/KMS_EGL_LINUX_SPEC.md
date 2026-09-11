@@ -420,12 +420,25 @@ Use this add-on when:
 - Have root or `CAP_SYS_ADMIN` available
 - Any GPU (universally compatible)
 - Want zero-copy to a HW encoder (lowest end-to-end latency)
-- Display server agnostic deployment (works on X11, Wayland GNOME/KDE/wlroots, or headless)
+- Display-server **agnostic** deployment — X11 and Wayland (GNOME/KDE/wlroots)
+  are equally fine, because this add-on reads scanout below both
 
 Skip when:
 - NVIDIA proprietary driver — prefer NvFBC add-on (~2–3ms lower latency)
-- No root available — no other capture add-on exists today; would need future
-  XShm or PipeWire portal add-on
+- **No root available** — use the `wl_screencopy` or `pw_portal` add-on
+- **No active KMS scanout** — see the requirement below
+
+> **Requires a real KMS CRTC.** This add-on imports the DRM/KMS **scanout**
+> framebuffer, so it needs a CRTC with a mode set and a compositor (or client)
+> rendering to it. It is display-server *agnostic*, **not** display-server
+> *optional*, and it does **not** work with Xvfb, Xephyr, or any other in-memory
+> X server — those never touch DRM, so there is no framebuffer to import and
+> capture yields nothing. A headless host needs a connected or force-enabled
+> connector (e.g. `video=HDMI-A-1:1920x1080e`) plus a compositor rendering to it;
+> otherwise use a no-root add-on. `probe()` MUST verify an active CRTC with a
+> mode and report `ROk(ProbeReport { available: false, reason })` when there is
+> none, so selection falls through rather than picking a capturer that returns
+> empty frames (`LINUX_SPEC.md` "Runtime probe order" step 2).
 
 ---
 

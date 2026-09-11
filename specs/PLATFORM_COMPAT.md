@@ -83,19 +83,49 @@ advertises a codec no attached client can decode (see
 
 ---
 
-## Capture — One Per Platform
+## Capture — One Per Platform (Linux: one default plus two no-root paths)
 
 The default binary has **no capture backend** on any OS; capture is always
 an opt-in add-on shared library.
 
 | Platform | Add-on ID | Mechanism | Headless support |
 |----------|-----------|-----------|------------------|
-| **Linux** | `kms_egl` (+ optional `nvfbc`) | KMS/DRM + EGL DMA-BUF zero-copy | Xvfb / virtual display |
+| **Linux** | `kms_egl` (+ optional `nvfbc`) | KMS/DRM + EGL DMA-BUF zero-copy | **Needs a real KMS CRTC** — see "Headless on Linux" below |
+| **Linux** (no-root / headless Wayland) | `wl_screencopy`, `pw_portal` | `wlr-screencopy` / `zwlr-export-dmabuf`, or the xdg-desktop-portal ScreenCast stream | Yes — no DRM master, no `CAP_SYS_ADMIN` |
 | **Windows** | `dxgi_dd` | DXGI Desktop Duplication → ID3D11Texture2D | Integrated IddCx virtual display (auto-installed) |
 | **macOS** | `sck` | ScreenCaptureKit → CMSampleBuffer / IOSurface | Virtual display driver |
 
-No fallbacks in the default binary. PipeWire / X11grab / WGC / GDI / Magnification
-were all considered and rejected — see per-OS capture READMEs.
+`kms_egl` remains the **recommended default** wherever root is available: it is
+the lowest-latency path and the only one that is display-server agnostic. The
+no-root add-ons exist for the deployments it cannot serve (see below), not to
+replace it. X11grab / WGC / GDI / Magnification remain rejected — see per-OS
+capture READMEs.
+
+### Headless on Linux (corrected)
+
+**`kms_egl` captures DRM/KMS *scanout*.** It therefore requires a CRTC with a
+mode set and a display server (or a client) actually rendering to it. Two
+consequences that earlier revisions of this file and `LINUX_SPEC.md` stated
+incorrectly:
+
+- **Xvfb does not work with `kms_egl`.** Xvfb renders into main memory and never
+  touches DRM, so there is no scanout buffer to import and the add-on captures
+  nothing. The same is true of Xephyr and any other in-memory X server.
+- **"No display server at all" does not work either.** With nothing rendering to
+  a CRTC there is no framebuffer to capture — the property `kms_egl` actually has
+  is *display-server **agnostic***, not *display-server **optional***.
+
+A genuinely headless `kms_egl` deployment therefore needs **a GPU with a
+connected or force-enabled connector** (e.g. kernel parameter
+`video=HDMI-A-1:1920x1080e` to force a disconnected output on) **plus a
+compositor rendering to it**. That is a supported configuration; it is simply not
+"run Xvfb".
+
+For headless where that is not achievable — no forced connector, a nested or
+virtual Wayland compositor, or no root — use the `wl_screencopy` or `pw_portal`
+add-on instead. `vkms` (the kernel's virtual KMS driver) was evaluated and
+rejected: it produces DRM planes but no accelerated, DMA-BUF-exportable
+framebuffer worth encoding.
 
 ---
 

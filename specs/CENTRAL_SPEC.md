@@ -361,13 +361,24 @@ for where any platform or add-on document lives — never duplicate specs, alway
 |--------|-----------|------|---------|--------|
 | KMS+EGL DMA-BUF | `kms_egl` | [`specs/addons/linux/capture/KMS_EGL_LINUX_SPEC.md`](./addons/linux/capture/KMS_EGL_LINUX_SPEC.md) | Universal — every GPU, any display server | 📋 Specced — Go prototype abandoned on tiled 10-bit scanout formats (see spec "Status") |
 | NvFBC | `nvfbc` | [`specs/addons/linux/capture/NVFBC_LINUX_SPEC.md`](./addons/linux/capture/NVFBC_LINUX_SPEC.md) | NVIDIA proprietary driver | 📋 Specced |
+| wlr-screencopy | `wl_screencopy` | [`specs/addons/linux/capture/WL_SCREENCOPY_LINUX_SPEC.md`](./addons/linux/capture/WL_SCREENCOPY_LINUX_SPEC.md) | Any GPU; wlroots-family compositor — **no root** | 📋 Specced, not measured |
+| Portal ScreenCast | `pw_portal` | [`specs/addons/linux/capture/PW_PORTAL_LINUX_SPEC.md`](./addons/linux/capture/PW_PORTAL_LINUX_SPEC.md) | Any GPU; any compositor with xdg-desktop-portal — **no root**, interactive consent | 📋 Specced, not measured |
 
-> **KMS+EGL is the recommended default capture add-on.** Works on X11, Wayland
-> (all compositors), and headless — it operates below the display server, so
-> display server choice is irrelevant. Requires root / `CAP_SYS_ADMIN`. No-root
-> fallback paths (XShm, PipeWire portal, wlr-screencopy, X11grab) were considered
-> and explicitly rejected — none beat KMS+EGL when root is available, and no-root
-> deployment is not currently a target.
+> **KMS+EGL is the recommended default capture add-on.** Works on X11 and
+> Wayland (all compositors) — it operates below the display server, so display
+> server choice is irrelevant. It requires root / `CAP_SYS_ADMIN` **and a real
+> KMS CRTC with a mode set**: it imports the DRM *scanout* framebuffer, so it is
+> display-server *agnostic*, not display-server *optional*, and it does **not**
+> work with Xvfb or any other in-memory X server. See
+> [`PLATFORM_COMPAT.md`](./PLATFORM_COMPAT.md) "Headless on Linux".
+>
+> **Two no-root add-ons cover what it cannot** (`wl_screencopy`, `pw_portal`) —
+> a host where `CAP_SYS_ADMIN` is not grantable, and headless Wayland with no
+> forceable connector. Neither is selected ahead of KMS+EGL, and neither reopens
+> containerized deployment: *no-root capture* and *run in Docker* are separate
+> claims and only the first is in scope. X11grab and XShm remain rejected; `vkms`
+> was evaluated and rejected (DRM planes but no accelerated, DMA-BUF-exportable
+> framebuffer).
 >
 > **Intel / AMD do not need capture add-ons** — neither vendor has a proprietary
 > capture API on Linux. KMS+EGL is the entire path.

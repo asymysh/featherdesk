@@ -551,7 +551,7 @@ aliasing to prevent.
       authoritative set is re-read from the constructed object at step 4 and may
       be a strict subset.
    d. Probe each loaded capture add-on (one shared library per add-on):
-      - Linux:   nvfbc → kms_egl
+      - Linux:   nvfbc → kms_egl → wl_screencopy → pw_portal
       - macOS:   sck
       - Windows: dxgi_dd (with optional IddCx VDD auto-install if no display)
       - Cursor eligibility: for every candidate the pipeline evaluates
@@ -649,9 +649,14 @@ aliasing to prevent.
     bootstrap, `/cert-hashes`, `/auth`, the `/ws` fallback upgrade, and the
     `Alt-Svc: h3=":<port>"` header) and as a UDP socket (QUIC/WebTransport), under
     one TLS configuration and one router — see MODULE_TRANSPORT "Two listeners,
-    one port". `transport::Config` has no `http` field: the route table arrives
-    after construction, when `Server::start` calls `Transport::set_http_router`.
-    The pipeline owns the transport and hands it to the server.
+    one port". `[server] base_path` is also sourced here, into
+    `transport::Config.base_path`: the transport strips the prefix from every
+    request before routing and before its own `/wt` / `/ws` upgrade match, which
+    is why it is a transport field and has no twin on `server::Config` (see
+    MODULE_TRANSPORT "Base path"). `transport::Config` has no `http` field: the
+    route table arrives after construction, when `Server::start` calls
+    `Transport::set_http_router`. The pipeline owns the transport and hands it to
+    the server.
 7. Create the server, filling **every** `server::Config` field
     (MODULE_SERVER "Public Interface") — the pipeline is the sole constructor,
     so an unfilled field here is a compile error rather than a runtime surprise:
@@ -2567,7 +2572,8 @@ dead backend's limits.
 The pipeline applies the identical two-level policy to **capturers**: the
 "3-9 consecutive → restart / 10 consecutive → poison + fall through" rows above
 are the capture ladder, and a capture add-on returning `Unrecoverable` is dropped
-and fallen through the capture probe order (`nvfbc → kms_egl`, etc.) the same
+and fallen through the capture probe order (`nvfbc → kms_egl → wl_screencopy →
+pw_portal` on Linux, etc.) the same
 way. A capture swap additionally re-resolves `cursorMode` against the new
 add-on's caps (see "Cursor publishing").
 

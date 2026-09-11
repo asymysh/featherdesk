@@ -159,6 +159,23 @@ Examples:
 # featherdesk.toml — example with every supported key shown at its default.
 
 [server]
+base_path    = "/"               # URL path prefix every route is served under, for a
+                                 # reverse proxy or tunnel that terminates on a subpath
+                                 # rather than a hostname root. "/" (default) = no prefix.
+                                 # MUST begin and end with "/" when not "/" (e.g. "/desk/").
+                                 # Applies uniformly to every route on BOTH listeners —
+                                 # /, /cert-hashes, /healthz, /wt, /ws, /auth, /pair,
+                                 # /logout — because a route that keeps the bare path while
+                                 # its siblings move is a 404 that only appears in
+                                 # production. Sourced into transport::Config, which STRIPS
+                                 # it before routing and before the /wt and /ws upgrade
+                                 # match, so the prefix has exactly one implementation and
+                                 # the two carrier-specific endpoints cannot be left behind
+                                 # (MODULE_TRANSPORT "Base path"). The SPA derives its own
+                                 # prefix from location.pathname and never hardcodes "/", so
+                                 # the same embedded bundle serves any prefix.
+                                 # NOT applied to the metrics listener, which is a separate
+                                 # bind and is not proxied.
 bind         = "0.0.0.0:30084"    # TCP *and* UDP listen address: HTTPS bootstrap +
                                   # HTTP/3 + WebTransport, one port (restart required)
 allow_origin = ""                 # empty = same-origin only (SECURE DEFAULT).
@@ -194,13 +211,25 @@ extra_sans    = []                # self-signed mode: extra SANs, e.g. ["host.la
 rotate_before = "3d"              # self-signed mode: regenerate when < this validity remains
 
 [transport]
-# Tunables for the QUIC / WebTransport transport (see MODULE_TRANSPORT.md).
-# Defaults are good; expose for ops debugging.
-keepalive_period        = "15s"   # QUIC keepalive PINGs (transport-level liveness)
-max_idle_timeout        = "30s"   # QUIC closes the session after this much silence (the
-                                  # real dead-peer mechanism). Must be > keepalive_period.
-ping_interval           = "2s"    # app-level Ping datagram cadence (RTT sampling, NOT liveness).
-                                  # 0 disables app pings (QUIC RTT only). See MODULE_SERVER
+# Tunables for the transport (see MODULE_TRANSPORT.md). Defaults are good; expose
+# for ops debugging. The two liveness keys are CARRIER-GENERIC — same semantics on
+# WebTransport and WebSocket, one implementation each. There are deliberately no
+# ws_* twins: two knobs for one question is how a deployment ends up reaped on one
+# carrier and immortal on the other.
+keepalive_period        = "15s"   # keepalive cadence (transport-level liveness).
+                                  #   WebTransport: QUIC keepalive PINGs.
+                                  #   WebSocket:    a WebSocket Ping control frame.
+max_idle_timeout        = "30s"   # close after this much silence (the real dead-peer
+                                  # mechanism). Must be > keepalive_period.
+                                  #   WebTransport: QUIC's own idle timeout.
+                                  #   WebSocket:    an app-side timer in the session task —
+                                  #                 TCP keepalives are measured in HOURS, so
+                                  #                 without it a half-open connection through a
+                                  #                 tunnel holds a max_clients slot, and the
+                                  #                 controller slot, until the OS gives up.
+ping_interval           = "2s"    # app-level Ping DATAGRAM cadence (RTT sampling, NOT liveness,
+                                  # and NOT the WebSocket Ping control frame above).
+                                  # 0 disables app pings (transport RTT only). See MODULE_SERVER
                                   # "Keepalive, liveness & timeouts".
 initial_max_data        = "10MiB" # initial connection-level flow control window
 initial_max_stream_data = "1MiB"  # per-stream flow control window
@@ -586,6 +615,35 @@ output_index     = 0             # Which connected CRTC/connector to capture (0 
 output_index     = 0              # Which NVIDIA output to capture
 capture_type     = "to_cuda"      # "to_cuda" | "to_sys" | "to_gl" — CUDA for direct NVENC pairing
 
+[addon_module_wl_screencopy]
+# Linux wlroots screencopy capture — NO ROOT. Headless / nested Wayland, or a host
+# that cannot grant CAP_SYS_ADMIN. wlroots-family compositors only (sway, Hyprland,
+# river, labwc, Wayfire); GNOME/KDE need pw_portal instead. Never selected ahead of
+# kms_egl. Cannot deliver a separate cursor, so a session on this add-on always
+# resolves cursorMode = "embedded". See WL_SCREENCOPY_LINUX_SPEC.md.
+output_name      = ""             # wl_output name, e.g. "HEADLESS-1", "DP-1". "" = first output.
+                                  # The per-capturer display selector; v1 captures exactly one
+                                  # display; see MODULE_CAPTURE "Display selection".
+protocol         = "auto"         # "auto" | "image_copy" | "export_dmabuf" | "screencopy".
+                                  # Forcing one the compositor does not advertise is a probe
+                                  # failure, never a silent fallback.
+prefer_dmabuf    = true           # false forces the shm path (diagnostic only; costs zero-copy)
+
+[addon_module_pw_portal]
+# Linux xdg-desktop-portal ScreenCast capture — NO ROOT. The only no-root path on
+# GNOME/KDE Wayland. Costs an INTERACTIVE CONSENT PROMPT on first launch; later
+# launches reuse a restore token. Never selected ahead of kms_egl or wl_screencopy.
+# See PW_PORTAL_LINUX_SPEC.md.
+restore_token_file = ""           # "" = <state dir>/featherdesk/pw_portal.token (mode 0600).
+                                  # Holds the portal restore token, which is a capability to
+                                  # capture this user's screen — it is deliberately NOT stored
+                                  # in this file, which is operator-authored and hot-reloaded.
+allow_prompt       = true         # false = never open a consent dialog; with no valid token,
+                                  # probe() reports available:false reason "consent_required"
+                                  # so selection falls through. Set false on unattended hosts.
+output_name        = ""           # Monitor-name hint where the backend honours one; the portal
+                                  # remains the authority over source choice.
+
 [addon_module_dxgi_dd]
 # Windows DXGI Desktop Duplication.
 adapter_index    = -1             # -1 = adapter with active display. 0+ = specific DXGI adapter.
@@ -680,6 +738,7 @@ value is present but fails its rule; an **absent** key always takes its default 
 
 | Key | Type | Default | Valid range / domain | Hot | On invalid |
 |-----|------|---------|----------------------|-----|-----------|
+| `server.base_path` | string | `"/"` | `"/"`, or a path beginning **and** ending with `/` (e.g. `"/desk/"`); no `..`, no query, no scheme. Sourced into `transport::Config`, not `server::Config` — the transport strips it (MODULE_TRANSPORT "Base path") | ❌ | startup error |
 | `server.bind` | string | `"0.0.0.0:30084"` | `host:port`; host parses as an IP literal or a hostname; port 1–65535. One address, two listeners (TCP + UDP) | ❌ | startup error |
 | `server.allow_origin` | string | `""` | `""` (same-origin) or `"*"` or an exact origin `scheme://host[:port]` | ✅ | startup error |
 | `server.max_clients` | u32 | `25` | 1–100 | ✅ (new sessions) | startup error |

@@ -32,46 +32,86 @@ capture/
 
 | Add-on | Add-on ID | Hardware | Spec | When to use |
 |--------|-----------|----------|------|------------|
-| **KMS+EGL DMA-BUF** | `kms_egl` | Any GPU, any display server | [`capture/KMS_EGL_LINUX_SPEC.md`](./capture/KMS_EGL_LINUX_SPEC.md) | Universal default — requires `CAP_SYS_ADMIN` |
+| **KMS+EGL DMA-BUF** | `kms_egl` | Any GPU, any display server | [`capture/KMS_EGL_LINUX_SPEC.md`](./capture/KMS_EGL_LINUX_SPEC.md) | Universal default — requires `CAP_SYS_ADMIN` **and a real KMS CRTC** |
 | **NvFBC** | `nvfbc` | NVIDIA proprietary driver, X11 only | [`capture/NVFBC_LINUX_SPEC.md`](./capture/NVFBC_LINUX_SPEC.md) | ~2–3ms lower than KMS+EGL on NVIDIA proprietary; official NVIDIA path; pairs with NVENC encoder for full zero-copy GPU-resident pipeline |
+| **wlr-screencopy** | `wl_screencopy` | Any GPU; wlroots-family compositor | [`capture/WL_SCREENCOPY_LINUX_SPEC.md`](./capture/WL_SCREENCOPY_LINUX_SPEC.md) | **No root.** Headless/nested Wayland, or any deployment that cannot grant `CAP_SYS_ADMIN` |
+| **Portal ScreenCast** | `pw_portal` | Any GPU; any compositor with xdg-desktop-portal | [`capture/PW_PORTAL_LINUX_SPEC.md`](./capture/PW_PORTAL_LINUX_SPEC.md) | **No root.** GNOME/KDE Wayland where `wl_screencopy` is unavailable; costs an interactive consent prompt |
 
-KMS+EGL operates at the kernel/DRM level below the display server, so it works
-on X11, Wayland (GNOME/KDE/wlroots), or no display server at all. The only
-constraint is `CAP_SYS_ADMIN`:
+KMS+EGL operates at the kernel/DRM level below the display server, so it is
+display-server **agnostic** — X11 and Wayland (GNOME/KDE/wlroots) alike. It is
+**not** display-server *optional*: it captures DRM/KMS **scanout**, so it needs a
+CRTC with a mode set and something rendering to it. Its two constraints are
+therefore `CAP_SYS_ADMIN`:
 
 ```bash
 sudo setcap cap_sys_admin+p ./featherdesk
 ```
+
+…and a real CRTC. **Xvfb does not satisfy the second** — it renders into main
+memory and never touches DRM, so `kms_egl` on an Xvfb-only host captures
+nothing. A headless `kms_egl` host needs a connected or force-enabled connector
+(e.g. `video=HDMI-A-1:1920x1080e`) plus a compositor rendering to it. See
+[`../../PLATFORM_COMPAT.md`](../../PLATFORM_COMPAT.md) "Headless on Linux".
 
 NvFBC is the only capture path that beats KMS+EGL on any hardware — and only on
 NVIDIA under X11, where KMS+EGL has historically been finicky with the
 proprietary driver. Intel and AMD do not need capture add-ons; neither vendor has
 a proprietary capture API on Linux, so KMS+EGL is the entire path.
 
-Both add-ons report the pointer separately — `kms_egl` from the DRM cursor plane
-(X11 and Wayland alike), `nvfbc` from XFixes — and both can embed it instead when
-the session resolves `cursorMode = "embedded"`. Each spec's "Cursor Handling"
-section is normative for which capability bits it declares.
+`kms_egl` and `nvfbc` report the pointer separately — `kms_egl` from the DRM
+cursor plane (X11 and Wayland alike), `nvfbc` from XFixes — and both can embed it
+instead when the session resolves `cursorMode = "embedded"`. The two no-root
+add-ons differ from each other here, and it is the sharpest distinction between
+them:
 
-**No no-root fallback paths exist today.** If a deployment needs to run without
-root, that requirement will be addressed when it comes up — likely as a future
-XShm or PipeWire portal add-on.
+- **`pw_portal` can** — portal `cursor_mode = Metadata` delivers pointer position
+  and the cursor bitmap as PipeWire buffer metadata, so it declares `CURSOR` when
+  the backend grants that mode. It is fixed for the session's life, because it is
+  a `SelectSources` argument rather than a runtime switch.
+- **`wl_screencopy` cannot** — no wlroots protocol reports the pointer to a
+  screencopy client at all, so it never declares `CURSOR`, always resolves
+  `cursorMode = "embedded"`, and is **ineligible** under
+  `[capture] cursor_mode = "separate"`: the pipeline skips it at selection rather
+  than streaming a pointerless desktop (MODULE_CAPTURE "Cursor delivery",
+  MODULE_PIPELINE step 3d).
+
+Each spec's "Cursor Handling" section is normative for which capability bits it
+declares.
+
+**Two no-root paths now exist** (`wl_screencopy`, `pw_portal`), and they are
+add-ons like every other backend — dropping them in changes nothing about the
+default. They exist for two deployments `kms_egl` structurally cannot serve:
+a host where `CAP_SYS_ADMIN` is not grantable, and headless Wayland with no
+forceable connector. Neither is a container story — FeatherDesk is not a
+containerized application (see `PROJECT_ARTIFACTS/GAP_TRIAGE.md`, closed finding
+C1); *no-root capture* and *run in Docker* are separate claims and only the first
+is in scope. Both add-ons are slower than `kms_egl` and neither is chosen ahead
+of it when it is available.
 
 ### Runtime probe order
 
 ```
 1. nvfbc loaded AND NVIDIA proprietary driver present AND X11?      → use NvFBC
-2. kms_egl loaded AND root / CAP_SYS_ADMIN?                         → use KMS+EGL
-3. None of the above?                                                → fatal: no capture
+2. kms_egl loaded AND root / CAP_SYS_ADMIN AND a CRTC with a mode?  → use KMS+EGL
+3. wl_screencopy loaded AND a wlroots-family compositor?            → use wlr-screencopy
+4. pw_portal loaded AND a portal ScreenCast session is granted?     → use Portal
+5. None of the above?                                                → fatal: no capture
 ```
+
+Step 2's CRTC condition is part of `kms_egl.probe()`: a host with the capability
+but no active scanout reports `available: false` with a `reason` naming it, so
+the order falls through to a no-root add-on instead of selecting a capturer that
+would return empty frames.
 
 NvFBC is an X11-only API, so under Wayland it reports
 `ProbeReport { available: false, reason }` — not an error — and `kms_egl` is the
 whole Linux path there.
 
 The first available capture wins. See [`capture/README.md`](./capture/README.md)
-for recommended add-on combinations and the documented reasoning for why other
-paths (wlr-screencopy, XShm, X11grab, etc.) were considered and rejected.
+for recommended add-on combinations and the documented reasoning for which other
+paths were considered and rejected — XShm, X11grab and `vkms` remain rejected;
+wlr-screencopy and the PipeWire portal do **not**, and are the two no-root
+add-ons above.
 
 ---
 

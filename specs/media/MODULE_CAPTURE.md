@@ -473,6 +473,8 @@ across every capture add-on, named per each backend's native concept:
 | `kms_egl` (Linux) | `output_index` | `0` | connected CRTC/connector index |
 | `nvfbc` (Linux) | `output_index` | `0` | NvFBC output index |
 | `dxgi_dd` (Windows) | `output_index` (+ `adapter_index`) | `0` | `IDXGIOutput` index |
+| `wl_screencopy` (Linux) | `output_name` | `""` | `wl_output` name (e.g. `HEADLESS-1`, `DP-1`); `""` = the compositor's first output |
+| `pw_portal` (Linux) | `output_name` | `""` | a monitor-name *hint*; the portal remains the authority over source choice |
 | `sck` (macOS) | `display_id` | `0` | main display sentinel / a `CGDirectDisplayID` (`NSScreenNumber`), not an index |
 
 - **Default `0` = the primary/first active display.**
@@ -497,10 +499,21 @@ The module intentionally does NOT support:
 
 - **X11grab via ffmpeg subprocess** — rejected (subprocess overhead, no
   zero-copy path, deprecated in favor of KMS+EGL)
-- **PipeWire ScreenCast** — rejected (GNOME-specific, Mutter D-Bus
-  dependency, no zero-copy)
-- **wlr-screencopy** — rejected (wlroots-specific, no obvious advantage
-  over KMS+EGL)
+- **X11-specific capture (XShm, XComposite/XDamage)** — rejected; KMS+EGL
+  covers X11, and no X11-only deployment needs a no-root path the two Wayland
+  add-ons do not cover better
+- **`vkms` (kernel virtual KMS)** — evaluated as a headless answer for KMS+EGL
+  and rejected: DRM planes with no accelerated, DMA-BUF-exportable framebuffer
+
+> **PipeWire ScreenCast and wlr-screencopy are no longer rejected.** Both are now
+> capture add-ons — [`pw_portal`](../addons/linux/capture/PW_PORTAL_LINUX_SPEC.md)
+> and [`wl_screencopy`](../addons/linux/capture/WL_SCREENCOPY_LINUX_SPEC.md).
+> The original rejection ("no advantage over KMS+EGL") held only under the
+> assumption that KMS+EGL is always available, and it is not: it needs root **and
+> an active KMS CRTC**, so it cannot serve a host that grants no
+> `CAP_SYS_ADMIN`, nor headless Wayland with no forceable connector. Neither
+> add-on is selected ahead of KMS+EGL, and neither reopens containerized
+> deployment (see `PROJECT_ARTIFACTS/GAP_TRIAGE.md`, closed finding C1).
 - **Windows WGC / GDI / Magnification** — rejected (slower than DXGI DD
   with no benefit)
 - **Pipeline-level frame buffering** — capture add-ons are pull-latest:
@@ -514,6 +527,8 @@ The module intentionally does NOT support:
 |--------|-----------|----|------|
 | KMS+EGL DMA-BUF | `kms_egl` | Linux | [`specs/addons/linux/capture/KMS_EGL_LINUX_SPEC.md`](../addons/linux/capture/KMS_EGL_LINUX_SPEC.md) |
 | NvFBC | `nvfbc` | Linux | [`specs/addons/linux/capture/NVFBC_LINUX_SPEC.md`](../addons/linux/capture/NVFBC_LINUX_SPEC.md) |
+| wlr-screencopy (no root) | `wl_screencopy` | Linux | [`specs/addons/linux/capture/WL_SCREENCOPY_LINUX_SPEC.md`](../addons/linux/capture/WL_SCREENCOPY_LINUX_SPEC.md) |
+| Portal ScreenCast (no root) | `pw_portal` | Linux | [`specs/addons/linux/capture/PW_PORTAL_LINUX_SPEC.md`](../addons/linux/capture/PW_PORTAL_LINUX_SPEC.md) |
 | ScreenCaptureKit | `sck` | macOS | [`specs/addons/macos/capture/SCK_MACOS_SPEC.md`](../addons/macos/capture/SCK_MACOS_SPEC.md) |
 | DXGI Desktop Duplication (+ IddCx headless) | `dxgi_dd` | Windows | [`specs/addons/windows/capture/DXGI_DD_WINDOWS_SPEC.md`](../addons/windows/capture/DXGI_DD_WINDOWS_SPEC.md) |
 
